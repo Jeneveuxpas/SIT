@@ -51,8 +51,9 @@ def main(args):
     assert torch.cuda.is_available(), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
     torch.set_grad_enabled(False)
 
-    # Setup DDP:
-    dist.init_process_group("nccl")
+    # Setup DDP with extended timeout for npz creation
+    import datetime
+    dist.init_process_group("nccl", timeout=datetime.timedelta(minutes=30))
     rank = dist.get_rank()
     device = rank % torch.cuda.device_count()
     seed = args.global_seed * dist.get_world_size() + rank

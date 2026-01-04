@@ -110,7 +110,8 @@ class SILoss:
                 # loop across different encoders
                 for z, z_tilde, z_tilde_original in zip(zs, zs_tilde, zs_tilde_original):
                     # NOTE: We pass vision_feats, projected_sit_feats, and unprojected_sit_feats, but the last one might not be used
-                    proj_loss = proj_loss + proj_loss_fn(z, z_tilde, z_tilde_original)
+                    proj_loss = proj_loss + proj_loss_fn(z, z_tilde, z_tilde_original,
+                                                         d_alpha_t=d_alpha_t, d_sigma_t=d_sigma_t)
                 proj_loss /= len(zs)
             proj_loss_dict[proj_loss_name] = proj_loss.detach().item()
             proj_loss_dict[f"{proj_loss_name}_weighted"] = proj_loss.detach().item() * coeff

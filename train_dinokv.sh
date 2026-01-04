@@ -201,38 +201,38 @@ if [ "$USE_ADALN_DINO" = true ]; then
     ADALN_ARGS="--use-adaln-dino --adaln-dropout ${ADALN_DROPOUT}"
 fi
 
-accelerate launch \
-    ${MULTI_GPU_ARGS} \
-    --main_process_port ${MASTER_PORT} \
-    --num_processes ${GPU_COUNT} \
-    --mixed_precision fp16 \
-    train_dinokv.py \
-    --exp-name ${EXP_NAME} \
-    --output-dir exps \
-    --data-dir ${DATA_DIR} \
-    --model ${MODEL} \
-    --enc-type ${ENCODER_TYPE} \
-    --encoder-depth ${ENCODER_DEPTH} \
-    --projection-layer-type ${PROJECTION_LAYER_TYPE} \
-    --dino-layer-indices ${DINO_LAYER_INDICES} \
-    --sit-layer-indices ${SIT_LAYER_INDICES} \
-    --stage1-ratio ${STAGE1_RATIO} \
-    --align-mode ${ALIGN_MODE} \
-    --proj-coeff ${PROJ_COEFF} \
-    --distill-coeff ${DISTILL_COEFF} \
-    --batch-size ${BATCH_SIZE} \
-    --gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
-    --learning-rate ${LEARNING_RATE} \
-    --max-train-steps ${MAX_STEPS} \
-    --checkpointing-steps ${CHECKPOINT_STEPS} \
-    --sampling-steps ${SAMPLING_STEPS} \
-    --resume-step ${RESUME_STEP} \
-    --mixed-precision fp16 \
-    --allow-tf32 \
-    --repa-loss \
-    --spnorm-method zscore \
-    --num-workers 12 \
-    ${ADALN_ARGS}
+# accelerate launch \
+#     ${MULTI_GPU_ARGS} \
+#     --main_process_port ${MASTER_PORT} \
+#     --num_processes ${GPU_COUNT} \
+#     --mixed_precision fp16 \
+#     train_dinokv.py \
+#     --exp-name ${EXP_NAME} \
+#     --output-dir exps \
+#     --data-dir ${DATA_DIR} \
+#     --model ${MODEL} \
+#     --enc-type ${ENCODER_TYPE} \
+#     --encoder-depth ${ENCODER_DEPTH} \
+#     --projection-layer-type ${PROJECTION_LAYER_TYPE} \
+#     --dino-layer-indices ${DINO_LAYER_INDICES} \
+#     --sit-layer-indices ${SIT_LAYER_INDICES} \
+#     --stage1-ratio ${STAGE1_RATIO} \
+#     --align-mode ${ALIGN_MODE} \
+#     --proj-coeff ${PROJ_COEFF} \
+#     --distill-coeff ${DISTILL_COEFF} \
+#     --batch-size ${BATCH_SIZE} \
+#     --gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
+#     --learning-rate ${LEARNING_RATE} \
+#     --max-train-steps ${MAX_STEPS} \
+#     --checkpointing-steps ${CHECKPOINT_STEPS} \
+#     --sampling-steps ${SAMPLING_STEPS} \
+#     --resume-step ${RESUME_STEP} \
+#     --mixed-precision fp16 \
+#     --allow-tf32 \
+#     --repa-loss \
+#     --spnorm-method zscore \
+#     --num-workers 12 \
+#     ${ADALN_ARGS}
 
 # 检查训练是否成功
 

@@ -143,7 +143,8 @@ class SILossWithDINOKV:
             proj_loss = torch.tensor(0.0, device=images.device, dtype=images.dtype)
             if len(zs) > 0 and zs_tilde is not None and len(zs_tilde) > 0:
                 for z, z_tilde, z_tilde_original in zip(zs, zs_tilde, zs_tilde_original):
-                    proj_loss = proj_loss + proj_loss_fn(z, z_tilde, z_tilde_original)
+                    proj_loss = proj_loss + proj_loss_fn(z, z_tilde, z_tilde_original, 
+                                                         d_alpha_t=d_alpha_t, d_sigma_t=d_sigma_t)
                 proj_loss /= len(zs)
             proj_loss_dict[proj_loss_name] = proj_loss.detach().item()
             proj_loss_dict[f"{proj_loss_name}_weighted"] = proj_loss.detach().item() * coeff
