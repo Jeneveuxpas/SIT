@@ -17,7 +17,8 @@
 #   --gpu               使用哪张GPU (默认: 0,1)
 #
 # 示例:
-#   ./train_dinokv.sh --gpu 0,1 --dino-layers 9 --sit-layers 3 --encoder-depth 6 --align-mode attn_mse --proj-coeff 1.0 --distill-coeff 2.0 --max-steps 100000 --stage1-ratio 0.3  --projection-layer-type conv --proj-kwargs-kernel-size 3 --projection-loss-type mse_v  --kv-norm-type zscore
+#   ./train_dinokv.sh --gpu 2,3 --dino-layers 9 --sit-layers 3 --encoder-depth 6 --projection-loss-type mse_v --proj-coeff 1.0 --max-steps 400000 --stage1-ratio 0.25 --distill-coeff 2.0 --projection-layer-type linear --align-mode attn_mse 
+#   ./train_dinokv.sh --gpu 0,1 --dino-layers 9 --sit-layers 3 --encoder-depth 6 --projection-loss-type mse_v --proj-coeff 1.0 --max-steps 100000 --stage1-ratio 0.3 --distill-coeff 2.0 --kv-proj-type conv --align-mode attn_mse --kv-norm-type zscore
 # ============================================================================
 
 set -e
@@ -69,16 +70,12 @@ while [[ $# -gt 0 ]]; do
             EXP_NAME_ARG="$2"
             shift 2
             ;;
-        --projection-layer-type)
-            PROJECTION_LAYER_TYPE_ARG="$2"
-            shift 2
-            ;;
-        --proj-kwargs-kernel-size)
-            PROJ_KWARGS_KERNEL_SIZE_ARG="$2"
-            shift 2
-            ;;
         --projection-loss-type)
             PROJECTION_LOSS_TYPE_ARG="$2"
+            shift 2
+            ;;
+        --kv-proj-type)
+            KV_PROJ_TYPE_ARG="$2"
             shift 2
             ;;
         --kv-norm-type)
@@ -112,10 +109,9 @@ STAGE1_RATIO="${STAGE1_RATIO_ARG:-0.3}"
 ALIGN_MODE="${ALIGN_MODE_ARG:-logits_attn}"
 PROJ_COEFF="${PROJ_COEFF_ARG:-1.0}"
 DISTILL_COEFF="${DISTILL_COEFF_ARG:-1.0}"
-PROJECTION_LAYER_TYPE="${PROJECTION_LAYER_TYPE_ARG:-mlp}"
-PROJ_KWARGS_KERNEL_SIZE="${PROJ_KWARGS_KERNEL_SIZE_ARG:-3}"
 PROJECTION_LOSS_TYPE="${PROJECTION_LOSS_TYPE_ARG:-cosine}"
 KV_NORM_TYPE="${KV_NORM_TYPE_ARG:-layernorm}"
+KV_PROJ_TYPE="${KV_PROJ_TYPE_ARG:-conv}"
 
 # ============================================================================
 # 训练配置
@@ -156,13 +152,12 @@ SIT_LAYERS_NAME=$(echo ${SIT_LAYER_INDICES} | tr ',' '_')
 
 if [ -z "$EXP_NAME_ARG" ]; then
     EXP_NAME="dinokv_${MODEL_SIZE,,}_d${DINO_LAYERS_NAME}_s${SIT_LAYERS_NAME}_${ALIGN_MODE}_s1r${STAGE1_RATIO}"
-    # Add projection layer type (skip default mlp)
-    if [ "$PROJECTION_LAYER_TYPE" != "mlp" ]; then
-        EXP_NAME="${EXP_NAME}_proj${PROJECTION_LAYER_TYPE}"
-    fi
     # Add projection loss type (skip default cosine)
     if [ "$PROJECTION_LOSS_TYPE" != "cosine" ]; then
         EXP_NAME="${EXP_NAME}_loss${PROJECTION_LOSS_TYPE}"
+    fi
+    if [ "$KV_PROJ_TYPE" != "mlp" ]; then
+        EXP_NAME="${EXP_NAME}_proj${KV_PROJ_TYPE}"
     fi
     # Add kv norm type (skip default layernorm)
     if [ "$KV_NORM_TYPE" != "layernorm" ]; then
@@ -227,12 +222,15 @@ accelerate launch \
     --model ${MODEL} \
     --enc-type ${ENCODER_TYPE} \
     --encoder-depth ${ENCODER_DEPTH} \
-    --projection-layer-type ${PROJECTION_LAYER_TYPE} \
+    --projection-layer-type conv \
+    --proj-coeff ${PROJ_COEFF} \
+    --projection-loss-type ${PROJECTION_LOSS_TYPE} \
     --dino-layer-indices ${DINO_LAYER_INDICES} \
     --sit-layer-indices ${SIT_LAYER_INDICES} \
     --stage1-ratio ${STAGE1_RATIO} \
     --align-mode ${ALIGN_MODE} \
-    --proj-coeff ${PROJ_COEFF} \
+    --kv-norm-type ${KV_NORM_TYPE} \
+    --kv-proj-type ${KV_PROJ_TYPE} \
     --distill-coeff ${DISTILL_COEFF} \
     --batch-size ${BATCH_SIZE} \
     --gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
@@ -245,8 +243,6 @@ accelerate launch \
     --allow-tf32 \
     --repa-loss \
     --spnorm-method zscore \
-    --projection-loss-type ${PROJECTION_LOSS_TYPE} \
-    --kv-norm-type ${KV_NORM_TYPE} \
     --num-workers 12
 
 # 检查训练是否成功

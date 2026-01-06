@@ -536,7 +536,7 @@ def parse_args(input_args=None):
     parser.add_argument("--fused-attn", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--qk-norm", action=argparse.BooleanOptionalAction, default=False)
     # add arg for type of projection layer: allowed mlp | linear | conv
-    parser.add_argument("--projection-layer-type", type=str, default="mlp", 
+    parser.add_argument("--projection-layer-type", type=str, default="conv", 
                         choices=["mlp", "linear", "conv"])
     parser.add_argument("--proj-kwargs-kernel-size", type=int, default=1, choices=[1, 3, 5, 7])
 
@@ -557,8 +557,8 @@ def parse_args(input_args=None):
                         help="Projection type for DINO K/V: linear, mlp, or conv")
     parser.add_argument("--kv-proj-hidden-dim", type=int, default=None,
                         help="Hidden dimension for MLP projection (default: max(dino_dim, sit_dim))")
-    parser.add_argument("--kv-proj-kernel-size", type=int, default=3,
-                        help="Kernel size for conv projection (default: 3)")
+    parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
+                        help="Kernel size for conv projection (default: 1)")
     parser.add_argument("--kv-norm-type", type=str, default="layernorm",
                         choices=["none", "layernorm", "zscore", "batchnorm"],
                         help="Normalization type for K/V before projection (default: layernorm)")
