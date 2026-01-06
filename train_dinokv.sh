@@ -14,12 +14,10 @@
 #   --proj-coeff        REPA投影系数 (默认: 1.0)
 #   --distill-coeff     蒸馏loss系数 (默认: 1.0)
 #   --encoder-depth     REPA对齐层 (默认: 8)
-#   --use-adaln-dino    启用DINO AdaLN调制 (可选)
-#   --adaln-dropout     AdaLN dropout比例 (默认: 0.5)
 #   --gpu               使用哪张GPU (默认: 0,1)
 #
 # 示例:
-#   ./train_dinokv.sh --gpu 2,3 --dino-layers 9 --sit-layers 3 --encoder-depth 6 --align-mode attn_mse --proj-coeff 1.0 --distill-coeff 2.0 --max-steps 100000 --stage1-ratio 0.3
+#   ./train_dinokv.sh --gpu 0,1 --dino-layers 9 --sit-layers 3 --encoder-depth 6 --align-mode attn_mse --proj-coeff 1.0 --distill-coeff 2.0 --max-steps 100000 --stage1-ratio 0.3  --projection-layer-type conv --proj-kwargs-kernel-size 3 --projection-loss-type mse_v  --kv-norm-type zscore
 # ============================================================================
 
 set -e
@@ -71,12 +69,20 @@ while [[ $# -gt 0 ]]; do
             EXP_NAME_ARG="$2"
             shift 2
             ;;
-        --use-adaln-dino)
-            USE_ADALN_DINO=true
-            shift 1
+        --projection-layer-type)
+            PROJECTION_LAYER_TYPE_ARG="$2"
+            shift 2
             ;;
-        --adaln-dropout)
-            ADALN_DROPOUT_ARG="$2"
+        --proj-kwargs-kernel-size)
+            PROJ_KWARGS_KERNEL_SIZE_ARG="$2"
+            shift 2
+            ;;
+        --projection-loss-type)
+            PROJECTION_LOSS_TYPE_ARG="$2"
+            shift 2
+            ;;
+        --kv-norm-type)
+            KV_NORM_TYPE_ARG="$2"
             shift 2
             ;;
         *)
@@ -87,10 +93,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 export CUDA_VISIBLE_DEVICES="${GPU_ARG:-0,1}"
-
-# RTX 4000系列不支持P2P和IB通信，需要禁用
-export NCCL_P2P_DISABLE=1
-export NCCL_IB_DISABLE=1
 
 # ============================================================================
 # 模型配置
@@ -110,8 +112,10 @@ STAGE1_RATIO="${STAGE1_RATIO_ARG:-0.3}"
 ALIGN_MODE="${ALIGN_MODE_ARG:-logits_attn}"
 PROJ_COEFF="${PROJ_COEFF_ARG:-1.0}"
 DISTILL_COEFF="${DISTILL_COEFF_ARG:-1.0}"
-PROJECTION_LAYER_TYPE="conv"
-ADALN_DROPOUT="${ADALN_DROPOUT_ARG:-0.5}"
+PROJECTION_LAYER_TYPE="${PROJECTION_LAYER_TYPE_ARG:-mlp}"
+PROJ_KWARGS_KERNEL_SIZE="${PROJ_KWARGS_KERNEL_SIZE_ARG:-3}"
+PROJECTION_LOSS_TYPE="${PROJECTION_LOSS_TYPE_ARG:-cosine}"
+KV_NORM_TYPE="${KV_NORM_TYPE_ARG:-layernorm}"
 
 # ============================================================================
 # 训练配置
@@ -152,6 +156,18 @@ SIT_LAYERS_NAME=$(echo ${SIT_LAYER_INDICES} | tr ',' '_')
 
 if [ -z "$EXP_NAME_ARG" ]; then
     EXP_NAME="dinokv_${MODEL_SIZE,,}_d${DINO_LAYERS_NAME}_s${SIT_LAYERS_NAME}_${ALIGN_MODE}_s1r${STAGE1_RATIO}"
+    # Add projection layer type (skip default mlp)
+    if [ "$PROJECTION_LAYER_TYPE" != "mlp" ]; then
+        EXP_NAME="${EXP_NAME}_proj${PROJECTION_LAYER_TYPE}"
+    fi
+    # Add projection loss type (skip default cosine)
+    if [ "$PROJECTION_LOSS_TYPE" != "cosine" ]; then
+        EXP_NAME="${EXP_NAME}_loss${PROJECTION_LOSS_TYPE}"
+    fi
+    # Add kv norm type (skip default layernorm)
+    if [ "$KV_NORM_TYPE" != "layernorm" ]; then
+        EXP_NAME="${EXP_NAME}_kvnorm${KV_NORM_TYPE}"
+    fi
     if [ "$PROJ_COEFF" != "1.0" ]; then
         EXP_NAME="${EXP_NAME}_repa${PROJ_COEFF}"
     fi
@@ -172,8 +188,6 @@ echo "Stage1比例: ${STAGE1_RATIO}"
 echo "对齐模式: ${ALIGN_MODE}"
 echo "REPA系数: ${PROJ_COEFF}"
 echo "蒸馏系数: ${DISTILL_COEFF}"
-echo "AdaLN DINO: ${USE_ADALN_DINO:-false}"
-echo "AdaLN Dropout: ${ADALN_DROPOUT}"
 echo "GPU: ${CUDA_VISIBLE_DEVICES}"
 echo "================================================"
 
@@ -187,52 +201,53 @@ SAVE_PATH="exps/${EXP_NAME}"
 GPU_COUNT=$(echo ${CUDA_VISIBLE_DEVICES} | tr ',' '\n' | wc -l)
 echo "GPU 数量: ${GPU_COUNT}"
 
-# 随机端口避免冲突
-MASTER_PORT=$((RANDOM % 1000 + 29500))
+# 随机端口避免冲突 (使用更大范围 + PID 确保唯一性)
+MASTER_PORT=$((RANDOM % 10000 + 20000 + $$))
+# 确保端口在有效范围内
+MASTER_PORT=$((MASTER_PORT % 10000 + 20000))
+
+# 生成唯一的运行ID，避免多进程 torchrun rendezvous 冲突
+export TORCHELASTIC_RUN_ID="${EXP_NAME}_train_$$_$(date +%s)"
 
 if [ "$GPU_COUNT" -gt 1 ]; then
     MULTI_GPU_ARGS="--multi_gpu"
 else
     MULTI_GPU_ARGS=""
 fi
-# 构建 AdaLN 参数
-ADALN_ARGS=""
-if [ "$USE_ADALN_DINO" = true ]; then
-    ADALN_ARGS="--use-adaln-dino --adaln-dropout ${ADALN_DROPOUT}"
-fi
 
-# accelerate launch \
-#     ${MULTI_GPU_ARGS} \
-#     --main_process_port ${MASTER_PORT} \
-#     --num_processes ${GPU_COUNT} \
-#     --mixed_precision fp16 \
-#     train_dinokv.py \
-#     --exp-name ${EXP_NAME} \
-#     --output-dir exps \
-#     --data-dir ${DATA_DIR} \
-#     --model ${MODEL} \
-#     --enc-type ${ENCODER_TYPE} \
-#     --encoder-depth ${ENCODER_DEPTH} \
-#     --projection-layer-type ${PROJECTION_LAYER_TYPE} \
-#     --dino-layer-indices ${DINO_LAYER_INDICES} \
-#     --sit-layer-indices ${SIT_LAYER_INDICES} \
-#     --stage1-ratio ${STAGE1_RATIO} \
-#     --align-mode ${ALIGN_MODE} \
-#     --proj-coeff ${PROJ_COEFF} \
-#     --distill-coeff ${DISTILL_COEFF} \
-#     --batch-size ${BATCH_SIZE} \
-#     --gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
-#     --learning-rate ${LEARNING_RATE} \
-#     --max-train-steps ${MAX_STEPS} \
-#     --checkpointing-steps ${CHECKPOINT_STEPS} \
-#     --sampling-steps ${SAMPLING_STEPS} \
-#     --resume-step ${RESUME_STEP} \
-#     --mixed-precision fp16 \
-#     --allow-tf32 \
-#     --repa-loss \
-#     --spnorm-method zscore \
-#     --num-workers 12 \
-#     ${ADALN_ARGS}
+accelerate launch \
+    ${MULTI_GPU_ARGS} \
+    --main_process_port ${MASTER_PORT} \
+    --num_processes ${GPU_COUNT} \
+    --mixed_precision fp16 \
+    train_dinokv.py \
+    --exp-name ${EXP_NAME} \
+    --output-dir exps \
+    --data-dir ${DATA_DIR} \
+    --model ${MODEL} \
+    --enc-type ${ENCODER_TYPE} \
+    --encoder-depth ${ENCODER_DEPTH} \
+    --projection-layer-type ${PROJECTION_LAYER_TYPE} \
+    --dino-layer-indices ${DINO_LAYER_INDICES} \
+    --sit-layer-indices ${SIT_LAYER_INDICES} \
+    --stage1-ratio ${STAGE1_RATIO} \
+    --align-mode ${ALIGN_MODE} \
+    --proj-coeff ${PROJ_COEFF} \
+    --distill-coeff ${DISTILL_COEFF} \
+    --batch-size ${BATCH_SIZE} \
+    --gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
+    --learning-rate ${LEARNING_RATE} \
+    --max-train-steps ${MAX_STEPS} \
+    --checkpointing-steps ${CHECKPOINT_STEPS} \
+    --sampling-steps ${SAMPLING_STEPS} \
+    --resume-step ${RESUME_STEP} \
+    --mixed-precision fp16 \
+    --allow-tf32 \
+    --repa-loss \
+    --spnorm-method zscore \
+    --projection-loss-type ${PROJECTION_LOSS_TYPE} \
+    --kv-norm-type ${KV_NORM_TYPE} \
+    --num-workers 12
 
 # 检查训练是否成功
 
@@ -255,8 +270,12 @@ if [ -z "$EVAL_STEP" ]; then
     echo "使用最新checkpoint: ${EVAL_STEP}"
 fi
 
-# 随机端口
-random_number=$((RANDOM % 100 + 29600))
+# 随机端口（使用与训练不同的范围，避免冲突）
+random_number=$((RANDOM % 10000 + 40000 + $$))
+random_number=$((random_number % 10000 + 40000))
+
+# 生成唯一的推理运行ID
+export TORCHELASTIC_RUN_ID="${EXP_NAME}_infer_$$_$(date +%s)"
 
 echo "================================================"
 echo "生成 ${NUM_FID_SAMPLES} 个样本用于FID计算..."

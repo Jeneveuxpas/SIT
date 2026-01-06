@@ -187,13 +187,82 @@ class MSEVelocityProjectionLoss(ProjectionLoss):
             # Reshape from (B, 1, 1, 1) to (B, 1, 1) for broadcasting
             d_alpha_t = d_alpha_t.view(d_alpha_t.shape[0], 1, 1)
             d_sigma_t = d_sigma_t.view(d_sigma_t.shape[0], 1, 1)
-        
-        z_target = d_alpha_t * zs + d_sigma_t * noise_feat
+
+        zs = self._apply_spnorm(zs)
+        z_target_norm = d_alpha_t * zs + d_sigma_t * noise_feat
         
         # Apply spatial normalization to both
-        z_target_norm = self._apply_spnorm(z_target)
         zs_tilde_norm = self._apply_spnorm(zs_tilde)
         
         # Compute MSE loss
         loss = F.mse_loss(zs_tilde_norm, z_target_norm)
+        return loss
+
+
+# =========================================
+# MSE-Noisy: Noisy interpolation loss in feature space
+# =========================================
+
+@register_loss("mse_noisy")
+class MSENoisyProjectionLoss(ProjectionLoss):
+    """
+    MSE loss for noisy interpolation in feature space.
+    
+    Computes: MSE(alpha_t * zs + sigma_t * noise_feat, zs_tilde)
+    
+    This aligns the encoder's representation for noisy states.
+    Target is the interpolation between clean features and noise,
+    matching the noisy latent construction in diffusion/flow matching.
+    
+    Requires passing alpha_t and sigma_t through kwargs.
+    
+    Args:
+        spnorm_method: "none" or "zscore" (default: "zscore")
+        zscore_alpha: scaling factor for zscore normalization (default: 1.0)
+        eps: small constant for numerical stability (default: 1e-6)
+    """
+    KWARG_ALIASES = {"spnorm": "spnorm_method"}
+    
+    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-6, **kwargs):
+        self.spnorm_method = spnorm_method
+        self.zscore_alpha = zscore_alpha
+        self.eps = eps
+
+    def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
+        if self.spnorm_method == "none":
+            return feat
+        elif self.spnorm_method == "zscore":
+            return spatial_zscore(feat, alpha=self.zscore_alpha, eps=self.eps)
+        else:
+            raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
+
+    def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
+        self._check(zs, zs_tilde)
+        
+        # Get alpha_t and sigma_t from kwargs (passed from loss function)
+        alpha_t = kwargs.get('alpha_t', None)
+        sigma_t = kwargs.get('sigma_t', None)
+        
+        if alpha_t is None or sigma_t is None:
+            raise ValueError("mse_noisy loss requires alpha_t and sigma_t in kwargs. "
+                           "Make sure the loss function passes these values.")
+        
+        # Generate noise in feature space (same shape as zs)
+        noise_feat = torch.randn_like(zs)
+        
+        # Reshape alpha_t and sigma_t for broadcasting with (B, T, D)
+        # They are typically (B, 1, 1, 1) shaped for image latents
+        if isinstance(alpha_t, torch.Tensor):
+            alpha_t = alpha_t.view(alpha_t.shape[0], 1, 1)
+            sigma_t = sigma_t.view(sigma_t.shape[0], 1, 1)
+        
+        # Normalize zs FIRST, then add noise (for better scale matching with gaussian noise)
+        zs_norm = self._apply_spnorm(zs)
+        z_noisy = alpha_t * zs_norm + sigma_t * noise_feat
+        
+        # Normalize zs_tilde
+        zs_tilde_norm = self._apply_spnorm(zs_tilde)
+        
+        # Compute MSE loss
+        loss = F.mse_loss(z_noisy, zs_tilde_norm)
         return loss

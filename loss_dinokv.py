@@ -144,6 +144,7 @@ class SILossWithDINOKV:
             if len(zs) > 0 and zs_tilde is not None and len(zs_tilde) > 0:
                 for z, z_tilde, z_tilde_original in zip(zs, zs_tilde, zs_tilde_original):
                     proj_loss = proj_loss + proj_loss_fn(z, z_tilde, z_tilde_original, 
+                                                         alpha_t=alpha_t, sigma_t=sigma_t,
                                                          d_alpha_t=d_alpha_t, d_sigma_t=d_sigma_t)
                 proj_loss /= len(zs)
             proj_loss_dict[proj_loss_name] = proj_loss.detach().item()

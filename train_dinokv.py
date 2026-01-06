@@ -208,8 +208,10 @@ def main(args):
         sit_layer_indices=sit_layer_indices,
         dino_dim=768,  # DINOv2-B
         dino_heads=12,  # DINOv2-B
-        use_adaln_dino=args.use_adaln_dino,  # Optional AdaLN modulation
-        adaln_dropout=args.adaln_dropout,
+        kv_proj_type=args.kv_proj_type,
+        kv_proj_hidden_dim=args.kv_proj_hidden_dim,
+        kv_proj_kernel_size=args.kv_proj_kernel_size,
+        kv_norm_type=args.kv_norm_type,
         **block_kwargs
     )
 
@@ -411,7 +413,6 @@ def main(args):
                 model_kwargs = dict(
                     y=labels,
                     dino_kv_list=dino_kv_list,
-                    dino_cls=dino_cls if args.use_adaln_dino else None,
                     stage=current_stage,
                     align_mode=args.align_mode,
                 )
@@ -551,10 +552,16 @@ def parse_args(input_args=None):
     parser.add_argument("--align-mode", type=str, default="logits_attn",
                         choices=["logits", "logits_attn", "attn_mse", "kv_mse", "k_only"],
                         help="Alignment mode: logits, logits_attn, attn_mse, kv_mse, k_only")
-    parser.add_argument("--use-adaln-dino", action="store_true",
-                        help="Enable DINO AdaLN modulation (inject CLS token info into AdaLN)")
-    parser.add_argument("--adaln-dropout", type=float, default=0.5,
-                        help="Dropout rate for AdaLN modulation (higher = better inference without CLS)")
+    parser.add_argument("--kv-proj-type", type=str, default="linear",
+                        choices=["linear", "mlp", "conv"],
+                        help="Projection type for DINO K/V: linear, mlp, or conv")
+    parser.add_argument("--kv-proj-hidden-dim", type=int, default=None,
+                        help="Hidden dimension for MLP projection (default: max(dino_dim, sit_dim))")
+    parser.add_argument("--kv-proj-kernel-size", type=int, default=3,
+                        help="Kernel size for conv projection (default: 3)")
+    parser.add_argument("--kv-norm-type", type=str, default="layernorm",
+                        choices=["none", "layernorm", "zscore", "batchnorm"],
+                        help="Normalization type for K/V before projection (default: layernorm)")
 
     # dataset
     parser.add_argument("--data-dir", type=str, default="../data")
