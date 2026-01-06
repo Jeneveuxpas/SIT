@@ -131,7 +131,7 @@ def main(args):
     iterations = int(samples_needed_this_gpu // n)
     pbar = range(iterations)
     pbar = tqdm(pbar) if rank == 0 else pbar
-    total = 0
+    total_generated = 0  # Track per-GPU generated count
     for _ in pbar:
         # Sample inputs:
         z = torch.randn(n, model.in_channels, latent_size, latent_size, device=device)
@@ -166,10 +166,13 @@ def main(args):
             ).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
 
             # Save samples to disk as individual .png files
+            # Correct interleaved indexing: each GPU handles every world_size-th index
             for i, sample in enumerate(samples):
-                index = i * dist.get_world_size() + rank + total
+                # Global index = (batch_offset + local_index) * world_size + rank
+                # This ensures indices 0, 1, 2, ... are correctly distributed
+                index = (total_generated + i) * dist.get_world_size() + rank
                 Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
-        total += global_batch_size
+        total_generated += n  # Increment by per-GPU batch size
 
     # Make sure all processes have finished saving their samples before attempting to convert to .npz
     dist.barrier()

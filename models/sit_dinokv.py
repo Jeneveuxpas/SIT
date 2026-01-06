@@ -110,28 +110,139 @@ class DinoKVExtractor(nn.Module):
 
 
 
+KV_PROJ_TYPES = ["linear", "mlp", "conv"]
+KV_NORM_TYPES = ["none", "layernorm", "zscore", "batchnorm"]
+
+
+def build_kv_norm(norm_type: str, dim: int, num_patches: int = 256):
+    """
+    Build normalization layer for K/V projection.
+    
+    Args:
+        norm_type: "none", "layernorm", "zscore", "batchnorm"
+        dim: Feature dimension
+        num_patches: Number of patches (for BatchNorm1d)
+    """
+    if norm_type == "none":
+        return nn.Identity()
+    elif norm_type == "layernorm":
+        return nn.LayerNorm(dim)
+    elif norm_type == "zscore":
+        return ZScoreNorm()
+    elif norm_type == "batchnorm":
+        # BatchNorm over the feature dimension
+        return nn.BatchNorm1d(dim)
+    else:
+        raise ValueError(f"Unknown kv_norm_type: {norm_type}, must be one of {KV_NORM_TYPES}")
+
+
+class ZScoreNorm(nn.Module):
+    """Z-score normalization: (x - mean) / std per sample."""
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, N, D) or (B*N, D)
+        mean = x.mean(dim=-1, keepdim=True)
+        std = x.std(dim=-1, keepdim=True) + self.eps
+        return (x - mean) / std
+
+
+def build_kv_mlp(in_dim: int, out_dim: int, hidden_dim: int = None):
+    """Build MLP for K/V projection: in_dim -> hidden_dim -> hidden_dim -> out_dim"""
+    if hidden_dim is None:
+        hidden_dim = max(in_dim, out_dim)
+    return nn.Sequential(
+        nn.Linear(in_dim, hidden_dim),
+        nn.SiLU(),
+        nn.Linear(hidden_dim, hidden_dim),
+        nn.SiLU(),
+        nn.Linear(hidden_dim, out_dim),
+    )
+
+
 class DinoKVProjection(nn.Module):
     """
     Project DINO K/V to SiT dimension.
     
+    Supports multiple projection types:
+    - "linear": Simple linear projection (default, backward compatible)
+    - "mlp": Multi-layer perceptron with non-linearity
+    - "conv": 2D convolution (preserves spatial locality)
+    
+    Supports multiple normalization types before projection:
+    - "none": No normalization
+    - "layernorm": Layer normalization (default for conv)
+    - "zscore": Z-score normalization per sample
+    - "batchnorm": Batch normalization
+    
     Key feature: In Stage 2, the projection output is detached (no gradient).
     """
-    def __init__(self, dino_dim: int, sit_dim: int, dino_heads: int, sit_heads: int):
+    def __init__(
+        self, 
+        dino_dim: int, 
+        sit_dim: int, 
+        dino_heads: int, 
+        sit_heads: int,
+        kv_proj_type: str = "linear",
+        kv_proj_hidden_dim: int = None,
+        kv_proj_kernel_size: int = 3,
+        kv_norm_type: str = "layernorm",  # NEW: configurable normalization
+    ):
         super().__init__()
+        assert kv_proj_type in KV_PROJ_TYPES, f"kv_proj_type must be one of {KV_PROJ_TYPES}, got {kv_proj_type}"
+        assert kv_norm_type in KV_NORM_TYPES, f"kv_norm_type must be one of {KV_NORM_TYPES}, got {kv_norm_type}"
+        
         self.dino_dim = dino_dim
         self.sit_dim = sit_dim
         self.dino_heads = dino_heads
         self.sit_heads = sit_heads
         self.dino_head_dim = dino_dim // dino_heads
         self.sit_head_dim = sit_dim // sit_heads
+        self.kv_proj_type = kv_proj_type
+        self.kv_norm_type = kv_norm_type
         
-        # Linear projection from DINO dim to SiT dim
-        self.proj_k = nn.Linear(dino_dim, sit_dim, bias=False)
-        self.proj_v = nn.Linear(dino_dim, sit_dim, bias=False)
-        
-        # Initialize with small values
-        nn.init.normal_(self.proj_k.weight, std=0.02)
-        nn.init.normal_(self.proj_v.weight, std=0.02)
+        # Build projection layers based on type
+        if kv_proj_type == "linear":
+            self.proj_k = nn.Linear(dino_dim, sit_dim, bias=False)
+            self.proj_v = nn.Linear(dino_dim, sit_dim, bias=False)
+            # Initialize with small values
+            nn.init.normal_(self.proj_k.weight, std=0.02)
+            nn.init.normal_(self.proj_v.weight, std=0.02)
+            
+        elif kv_proj_type == "mlp":
+            hidden_dim = kv_proj_hidden_dim or max(dino_dim, sit_dim)
+            self.proj_k = build_kv_mlp(dino_dim, sit_dim, hidden_dim)
+            self.proj_v = build_kv_mlp(dino_dim, sit_dim, hidden_dim)
+            
+        elif kv_proj_type == "conv":
+            self.kv_proj_kernel_size = kv_proj_kernel_size
+            padding = kv_proj_kernel_size // 2
+            # Add configurable normalization before conv projection
+            self.k_norm = build_kv_norm(kv_norm_type, dino_dim)
+            self.v_norm = build_kv_norm(kv_norm_type, dino_dim)
+            self.proj_k = nn.Conv2d(dino_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
+                                    stride=1, padding=padding, bias=False)
+            self.proj_v = nn.Conv2d(dino_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
+                                    stride=1, padding=padding, bias=False)
+    
+    def _project_linear_or_mlp(self, feat: torch.Tensor, proj: nn.Module) -> torch.Tensor:
+        """Project using linear or MLP: (B, N, D_in) -> (B, N, D_out)"""
+        B, N, D = feat.shape
+        out = proj(feat.reshape(B * N, D))
+        return out.reshape(B, N, -1)
+    
+    def _project_conv(self, feat: torch.Tensor, proj: nn.Module) -> torch.Tensor:
+        """Project using conv: (B, N, D_in) -> (B, N, D_out), with spatial reshape"""
+        B, N, D = feat.shape
+        H = W = int(N ** 0.5)
+        assert H * W == N, f"Conv projection requires square grid, got N={N}"
+        # (B, N, D) -> (B, D, H, W)
+        feat_2d = feat.reshape(B, H, W, D).permute(0, 3, 1, 2).contiguous()
+        out_2d = proj(feat_2d)  # (B, D_out, H, W)
+        # (B, D_out, H, W) -> (B, N, D_out)
+        return out_2d.permute(0, 2, 3, 1).reshape(B, N, -1)
     
     def forward(
         self, 
@@ -153,13 +264,18 @@ class DinoKVProjection(nn.Module):
         """
         B, _, N, _ = k_dino.shape
         
-        # Reshape to (B, N, dino_dim) for linear projection
+        # Reshape to (B, N, dino_dim) for projection
         k_flat = k_dino.transpose(1, 2).reshape(B, N, self.dino_dim)
         v_flat = v_dino.transpose(1, 2).reshape(B, N, self.dino_dim)
         
-        # Project
-        k_proj = self.proj_k(k_flat)  # (B, N, sit_dim)
-        v_proj = self.proj_v(v_flat)  # (B, N, sit_dim)
+        # Project based on type
+        if self.kv_proj_type in ("linear", "mlp"):
+            k_proj = self._project_linear_or_mlp(k_flat, self.proj_k)
+            v_proj = self._project_linear_or_mlp(v_flat, self.proj_v)
+        elif self.kv_proj_type == "conv":
+            # Apply LayerNorm before conv projection
+            k_proj = self._project_conv(self.k_norm(k_flat), self.proj_k)
+            v_proj = self._project_conv(self.v_norm(v_flat), self.proj_v)
         
         # Stage 2: Detach projection (no gradient through projection layer)
         if stage == 2:
@@ -172,50 +288,6 @@ class DinoKVProjection(nn.Module):
         
         return k_proj, v_proj
 
-
-class DinoAdaLNModulation(nn.Module):
-    """
-    Generate AdaLN modulation (Δγ, Δβ) from DINO CLS token.
-    
-    This provides a softer guidance compared to K/V injection.
-    The modulation is added to the existing AdaLN shift/scale.
-    
-    Note: Higher dropout (default 0.5) helps the model work well during
-    inference when CLS token is not available (similar to CFG training).
-    """
-    def __init__(self, dino_dim: int, hidden_size: int, dropout: float = 0.5):
-
-        super().__init__()
-        self.dino_dim = dino_dim
-        self.hidden_size = hidden_size
-        
-        # MLP: CLS token -> 6 * hidden_size (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)
-        self.mlp = nn.Sequential(
-            nn.Linear(dino_dim, hidden_size),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, 6 * hidden_size),
-        )
-        
-        # Initialize output to near-zero for stable training start
-        nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
-    
-    def forward(self, cls_token: torch.Tensor, stage: int = 1) -> torch.Tensor:
-        """
-        Generate AdaLN modulation from DINO CLS token.
-        
-        Args:
-            cls_token: DINO CLS token (B, dino_dim)
-            stage: Training stage (currently unused, trainable in both stages)
-            
-        Returns:
-            delta_modulation: (B, 6 * hidden_size) to add to existing AdaLN
-        """
-        # AdaLN modulation is trainable in both stages
-        # (unlike K/V projection which detaches in Stage 2)
-        delta = self.mlp(cls_token)
-        return delta
 
 
 
@@ -383,7 +455,7 @@ class AttentionWithDINOKV(nn.Module):
 
 class SiTBlockWithDINOKV(nn.Module):
     """
-    SiT block with optional DINO K/V injection and/or AdaLN modulation.
+    SiT block with optional DINO K/V injection.
     """
     def __init__(
         self, 
@@ -392,8 +464,10 @@ class SiTBlockWithDINOKV(nn.Module):
         mlp_ratio: float = 4.0,
         dino_dim: Optional[int] = None,
         dino_heads: Optional[int] = None,
-        use_adaln_dino: bool = False,
-        adaln_dropout: float = 0.1,
+        kv_proj_type: str = "linear",
+        kv_proj_hidden_dim: Optional[int] = None,
+        kv_proj_kernel_size: int = 3,
+        kv_norm_type: str = "layernorm",  # NEW: configurable normalization
         **block_kwargs
     ):
         super().__init__()
@@ -419,19 +493,20 @@ class SiTBlockWithDINOKV(nn.Module):
         # DINO K/V projection (only if this block receives DINO K/V)
         self.has_dino_kv = dino_dim is not None and dino_heads is not None
         if self.has_dino_kv:
-            self.kv_proj = DinoKVProjection(dino_dim, hidden_size, dino_heads, num_heads)
+            self.kv_proj = DinoKVProjection(
+                dino_dim, hidden_size, dino_heads, num_heads,
+                kv_proj_type=kv_proj_type,
+                kv_proj_hidden_dim=kv_proj_hidden_dim,
+                kv_proj_kernel_size=kv_proj_kernel_size,
+                kv_norm_type=kv_norm_type,
+            )
         
-        # DINO AdaLN modulation (optional)
-        self.use_adaln_dino = use_adaln_dino
-        if self.use_adaln_dino and dino_dim is not None:
-            self.adaln_dino = DinoAdaLNModulation(dino_dim, hidden_size, dropout=adaln_dropout)
 
     def forward(
         self, 
         x: torch.Tensor, 
         c: torch.Tensor,
         dino_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        dino_cls: Optional[torch.Tensor] = None,
         stage: int = 2,
         align_mode: str = 'logits_attn',
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -442,7 +517,6 @@ class SiTBlockWithDINOKV(nn.Module):
             x: Input tensor (B, N, C)
             c: Conditioning (timestep + class embed) (B, C)
             dino_kv: Optional (K_dino, V_dino) tuple from DINO
-            dino_cls: Optional DINO CLS token (B, dino_dim) for AdaLN modulation
             stage: Training stage (1=use DINO K/V, 2=use SiT K/V with distillation)
             align_mode: Alignment mode for Stage 2
             
@@ -450,14 +524,8 @@ class SiTBlockWithDINOKV(nn.Module):
             x: Output tensor (B, N, C)
             distill_loss: Distillation loss (Stage 2 only)
         """
-        # Base AdaLN modulation from timestep + class
+        # AdaLN modulation from timestep + class
         modulation = self.adaLN_modulation(c)
-        
-        # Add DINO AdaLN modulation if enabled
-        if self.use_adaln_dino and dino_cls is not None and self.training:
-            delta_modulation = self.adaln_dino(dino_cls, stage=stage)
-            modulation = modulation + delta_modulation
-        
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation.chunk(6, dim=-1)
         
         # Prepare DINO K/V if available
@@ -516,9 +584,11 @@ class SiTWithDINOKV(nn.Module):
         sit_layer_indices: List[int] = [8],
         dino_dim: int = 768,  # DINOv2-B dimension
         dino_heads: int = 12,  # DINOv2-B heads
-        # DINO AdaLN modulation (optional)
-        use_adaln_dino: bool = False,
-        adaln_dropout: float = 0.1,
+        # K/V projection config
+        kv_proj_type: str = "linear",  # "linear", "mlp", or "conv"
+        kv_proj_hidden_dim: Optional[int] = None,  # MLP hidden dim
+        kv_proj_kernel_size: int = 3,  # Conv kernel size
+        kv_norm_type: str = "layernorm",  # NEW: "none", "layernorm", "zscore", "batchnorm"
         **block_kwargs
     ):
         super().__init__()
@@ -540,7 +610,6 @@ class SiTWithDINOKV(nn.Module):
         self.sit_layer_indices = sit_layer_indices
         self.dino_dim = dino_dim
         self.dino_heads = dino_heads
-        self.use_adaln_dino = use_adaln_dino
         
         # Build mapping: SiT layer idx -> DINO K/V list idx
         self.sit_to_dino_idx = {sit_idx: i for i, sit_idx in enumerate(sit_layer_indices)}
@@ -553,24 +622,25 @@ class SiTWithDINOKV(nn.Module):
         num_patches = self.x_embedder.num_patches
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
-        # Build blocks - some with DINO K/V support and optional AdaLN
+        # Build blocks - some with DINO K/V support
         self.blocks = nn.ModuleList()
         for i in range(depth):
             if i in self.sit_to_dino_idx:
-                # This block receives DINO K/V (and optionally AdaLN)
+                # This block receives DINO K/V
                 block = SiTBlockWithDINOKV(
                     hidden_size, num_heads, mlp_ratio=mlp_ratio,
                     dino_dim=dino_dim, dino_heads=dino_heads,
-                    use_adaln_dino=use_adaln_dino,
-                    adaln_dropout=adaln_dropout,
+                    kv_proj_type=kv_proj_type,
+                    kv_proj_hidden_dim=kv_proj_hidden_dim,
+                    kv_proj_kernel_size=kv_proj_kernel_size,
+                    kv_norm_type=kv_norm_type,
                     **block_kwargs
                 )
             else:
-                # Standard block (no DINO K/V, no AdaLN)
+                # Standard block (no DINO K/V)
                 block = SiTBlockWithDINOKV(
                     hidden_size, num_heads, mlp_ratio=mlp_ratio,
                     dino_dim=None, dino_heads=None,
-                    use_adaln_dino=False,
                     **block_kwargs
                 )
             self.blocks.append(block)
@@ -633,7 +703,6 @@ class SiTWithDINOKV(nn.Module):
         t: torch.Tensor, 
         y: torch.Tensor,
         dino_kv_list: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
-        dino_cls: Optional[torch.Tensor] = None,
         stage: int = 2,
         align_mode: str = 'logits_attn',
         return_logvar: bool = False,
@@ -646,7 +715,6 @@ class SiTWithDINOKV(nn.Module):
             t: (B,) diffusion timesteps
             y: (B,) class labels
             dino_kv_list: List of (K, V) tuples from DINO extractor
-            dino_cls: Optional DINO CLS token (B, dino_dim) for AdaLN modulation
             stage: Training stage (1=DINO K/V, 2=SiT K/V with distillation)
             align_mode: Alignment mode for Stage 2
                 - 'logits': Cosine similarity on Q@K^T logits only
@@ -684,11 +752,9 @@ class SiTWithDINOKV(nn.Module):
                 if dino_idx < len(dino_kv_list):
                     dino_kv = dino_kv_list[dino_idx]
             
-            # Pass dino_cls for AdaLN modulation (only for blocks that use it)
             x, distill_loss = block(
                 x, c, 
                 dino_kv=dino_kv, 
-                dino_cls=dino_cls if (self.use_adaln_dino and i in self.sit_to_dino_idx) else None,
                 stage=stage, 
                 align_mode=align_mode
             )
