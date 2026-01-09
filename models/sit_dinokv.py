@@ -417,7 +417,25 @@ class AttentionWithDINOKV(nn.Module):
                     attn_sit = attn_weights_sit @ v_sit
                 
                 distill_loss = F.mse_loss(attn_sit, attn_dino.detach())
-                
+
+            elif align_mode == 'attn_cosine':
+                # Cosine similarity on attention outputs (strong constraint)
+                if self.fused_attn:
+                    attn_dino = F.scaled_dot_product_attention(q, k_dino, v_dino)
+                    attn_sit = F.scaled_dot_product_attention(q, k_sit, v_sit)
+                else:
+                    attn_weights_dino = (q @ k_dino.transpose(-2, -1)) * self.scale
+                    attn_weights_dino = attn_weights_dino.softmax(dim=-1)
+                    attn_dino = attn_weights_dino @ v_dino
+                    
+                    attn_weights_sit = (q @ k_sit.transpose(-2, -1)) * self.scale
+                    attn_weights_sit = attn_weights_sit.softmax(dim=-1)
+                    attn_sit = attn_weights_sit @ v_sit
+
+                attn_sit_n = F.normalize(attn_sit, dim=-1)
+                attn_dino_n = F.normalize(attn_dino, dim=-1)
+                distill_loss = 1 - F.cosine_similarity(attn_sit_n, attn_dino_n.detach(), dim=-1).mean()
+
             elif align_mode == 'kv_mse':
                 # Direct K/V MSE (strongest constraint)
                 k_loss = F.mse_loss(k_sit, k_dino.detach())

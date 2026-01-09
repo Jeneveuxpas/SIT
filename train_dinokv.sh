@@ -17,8 +17,7 @@
 #   --gpu               使用哪张GPU (默认: 0,1)
 #
 # 示例:
-#   ./train_dinokv.sh --gpu 2,3 --dino-layers 9 --sit-layers 3 --encoder-depth 6 --projection-loss-type mse_v --proj-coeff 1.0 --max-steps 400000 --stage1-ratio 0.25 --distill-coeff 2.0 --projection-layer-type linear --align-mode attn_mse 
-#   ./train_dinokv.sh --gpu 0,1 --dino-layers 9 --sit-layers 3 --encoder-depth 6 --projection-loss-type mse_v --proj-coeff 1.0 --max-steps 100000 --stage1-ratio 0.3 --distill-coeff 2.0 --kv-proj-type conv --align-mode attn_mse --kv-norm-type zscore
+#   ./train_dinokv.sh --gpu 0,1 --dino-layers 7,10 --sit-layers 2,4 --encoder-depth 6 --projection-loss-type mse_v --proj-coeff 1.0 --max-steps 100000 --stage1-ratio 0.3 --distill-coeff 2.0 --kv-proj-type conv --align-mode attn_mse --kv-norm-type zscore
 # ============================================================================
 
 set -e
@@ -82,6 +81,14 @@ while [[ $# -gt 0 ]]; do
             KV_NORM_TYPE_ARG="$2"
             shift 2
             ;;
+        --no-repa-loss)
+            NO_REPA_LOSS=true
+            shift
+            ;;
+        --projection-layer-type)
+            PROJECTION_LAYER_TYPE_ARG="$2"
+            shift 2
+            ;;
         *)
             echo "未知参数: $1"
             exit 1
@@ -112,6 +119,14 @@ DISTILL_COEFF="${DISTILL_COEFF_ARG:-1.0}"
 PROJECTION_LOSS_TYPE="${PROJECTION_LOSS_TYPE_ARG:-cosine}"
 KV_NORM_TYPE="${KV_NORM_TYPE_ARG:-layernorm}"
 KV_PROJ_TYPE="${KV_PROJ_TYPE_ARG:-conv}"
+PROJECTION_LAYER_TYPE="${PROJECTION_LAYER_TYPE_ARG:-conv}"
+
+# 设置 REPA loss 参数
+if [ "$NO_REPA_LOSS" = "true" ]; then
+    REPA_LOSS_ARG="--no-repa-loss"
+else
+    REPA_LOSS_ARG="--repa-loss"
+fi
 
 # ============================================================================
 # 训练配置
@@ -121,7 +136,7 @@ GRADIENT_ACCUMULATION_STEPS=1
 LEARNING_RATE=1e-4
 MAX_STEPS="${MAX_STEPS_ARG:-400000}"
 CHECKPOINT_STEPS=10000
-SAMPLING_STEPS=200000
+SAMPLING_STEPS=10000
 RESUME_STEP="${RESUME_STEP_ARG:-0}"
 
 # ============================================================================
@@ -241,7 +256,7 @@ accelerate launch \
     --resume-step ${RESUME_STEP} \
     --mixed-precision fp16 \
     --allow-tf32 \
-    --repa-loss \
+    ${REPA_LOSS_ARG} \
     --spnorm-method zscore \
     --num-workers 12
 
@@ -293,6 +308,8 @@ torchrun --nproc_per_node=${GPU_COUNT} --master_port=$random_number generate_din
     --cfg-scale=${CFG_SCALE} \
     --guidance-low=0.0 \
     --guidance-high=${GH} \
+    --kv-proj-type ${KV_PROJ_TYPE} \
+    --kv-proj-kernel-size 1 \
     --sample-dir ${SAVE_PATH}/checkpoints
 
 echo "================================================"

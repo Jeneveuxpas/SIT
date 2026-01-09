@@ -550,7 +550,7 @@ def parse_args(input_args=None):
     parser.add_argument("--distill-coeff", type=float, default=1.0,
                         help="Coefficient for attention distillation loss (Stage 2 only)")
     parser.add_argument("--align-mode", type=str, default="logits_attn",
-                        choices=["logits", "logits_attn", "attn_mse", "kv_mse", "k_only"],
+                        choices=["logits", "logits_attn", "attn_mse", "kv_mse", "k_only", "attn_cosine"],
                         help="Alignment mode: logits, logits_attn, attn_mse, kv_mse, k_only")
     parser.add_argument("--kv-proj-type", type=str, default="linear",
                         choices=["linear", "mlp", "conv"],

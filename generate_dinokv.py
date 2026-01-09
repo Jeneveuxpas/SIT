@@ -80,6 +80,9 @@ def main(args):
         encoder_depth=args.encoder_depth,
         dino_layer_indices=dino_layer_indices,
         sit_layer_indices=sit_layer_indices,
+        kv_proj_type=args.kv_proj_type,
+        kv_proj_kernel_size=args.kv_proj_kernel_size,
+        kv_norm_type=args.kv_norm_type,
         eval_mode=True,  # No projectors needed for inference
         **block_kwargs,
     ).to(device)
@@ -211,6 +214,12 @@ if __name__ == "__main__":
                         help="Comma-separated DINO layer indices")
     parser.add_argument("--sit-layer-indices", type=str, default="8",
                         help="Comma-separated SiT layer indices")
+    parser.add_argument("--kv-proj-type", type=str, default="linear", choices=["linear", "mlp", "conv"],
+                        help="KV projection type (must match training checkpoint)")
+    parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
+                        help="Kernel size for conv KV projection")
+    parser.add_argument("--kv-norm-type", type=str, default="layernorm", choices=["none", "layernorm", "zscore", "batchnorm"],
+                        help="Normalization type for KV projection")
 
     # number of samples
     parser.add_argument("--per-proc-batch-size", type=int, default=256)
