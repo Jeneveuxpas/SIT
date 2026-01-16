@@ -50,9 +50,7 @@ def preprocess_for_dino(x, resolution=256):
     x = Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)(x)
     x = F.interpolate(x, 224 * (resolution // 256), mode='bicubic', align_corners=False)
     return x
-
-
-
+    
 #################################################################################
 #                                  Utils                                       #
 #################################################################################
@@ -244,6 +242,7 @@ def main(args):
         projection_loss_type=args.projection_loss_type,
         proj_coeff=args.proj_coeff,
         distill_coeff=args.distill_coeff,
+        distill_t_threshold=args.distill_t_threshold,
     )
     if accelerator.is_main_process:
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -415,6 +414,7 @@ def main(args):
                     dino_kv_list=dino_kv_list,
                     stage=current_stage,
                     align_mode=args.align_mode,
+                    kv_mode=args.kv_mode,
                 )
                 denoising_loss, proj_loss, distill_loss, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
                 denoising_loss_mean = denoising_loss.mean()
@@ -550,8 +550,13 @@ def parse_args(input_args=None):
     parser.add_argument("--distill-coeff", type=float, default=1.0,
                         help="Coefficient for attention distillation loss (Stage 2 only)")
     parser.add_argument("--align-mode", type=str, default="logits_attn",
-                        choices=["logits", "logits_attn", "attn_mse", "kv_mse", "k_only", "attn_cosine"],
-                        help="Alignment mode: logits, logits_attn, attn_mse, kv_mse, k_only")
+                        choices=["logits", "logits_attn", "attn_mse", "kv_mse", "k_only", "v_only", "attn_cosine"],
+                        help="Alignment mode: logits, logits_attn, attn_mse, kv_mse, k_only, v_only")
+    parser.add_argument("--kv-mode", type=str, default="kv",
+                        choices=["kv", "k_only", "v_only"],
+                        help="Which K/V to replace and align: kv, k_only, or v_only")
+    parser.add_argument("--distill-t-threshold", type=float, default=1.0,
+                        help="Only apply distillation loss when t < threshold (default: 1.0 = always)")
     parser.add_argument("--kv-proj-type", type=str, default="linear",
                         choices=["linear", "mlp", "conv"],
                         help="Projection type for DINO K/V: linear, mlp, or conv")
@@ -562,7 +567,6 @@ def parse_args(input_args=None):
     parser.add_argument("--kv-norm-type", type=str, default="layernorm",
                         choices=["none", "layernorm", "zscore", "batchnorm"],
                         help="Normalization type for K/V before projection (default: layernorm)")
-
     # dataset
     parser.add_argument("--data-dir", type=str, default="../data")
     parser.add_argument("--resolution", type=int, choices=[256, 512], default=256)

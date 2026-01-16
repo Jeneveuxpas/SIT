@@ -327,6 +327,7 @@ class AttentionWithDINOKV(nn.Module):
         v_dino: Optional[torch.Tensor] = None,
         stage: int = 2,
         align_mode: str = 'logits_attn',
+        kv_mode: str = 'kv',  # 'kv', 'k_only', 'v_only'
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward attention with staged DINO-KV training.
@@ -346,6 +347,11 @@ class AttentionWithDINOKV(nn.Module):
                 - 'attn_mse': MSE on attention outputs
                 - 'kv_mse': Direct MSE on K and V
                 - 'k_only': MSE on K only (V learns freely)
+                - 'v_only': MSE on V only (K learns freely)
+            kv_mode: Which components to replace/align:
+                - 'kv': Both K and V
+                - 'k_only': Only K
+                - 'v_only': Only V
             
         Returns:
             output: Attention output (B, N, C)
@@ -365,9 +371,19 @@ class AttentionWithDINOKV(nn.Module):
         distill_loss = None
         
         if stage == 1 and k_dino is not None and v_dino is not None:
-            # Stage 1: Use DINO K/V directly for attention
-            k = k_dino
-            v = v_dino
+            # Stage 1: Use DINO K/V directly for attention (based on kv_mode)
+            if kv_mode == 'kv':
+                k = k_dino
+                v = v_dino
+            elif kv_mode == 'k_only':
+                k = k_dino
+                v = v_sit  # 只替换 K，V 用 SiT 的
+            elif kv_mode == 'v_only':
+                k = k_sit  # 只替换 V，K 用 SiT 的
+                v = v_dino
+            else:
+                k = k_dino
+                v = v_dino
         elif stage == 2 and k_dino is not None and v_dino is not None:
             # Stage 2: Use SiT K/V with alignment loss
             
@@ -445,6 +461,10 @@ class AttentionWithDINOKV(nn.Module):
             elif align_mode == 'k_only':
                 # Only K alignment (V learns freely)
                 distill_loss = F.mse_loss(k_sit, k_dino.detach())
+            
+            elif align_mode == 'v_only':
+                # Only V alignment (K learns freely)
+                distill_loss = F.mse_loss(v_sit, v_dino.detach())
                 
             else:
                 raise ValueError(f"Unknown align_mode: {align_mode}")
@@ -527,6 +547,7 @@ class SiTBlockWithDINOKV(nn.Module):
         dino_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         stage: int = 2,
         align_mode: str = 'logits_attn',
+        kv_mode: str = 'kv',
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass.
@@ -537,6 +558,7 @@ class SiTBlockWithDINOKV(nn.Module):
             dino_kv: Optional (K_dino, V_dino) tuple from DINO
             stage: Training stage (1=use DINO K/V, 2=use SiT K/V with distillation)
             align_mode: Alignment mode for Stage 2
+            kv_mode: 'kv', 'k_only', or 'v_only'
             
         Returns:
             x: Output tensor (B, N, C)
@@ -559,6 +581,7 @@ class SiTBlockWithDINOKV(nn.Module):
             v_dino=v_dino,
             stage=stage,
             align_mode=align_mode,
+            kv_mode=kv_mode,
         )
         x = x + gate_msa.unsqueeze(1) * attn_out
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
@@ -723,6 +746,7 @@ class SiTWithDINOKV(nn.Module):
         dino_kv_list: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
         stage: int = 2,
         align_mode: str = 'logits_attn',
+        kv_mode: str = 'kv',
         return_logvar: bool = False,
     ):
         """
@@ -740,6 +764,8 @@ class SiTWithDINOKV(nn.Module):
                 - 'attn_mse': MSE on attention outputs
                 - 'kv_mse': Direct MSE on K and V
                 - 'k_only': MSE on K only
+                - 'v_only': MSE on V only
+            kv_mode: 'kv', 'k_only', or 'v_only'
             
         Returns:
             x: Output tensor (B, C, H, W)
@@ -774,7 +800,8 @@ class SiTWithDINOKV(nn.Module):
                 x, c, 
                 dino_kv=dino_kv, 
                 stage=stage, 
-                align_mode=align_mode
+                align_mode=align_mode,
+                kv_mode=kv_mode,
             )
             
             # Accumulate distillation loss

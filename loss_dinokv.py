@@ -44,6 +44,7 @@ class SILossWithDINOKV:
             projection_loss_kwargs={},
             proj_coeff=[0.5],
             distill_coeff=1.0,
+            distill_t_threshold=1.0,  # 只在 t < threshold 时蒸馏
         ):
         self.prediction = prediction
         self.weighting = weighting
@@ -52,6 +53,7 @@ class SILossWithDINOKV:
         self.latents_scale = latents_scale
         self.latents_bias = latents_bias
         self.distill_coeff = distill_coeff
+        self.distill_t_threshold = distill_t_threshold
 
         # parse projection loss type and coeff
         self.projection_loss_type = [elem.strip() for elem in projection_loss_type.split(",") if elem.strip()]
@@ -136,7 +138,10 @@ class SILossWithDINOKV:
         # Denoising loss
         denoising_loss = mean_flat((model_output - model_target) ** 2)
 
-        # Projection loss (REPA)
+        # 创建 mask: 只在 t < threshold 的样本上应用 repa 和 distillation
+        t_mask = (time_input.flatten() < self.distill_t_threshold).float()
+        
+        # Projection loss (REPA) - 只在 t < threshold 时应用
         total_proj_loss = 0.
         proj_loss_dict = {}
         for proj_loss_name, proj_loss_fn, coeff in zip(self.projection_loss_type, self.projection_loss, self.proj_coeff):
@@ -147,13 +152,18 @@ class SILossWithDINOKV:
                                                          alpha_t=alpha_t, sigma_t=sigma_t,
                                                          d_alpha_t=d_alpha_t, d_sigma_t=d_sigma_t)
                 proj_loss /= len(zs)
+            # 应用 t_mask
+            proj_loss = proj_loss * t_mask.mean()
             proj_loss_dict[proj_loss_name] = proj_loss.detach().item()
             proj_loss_dict[f"{proj_loss_name}_weighted"] = proj_loss.detach().item() * coeff
             total_proj_loss = total_proj_loss + coeff * proj_loss
         
-        # Handle distillation loss
+        # Handle distillation loss with t threshold
+        # 只在低噪声 (t < threshold) 时应用蒸馏
         if distill_loss is None or not isinstance(distill_loss, torch.Tensor):
             distill_loss = torch.tensor(0.0, device=images.device, dtype=images.dtype)
+        
+        distill_loss = distill_loss * t_mask.mean()  # 按比例缩放
         
         # Aggregate loss dict
         loss_dict = proj_loss_dict.copy()

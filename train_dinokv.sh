@@ -14,12 +14,12 @@
 #   --proj-coeff        REPA投影系数 (默认: 1.0)
 #   --distill-coeff     蒸馏loss系数 (默认: 1.0)
 #   --encoder-depth     REPA对齐层 (默认: 8)
+#   --model-size        模型大小 B/L/XL (默认: B)
 #   --gpu               使用哪张GPU (默认: 0,1)
 #
 # 示例:
-#   ./train_dinokv.sh --gpu 0,1 --dino-layers 7,10 --sit-layers 2,4 --encoder-depth 6 --projection-loss-type mse_v --proj-coeff 1.0 --max-steps 100000 --stage1-ratio 0.3 --distill-coeff 2.0 --kv-proj-type conv --align-mode attn_mse --kv-norm-type zscore
+#./train_dinokv.sh --gpu 0,1 --model-size XL --dino-layers 9 --sit-layers 4 --encoder-depth 10 --projection-loss-type mse_v --proj-coeff 1.0 --max-steps 100000 --stage1-ratio 0.3 --distill-coeff 2.0 --align-mode attn_mse --kv-proj-type conv --kv-norm-type zscore
 # ============================================================================
-
 set -e
 
 # 解析命令行参数
@@ -89,6 +89,18 @@ while [[ $# -gt 0 ]]; do
             PROJECTION_LAYER_TYPE_ARG="$2"
             shift 2
             ;;
+        --distill-t-threshold)
+            DISTILL_T_THRESHOLD_ARG="$2"
+            shift 2
+            ;;
+        --kv-mode)
+            KV_MODE_ARG="$2"
+            shift 2
+            ;;
+        --model-size)
+            MODEL_SIZE_ARG="$2"
+            shift 2
+            ;;
         *)
             echo "未知参数: $1"
             exit 1
@@ -101,8 +113,30 @@ export CUDA_VISIBLE_DEVICES="${GPU_ARG:-0,1}"
 # ============================================================================
 # 模型配置
 # ============================================================================
-MODEL="SiT-B/2-DINOKV"
-MODEL_SIZE="B"
+MODEL_SIZE="${MODEL_SIZE_ARG:-B}"
+# 根据 MODEL_SIZE 设置模型和隐藏层维度
+case "$MODEL_SIZE" in
+    B|b)
+        MODEL_SIZE="B"
+        MODEL="SiT-B/2-DINOKV"
+        HIDDEN_SIZE=768
+        ;;
+    L|l)
+        MODEL_SIZE="L"
+        MODEL="SiT-L/2-DINOKV"
+        HIDDEN_SIZE=1024
+        ;;
+    XL|xl)
+        MODEL_SIZE="XL"
+        MODEL="SiT-XL/2-DINOKV"
+        HIDDEN_SIZE=1152
+        ;;
+    *)
+        echo "无效的模型大小: $MODEL_SIZE, 请使用 B, L, 或 XL"
+        exit 1
+        ;;
+esac
+# DINO encoder 继续使用 dinov2-vit-b
 ENCODER_TYPE="dinov2-vit-b"
 ENCODER_DEPTH="${ENCODER_DEPTH_ARG:-8}"
 Z_DIMS="768"
@@ -116,6 +150,8 @@ STAGE1_RATIO="${STAGE1_RATIO_ARG:-0.3}"
 ALIGN_MODE="${ALIGN_MODE_ARG:-logits_attn}"
 PROJ_COEFF="${PROJ_COEFF_ARG:-1.0}"
 DISTILL_COEFF="${DISTILL_COEFF_ARG:-1.0}"
+DISTILL_T_THRESHOLD="${DISTILL_T_THRESHOLD_ARG:-1.0}"
+KV_MODE="${KV_MODE_ARG:-kv}"
 PROJECTION_LOSS_TYPE="${PROJECTION_LOSS_TYPE_ARG:-cosine}"
 KV_NORM_TYPE="${KV_NORM_TYPE_ARG:-layernorm}"
 KV_PROJ_TYPE="${KV_PROJ_TYPE_ARG:-conv}"
@@ -166,7 +202,7 @@ DINO_LAYERS_NAME=$(echo ${DINO_LAYER_INDICES} | tr ',' '_')
 SIT_LAYERS_NAME=$(echo ${SIT_LAYER_INDICES} | tr ',' '_')
 
 if [ -z "$EXP_NAME_ARG" ]; then
-    EXP_NAME="dinokv_${MODEL_SIZE,,}_d${DINO_LAYERS_NAME}_s${SIT_LAYERS_NAME}_${ALIGN_MODE}_s1r${STAGE1_RATIO}"
+    EXP_NAME="dinokv_${MODEL_SIZE,,}_d${DINO_LAYERS_NAME}_s${SIT_LAYERS_NAME}_r${ENCODER_DEPTH}_${ALIGN_MODE}_s1r${STAGE1_RATIO}"
     # Add projection loss type (skip default cosine)
     if [ "$PROJECTION_LOSS_TYPE" != "cosine" ]; then
         EXP_NAME="${EXP_NAME}_loss${PROJECTION_LOSS_TYPE}"
@@ -184,6 +220,14 @@ if [ -z "$EXP_NAME_ARG" ]; then
     if [ "$DISTILL_COEFF" != "1.0" ]; then
         EXP_NAME="${EXP_NAME}_dc${DISTILL_COEFF}"
     fi
+    # Add distill t threshold to name (skip default 1.0)
+    if [ "$DISTILL_T_THRESHOLD" != "1.0" ]; then
+        EXP_NAME="${EXP_NAME}_dt${DISTILL_T_THRESHOLD}"
+    fi
+    # Add kv mode to name (skip default kv)
+    if [ "$KV_MODE" != "kv" ]; then
+        EXP_NAME="${EXP_NAME}_${KV_MODE}"
+    fi
 else
     EXP_NAME="$EXP_NAME_ARG"
 fi
@@ -196,6 +240,7 @@ echo "DINO层: ${DINO_LAYER_INDICES}"
 echo "SiT层: ${SIT_LAYER_INDICES}"
 echo "Stage1比例: ${STAGE1_RATIO}"
 echo "对齐模式: ${ALIGN_MODE}"
+echo "模型: ${MODEL}"
 echo "REPA系数: ${PROJ_COEFF}"
 echo "蒸馏系数: ${DISTILL_COEFF}"
 echo "GPU: ${CUDA_VISIBLE_DEVICES}"
@@ -247,6 +292,8 @@ accelerate launch \
     --kv-norm-type ${KV_NORM_TYPE} \
     --kv-proj-type ${KV_PROJ_TYPE} \
     --distill-coeff ${DISTILL_COEFF} \
+    --distill-t-threshold ${DISTILL_T_THRESHOLD} \
+    --kv-mode ${KV_MODE} \
     --batch-size ${BATCH_SIZE} \
     --gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
     --learning-rate ${LEARNING_RATE} \
