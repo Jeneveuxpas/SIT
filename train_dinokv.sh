@@ -81,6 +81,10 @@ while [[ $# -gt 0 ]]; do
             KV_NORM_TYPE_ARG="$2"
             shift 2
             ;;
+        --kv-zscore-alpha)
+            KV_ZSCORE_ALPHA_ARG="$2"
+            shift 2
+            ;;
         --no-repa-loss)
             NO_REPA_LOSS=true
             shift
@@ -154,6 +158,7 @@ DISTILL_T_THRESHOLD="${DISTILL_T_THRESHOLD_ARG:-1.0}"
 KV_MODE="${KV_MODE_ARG:-kv}"
 PROJECTION_LOSS_TYPE="${PROJECTION_LOSS_TYPE_ARG:-cosine}"
 KV_NORM_TYPE="${KV_NORM_TYPE_ARG:-layernorm}"
+KV_ZSCORE_ALPHA="${KV_ZSCORE_ALPHA_ARG:-1.0}"
 KV_PROJ_TYPE="${KV_PROJ_TYPE_ARG:-conv}"
 PROJECTION_LAYER_TYPE="${PROJECTION_LAYER_TYPE_ARG:-conv}"
 
@@ -213,6 +218,10 @@ if [ -z "$EXP_NAME_ARG" ]; then
     # Add kv norm type (skip default layernorm)
     if [ "$KV_NORM_TYPE" != "layernorm" ]; then
         EXP_NAME="${EXP_NAME}_kvnorm${KV_NORM_TYPE}"
+    fi
+    # Add kv zscore alpha to name (skip default 1.0)
+    if [ "$KV_ZSCORE_ALPHA" != "1.0" ]; then
+        EXP_NAME="${EXP_NAME}_alpha${KV_ZSCORE_ALPHA}"
     fi
     if [ "$PROJ_COEFF" != "1.0" ]; then
         EXP_NAME="${EXP_NAME}_repa${PROJ_COEFF}"
@@ -290,6 +299,7 @@ accelerate launch \
     --stage1-ratio ${STAGE1_RATIO} \
     --align-mode ${ALIGN_MODE} \
     --kv-norm-type ${KV_NORM_TYPE} \
+    --kv-zscore-alpha ${KV_ZSCORE_ALPHA} \
     --kv-proj-type ${KV_PROJ_TYPE} \
     --distill-coeff ${DISTILL_COEFF} \
     --distill-t-threshold ${DISTILL_T_THRESHOLD} \
@@ -340,23 +350,22 @@ echo "生成 ${NUM_FID_SAMPLES} 个样本用于FID计算..."
 echo "Checkpoint: ${SAVE_PATH}/checkpoints/${EVAL_STEP}.pt"
 echo "================================================"
 
-torchrun --nproc_per_node=${GPU_COUNT} --master_port=$random_number generate_dinokv.py \
-    --model ${MODEL} \
+# Switch to standard SiT generator for clean evaluation
+GENERATION_MODEL=${MODEL%-DINOKV}
+
+torchrun --nproc_per_node=${GPU_COUNT} --master_port=$random_number generate_sit.py \
+    --model ${GENERATION_MODEL} \
     --num-fid-samples ${NUM_FID_SAMPLES} \
     --ckpt ${SAVE_PATH}/checkpoints/${EVAL_STEP}.pt \
     --path-type=linear \
     --encoder-depth=${ENCODER_DEPTH} \
     --z-dims=${Z_DIMS} \
-    --dino-layer-indices=${DINO_LAYER_INDICES} \
-    --sit-layer-indices=${SIT_LAYER_INDICES} \
     --per-proc-batch-size=128 \
     --mode=${MODE} \
     --num-steps=${NUM_STEP} \
     --cfg-scale=${CFG_SCALE} \
     --guidance-low=0.0 \
     --guidance-high=${GH} \
-    --kv-proj-type ${KV_PROJ_TYPE} \
-    --kv-proj-kernel-size 1 \
     --sample-dir ${SAVE_PATH}/checkpoints
 
 echo "================================================"

@@ -109,26 +109,31 @@ class DinoKVExtractor(nn.Module):
         return kv_list, cls_token
 
 
-
 KV_PROJ_TYPES = ["linear", "mlp", "conv"]
-KV_NORM_TYPES = ["none", "layernorm", "zscore", "batchnorm"]
+KV_NORM_TYPES = ["none", "layernorm", "zscore", "zscore_spatial", "batchnorm"]
 
 
-def build_kv_norm(norm_type: str, dim: int, num_patches: int = 256):
+def build_kv_norm(norm_type: str, dim: int, num_patches: int = 256, alpha: float = 1.0):
     """
     Build normalization layer for K/V projection.
     
     Args:
-        norm_type: "none", "layernorm", "zscore", "batchnorm"
+        norm_type: "none", "layernorm", "zscore", "zscore_spatial", "batchnorm"
+            - zscore: normalize per token (dim=-1), each token has zero mean/unit var
+            - zscore_spatial: normalize per feature (dim=1), each feature channel 
+              has zero mean/unit var across all spatial positions
         dim: Feature dimension
         num_patches: Number of patches (for BatchNorm1d)
+        alpha: Scaling factor for mean subtraction in zscore (default 1.0)
     """
     if norm_type == "none":
         return nn.Identity()
     elif norm_type == "layernorm":
         return nn.LayerNorm(dim)
     elif norm_type == "zscore":
-        return ZScoreNorm()
+        return ZScoreNorm(dim=-1, alpha=alpha)  # per-token normalization
+    elif norm_type == "zscore_spatial":
+        return ZScoreNorm(dim=1, alpha=alpha)   # per-feature spatial normalization
     elif norm_type == "batchnorm":
         # BatchNorm over the feature dimension
         return nn.BatchNorm1d(dim)
@@ -137,16 +142,29 @@ def build_kv_norm(norm_type: str, dim: int, num_patches: int = 256):
 
 
 class ZScoreNorm(nn.Module):
-    """Z-score normalization: (x - mean) / std per sample."""
-    def __init__(self, eps: float = 1e-6):
+    """
+    Z-score normalization: (x - mean) / std.
+    
+    Args:
+        dim: Dimension to normalize along
+            - dim=-1 (D): per-token normalization, each token becomes zero-mean unit-var
+            - dim=1 (T): per-feature spatial normalization, each feature channel 
+              becomes zero-mean unit-var across all spatial positions
+        alpha: Scaling factor for mean subtraction (default 1.0)
+        eps: Small constant for numerical stability
+    """
+    def __init__(self, dim: int = -1, alpha: float = 1.0, eps: float = 1e-6):
         super().__init__()
+        self.dim = dim
+        self.alpha = alpha
         self.eps = eps
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, N, D) or (B*N, D)
-        mean = x.mean(dim=-1, keepdim=True)
-        std = x.std(dim=-1, keepdim=True) + self.eps
-        return (x - mean) / std
+        # x: (B, N, D)
+        mean = x.mean(dim=self.dim, keepdim=True)
+        std = x.std(dim=self.dim, keepdim=True) + self.eps
+        return (x - self.alpha * mean) / std
+
 
 
 def build_kv_mlp(in_dim: int, out_dim: int, hidden_dim: int = None):
@@ -188,7 +206,8 @@ class DinoKVProjection(nn.Module):
         kv_proj_type: str = "linear",
         kv_proj_hidden_dim: int = None,
         kv_proj_kernel_size: int = 3,
-        kv_norm_type: str = "layernorm",  # NEW: configurable normalization
+        kv_norm_type: str = "layernorm",
+        kv_zscore_alpha: float = 1.0,  # NEW: alpha for zscore normalization
     ):
         super().__init__()
         assert kv_proj_type in KV_PROJ_TYPES, f"kv_proj_type must be one of {KV_PROJ_TYPES}, got {kv_proj_type}"
@@ -220,8 +239,8 @@ class DinoKVProjection(nn.Module):
             self.kv_proj_kernel_size = kv_proj_kernel_size
             padding = kv_proj_kernel_size // 2
             # Add configurable normalization before conv projection
-            self.k_norm = build_kv_norm(kv_norm_type, dino_dim)
-            self.v_norm = build_kv_norm(kv_norm_type, dino_dim)
+            self.k_norm = build_kv_norm(kv_norm_type, dino_dim, alpha=kv_zscore_alpha)
+            self.v_norm = build_kv_norm(kv_norm_type, dino_dim, alpha=kv_zscore_alpha)
             self.proj_k = nn.Conv2d(dino_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
                                     stride=1, padding=padding, bias=False)
             self.proj_v = nn.Conv2d(dino_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
@@ -506,6 +525,7 @@ class SiTBlockWithDINOKV(nn.Module):
         kv_proj_hidden_dim: Optional[int] = None,
         kv_proj_kernel_size: int = 3,
         kv_norm_type: str = "layernorm",  # NEW: configurable normalization
+        kv_zscore_alpha: float = 1.0,
         **block_kwargs
     ):
         super().__init__()
@@ -537,6 +557,7 @@ class SiTBlockWithDINOKV(nn.Module):
                 kv_proj_hidden_dim=kv_proj_hidden_dim,
                 kv_proj_kernel_size=kv_proj_kernel_size,
                 kv_norm_type=kv_norm_type,
+                kv_zscore_alpha=kv_zscore_alpha,
             )
         
 
@@ -630,6 +651,7 @@ class SiTWithDINOKV(nn.Module):
         kv_proj_hidden_dim: Optional[int] = None,  # MLP hidden dim
         kv_proj_kernel_size: int = 3,  # Conv kernel size
         kv_norm_type: str = "layernorm",  # NEW: "none", "layernorm", "zscore", "batchnorm"
+        kv_zscore_alpha: float = 1.0,
         **block_kwargs
     ):
         super().__init__()
@@ -675,6 +697,7 @@ class SiTWithDINOKV(nn.Module):
                     kv_proj_hidden_dim=kv_proj_hidden_dim,
                     kv_proj_kernel_size=kv_proj_kernel_size,
                     kv_norm_type=kv_norm_type,
+                    kv_zscore_alpha=kv_zscore_alpha,
                     **block_kwargs
                 )
             else:

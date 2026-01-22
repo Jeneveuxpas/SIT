@@ -204,12 +204,13 @@ def main(args):
         proj_kwargs_kernel_size=args.proj_kwargs_kernel_size,
         dino_layer_indices=dino_layer_indices,
         sit_layer_indices=sit_layer_indices,
-        dino_dim=768,  # DINOv2-B
-        dino_heads=12,  # DINOv2-B
+        dino_dim=args.dino_dim,
+        dino_heads=args.dino_heads,
         kv_proj_type=args.kv_proj_type,
         kv_proj_hidden_dim=args.kv_proj_hidden_dim,
         kv_proj_kernel_size=args.kv_proj_kernel_size,
         kv_norm_type=args.kv_norm_type,
+        kv_zscore_alpha=args.kv_zscore_alpha,
         **block_kwargs
     )
 
@@ -285,6 +286,7 @@ def main(args):
     
     # resume:
     global_step = 0
+    grad_norm = 0.0  # Initialize grad_norm to avoid undefined variable error
     if args.resume_step > 0:
         ckpt_name = str(args.resume_step).zfill(7) +'.pt'
         ckpt = torch.load(
@@ -565,8 +567,14 @@ def parse_args(input_args=None):
     parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
                         help="Kernel size for conv projection (default: 1)")
     parser.add_argument("--kv-norm-type", type=str, default="layernorm",
-                        choices=["none", "layernorm", "zscore", "batchnorm"],
-                        help="Normalization type for K/V before projection (default: layernorm)")
+                        choices=["none", "layernorm", "zscore", "zscore_spatial", "batchnorm"],
+                        help="Normalization type for K/V: zscore=per-token, zscore_spatial=per-feature")
+    parser.add_argument("--kv-zscore-alpha", type=float, default=1.0, 
+                        help="Alpha for z-score normalization: (x - alpha * mean) / std")
+    parser.add_argument("--dino-dim", type=int, default=768,
+                        help="DINO model embedding dimension (768 for DINOv2-B, 1024 for DINOv2-L)")
+    parser.add_argument("--dino-heads", type=int, default=12,
+                        help="DINO model number of attention heads (12 for DINOv2-B, 16 for DINOv2-L)")
     # dataset
     parser.add_argument("--data-dir", type=str, default="../data")
     parser.add_argument("--resolution", type=int, choices=[256, 512], default=256)
@@ -618,19 +626,29 @@ def parse_args(input_args=None):
     parser.add_argument("--config", type=str, default=None,
         help="Path to YAML config file (e.g., configs/irepa.yaml)")
 
+    # First parse to get config file path
+    if input_args is not None:
+        args, remaining = parser.parse_known_args(input_args)
+    else:
+        args, remaining = parser.parse_known_args()
+
+    # Load config file if provided (CLI args will override config values)
+    if args.config:
+        from omegaconf import OmegaConf
+        config = OmegaConf.load(args.config)
+        # Set config values as new defaults (CLI args will override these)
+        for key, value in config.items():
+            key_underscore = key.replace('-', '_')
+            for action in parser._actions:
+                if action.dest == key_underscore:
+                    action.default = value
+                    break
+
+    # Re-parse with updated defaults so CLI args take precedence
     if input_args is not None:
         args = parser.parse_args(input_args)
     else:
         args = parser.parse_args()
-
-    # Load config file if provided (config values are overridden by CLI args)
-    if args.config:
-        from omegaconf import OmegaConf
-        config = OmegaConf.load(args.config)
-        for key, value in config.items():
-            key_underscore = key.replace('-', '_')
-            if hasattr(args, key_underscore):
-                setattr(args, key_underscore, value)
 
     return args
 

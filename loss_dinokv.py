@@ -18,7 +18,7 @@ def mean_flat(x):
 
 def sum_flat(x):
     """
-    Take the mean over all non-batch dimensions.
+    Take the sum over all non-batch dimensions.
     """
     return torch.sum(x, dim=list(range(1, len(x.size()))))
 

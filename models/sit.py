@@ -54,7 +54,7 @@ class ProjectionLayer(nn.Module):
         else:
             raise ValueError(f"Unsupported projection layer type: {projection_layer_type}")
 
-    def forward(self, x, hw: tuple[int, int] | None = None):
+    def forward(self, x, hw: "tuple[int, int] | None" = None):
         """
         x: [B, T, D]
         hw: optional (H, W) for non-square token grids (mostly not used).
