@@ -1,25 +1,37 @@
+"""
+Loss function for SiT with Encoder KV Distillation.
+
+Extends iREPA's SILoss with attention distillation loss support.
+"""
 import torch
 import numpy as np
 import torch.nn.functional as F
 import projection_loss as pl
 
-########################################################
-# Loss for the denoising step
-########################################################
+
 def mean_flat(x):
     """
     Take the mean over all non-batch dimensions.
     """
     return torch.mean(x, dim=list(range(1, len(x.size()))))
 
+
 def sum_flat(x):
     """
-    Take the mean over all non-batch dimensions.
+    Take the sum over all non-batch dimensions.
     """
     return torch.sum(x, dim=list(range(1, len(x.size()))))
 
 
-class SILoss:
+class SILossWithEncoderKV:
+    """
+    Loss function for SiT with Encoder KV distillation.
+    
+    Combines:
+    1. Denoising loss (v-prediction)
+    2. REPA projection loss (cosine, nt-xent, etc.)
+    3. Attention distillation loss (from model output, Stage 2 only)
+    """
     def __init__(
             self,
             prediction='v',
@@ -31,6 +43,8 @@ class SILoss:
             projection_loss_type="cosine",
             projection_loss_kwargs={},
             proj_coeff=[0.5],
+            distill_coeff=1.0,
+            distill_t_threshold=1.0,  # Only distill when t < threshold
         ):
         self.prediction = prediction
         self.weighting = weighting
@@ -38,6 +52,8 @@ class SILoss:
         self.accelerator = accelerator
         self.latents_scale = latents_scale
         self.latents_bias = latents_bias
+        self.distill_coeff = distill_coeff
+        self.distill_t_threshold = distill_t_threshold
 
         # parse projection loss type and coeff
         self.projection_loss_type = [elem.strip() for elem in projection_loss_type.split(",") if elem.strip()]
@@ -50,29 +66,49 @@ class SILoss:
             pl.make_projection_loss(projection_loss_type, **projection_loss_kwargs)
             for projection_loss_type in self.projection_loss_type
         ]
-        assert len(self.projection_loss) == len(self.proj_coeff), \
-            f"len(self.projection_loss) - {len(self.projection_loss)} != len(self.proj_coeff) - {len(self.proj_coeff)}"
+
+        if self.path_type == "linear":
+            self.interpolant = self.interpolant_linear
+        elif self.path_type == "cosine":
+            self.interpolant = self.interpolant_cosine
+        else:
+            raise NotImplementedError(f"Unknown path_type: {self.path_type}")
         
 
-    def interpolant(self, t):
-        if self.path_type == "linear":
-            alpha_t = 1 - t
-            sigma_t = t
-            d_alpha_t = -1
-            d_sigma_t =  1
-        elif self.path_type == "cosine":
-            alpha_t = torch.cos(t * np.pi / 2)
-            sigma_t = torch.sin(t * np.pi / 2)
-            d_alpha_t = -np.pi / 2 * torch.sin(t * np.pi / 2)
-            d_sigma_t =  np.pi / 2 * torch.cos(t * np.pi / 2)
-        else:
-            raise NotImplementedError()
-
+    def interpolant_linear(self, t):
+        alpha_t = 1 - t
+        sigma_t = t
+        d_alpha_t = -1
+        d_sigma_t =  1
         return alpha_t, sigma_t, d_alpha_t, d_sigma_t
 
-    def __call__(self, model, images, model_kwargs=None, zs=FileNotFoundError):
+    def interpolant_cosine(self, t):
+        alpha_t = torch.cos(t * np.pi / 2)
+        sigma_t = torch.sin(t * np.pi / 2)
+        d_alpha_t = -np.pi / 2 * torch.sin(t * np.pi / 2)
+        d_sigma_t =  np.pi / 2 * torch.cos(t * np.pi / 2)
+        return alpha_t, sigma_t, d_alpha_t, d_sigma_t
+
+    def __call__(self, model, images, model_kwargs=None, zs=None):
+        """
+        Compute loss for SiT with DINO-KV distillation.
+        
+        Args:
+            model: SiTWithEncoderKV model
+            images: Latent images (B, C, H, W)
+            model_kwargs: Dict with 'y', 'enc_kv_list', 'stage'
+            zs: List of encoder features for REPA projection loss
+            
+        Returns:
+            denoising_loss: Per-sample denoising loss
+            proj_loss: Scalar projection loss
+            distill_loss: Scalar attention distillation loss
+            loss_dict: Dict with individual loss values
+        """
         if model_kwargs is None:
             model_kwargs = {}
+        if zs is None:
+            zs = []
 
         # sample timesteps
         if self.weighting == "uniform":
@@ -95,25 +131,44 @@ class SILoss:
         if self.prediction == 'v':
             model_target = d_alpha_t * images + d_sigma_t * noises
         else:
-            # TODO: add x or eps prediction
             raise NotImplementedError()
-        model_output, zs_tilde, zs_tilde_original = model(model_input, time_input.flatten(), **model_kwargs)
+        
+        # Forward pass - model returns (output, zs_tilde, zs_original, distill_loss)
+        model_output, zs_tilde, zs_tilde_original, distill_loss = model(
+            model_input, time_input.flatten(), **model_kwargs
+        )
+        
+        # Denoising loss
         denoising_loss = mean_flat((model_output - model_target) ** 2)
 
-        # projection loss
+        # Create mask: only apply repa/distillation when t < threshold
+        t_mask = (time_input.flatten() < self.distill_t_threshold).float()
+        
+        # Projection loss (REPA) - only apply when t < threshold
         total_proj_loss = 0.
         proj_loss_dict = {}
-        # loop across different projection losses [e.g. cosine, nt-xent, p2p-gram-cossim]
         for proj_loss_name, proj_loss_fn, coeff in zip(self.projection_loss_type, self.projection_loss, self.proj_coeff):
             proj_loss = torch.tensor(0.0, device=images.device, dtype=images.dtype)
-            if len(zs) > 0 and len(zs_tilde) > 0:
-                # loop across different encoders
+            if len(zs) > 0 and zs_tilde is not None and len(zs_tilde) > 0:
                 for z, z_tilde, z_tilde_original in zip(zs, zs_tilde, zs_tilde_original):
-                    # NOTE: We pass vision_feats, projected_sit_feats, and unprojected_sit_feats, but the last one might not be used
-                    proj_loss = proj_loss + proj_loss_fn(z, z_tilde, z_tilde_original,
+                    proj_loss = proj_loss + proj_loss_fn(z, z_tilde, z_tilde_original, 
+                                                         alpha_t=alpha_t, sigma_t=sigma_t,
                                                          d_alpha_t=d_alpha_t, d_sigma_t=d_sigma_t)
                 proj_loss /= len(zs)
+            # Apply t_mask
+            proj_loss = proj_loss * t_mask.mean()
             proj_loss_dict[proj_loss_name] = proj_loss.detach().item()
             proj_loss_dict[f"{proj_loss_name}_weighted"] = proj_loss.detach().item() * coeff
             total_proj_loss = total_proj_loss + coeff * proj_loss
-        return denoising_loss, total_proj_loss, proj_loss_dict
+        
+        # Handle distillation loss with t threshold
+        if distill_loss is None or not isinstance(distill_loss, torch.Tensor):
+            distill_loss = torch.tensor(0.0, device=images.device, dtype=images.dtype)
+        
+        distill_loss = distill_loss * t_mask.mean()  # Scale by mask mean
+        
+        # Aggregate loss dict
+        loss_dict = proj_loss_dict.copy()
+        loss_dict["distill_loss"] = distill_loss.detach().item() if isinstance(distill_loss, torch.Tensor) else distill_loss
+        
+        return denoising_loss, total_proj_loss, distill_loss * self.distill_coeff, loss_dict

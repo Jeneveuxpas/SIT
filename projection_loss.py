@@ -80,7 +80,7 @@ class CosineProjectionLoss(ProjectionLoss):
 # MSE with Spatial Normalization
 # =========================================
 
-from utils import spatial_zscore  # Import from utils to avoid code duplication
+from utils import zscore_norm  # Import from utils to avoid code duplication
 
 
 @register_loss("mse")
@@ -104,7 +104,8 @@ class MSEProjectionLoss(ProjectionLoss):
         if self.spnorm_method == "none":
             return feat
         elif self.spnorm_method == "zscore":
-            return spatial_zscore(feat, alpha=self.zscore_alpha, eps=self.eps)
+            # feat is (B, T, D), we normalize over spatial dim T (dim=1)
+            return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
         else:
             raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
 
@@ -148,7 +149,7 @@ class MSEVelocityProjectionLoss(ProjectionLoss):
         if self.spnorm_method == "none":
             return feat
         elif self.spnorm_method == "zscore":
-            return spatial_zscore(feat, alpha=self.zscore_alpha, eps=self.eps)
+            return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
         else:
             raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
 
@@ -161,7 +162,7 @@ class MSEVelocityProjectionLoss(ProjectionLoss):
         
         if d_alpha_t is None or d_sigma_t is None:
             raise ValueError("mse_v loss requires d_alpha_t and d_sigma_t in kwargs. "
-                           "Make sure the loss function passes these values.")
+                             "Make sure the loss function passes these values.")
         
         # Generate noise in feature space (same shape as zs)
         noise_feat = torch.randn_like(zs)
@@ -218,7 +219,7 @@ class MSENoisyProjectionLoss(ProjectionLoss):
         if self.spnorm_method == "none":
             return feat
         elif self.spnorm_method == "zscore":
-            return spatial_zscore(feat, alpha=self.zscore_alpha, eps=self.eps)
+            return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
         else:
             raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
 
@@ -231,7 +232,7 @@ class MSENoisyProjectionLoss(ProjectionLoss):
         
         if alpha_t is None or sigma_t is None:
             raise ValueError("mse_noisy loss requires alpha_t and sigma_t in kwargs. "
-                           "Make sure the loss function passes these values.")
+                             "Make sure the loss function passes these values.")
         
         # Generate noise in feature space (same shape as zs)
         noise_feat = torch.randn_like(zs)

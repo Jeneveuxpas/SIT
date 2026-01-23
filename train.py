@@ -1,3 +1,12 @@
+"""
+Training script for SiT with Encoder KV Distillation (sota iREPA version).
+
+Two-stage training:
+- Stage 1: Q_SiT @ K_Enc, V_Enc (linear projection trainable)
+- Stage 2: Q_SiT @ K_SiT, V_SiT + logits distillation (projection detached)
+
+Based on sota/iREPA train.py with Encoder-KV integration.
+"""
 import argparse
 import copy
 from copy import deepcopy
@@ -6,8 +15,11 @@ import os
 from pathlib import Path
 from collections import OrderedDict
 import json
+import math
+
 
 import torch
+import torch.nn.functional as F
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
 
@@ -16,19 +28,24 @@ from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 
 from models.autoencoder import VAE_F8D4
-from models.sit import SiT_models
-from loss import SILoss
+from models.sit_encoder import SiT_EncoderKV_models 
+from models.encoder_adapter import EncoderKVExtractor
+from loss import SILossWithEncoderKV
 from vision_encoder import load_encoders
 
 from dataset import CustomDataset
 import wandb
-import math
 from torchvision.utils import make_grid
-from utils import SpatialNormalization, ALL_SPNORM_METHODS
-from models.sit import ALL_PROJECTION_LAYER_TYPES
+from utils import ALL_SPNORM_METHODS
 
-logger = get_logger(__name__)
-
+# def preprocess_for_encoder(x, resolution=256):
+#     """Preprocess raw images for Encoder."""
+#     # Ensure float type (input may be uint8)
+#     x = x.float() / 255.0
+#     x = normalize(x, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
+#     x = F.interpolate(x, 224 * (resolution // 256), mode='bicubic', align_corners=False)
+#     return x
+    
 #################################################################################
 #                                  Utils                                       #
 #################################################################################
@@ -83,6 +100,11 @@ def requires_grad(model, flag=True):
         p.requires_grad = flag
 
 
+def parse_layer_indices(indices_str: str) -> list:
+    """Parse comma-separated layer indices string to list of ints (1-based -> 0-based)."""
+    return [int(x.strip()) - 1 for x in indices_str.split(',')]
+
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -93,13 +115,17 @@ def main(args):
         project_dir=args.output_dir, logging_dir=logging_dir
         )
 
+    from accelerate import DistributedDataParallelKwargs
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
         project_config=accelerator_project_config,
+        kwargs_handlers=[ddp_kwargs],
     )
-
+    
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
         save_dir = os.path.join(args.output_dir, args.exp_name)
@@ -109,7 +135,7 @@ def main(args):
         json_dir = os.path.join(save_dir, "args.json")
         with open(json_dir, 'w') as f:
             json.dump(args_dict, f, indent=4)
-        checkpoint_dir = f"{save_dir}/checkpoints"  # Stores saved model checkpoints
+        checkpoint_dir = f"{save_dir}/checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(save_dir)
         logger.info(f"Experiment directory created at {save_dir}")
@@ -119,31 +145,51 @@ def main(args):
     if args.seed is not None:
         set_seed(args.seed + accelerator.process_index)
 
+    # Parse layer indices
+    enc_layer_indices = parse_layer_indices(args.enc_layer_indices)
+    sit_layer_indices = parse_layer_indices(args.sit_layer_indices)
+    assert len(enc_layer_indices) == len(sit_layer_indices), \
+        "Encoder and SiT layer indices must have same length"
+
     # Create model:
     assert args.resolution % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.resolution // 8
     in_channels = 4
-    if args.repa_loss:
-        encoders = load_encoders(
-            args.enc_type, device, args.resolution, accelerator=accelerator
-        )
-    else:
-        encoders = []
-
+    # Load encoders (generic)
+    # We use the first encoder for K/V distillation if available
+    encoders = load_encoders(
+        args.enc_type, device, args.resolution, accelerator=accelerator
+    )
+    
+    # z_dims is used for REPA projectors. 
+    # If repa_loss is False, we might want to avoid creating projectors, but keeping it simple for now.
+    # Or strict: z_dims = [e.embed_dim for e in encoders] if args.repa_loss else []
+    # But usually enc_type implies intention. Let's pass valid z_dims.
     z_dims = [encoder.embed_dim for encoder in encoders]
     block_kwargs = {
         "fused_attn": args.fused_attn, 
         "qk_norm": args.qk_norm,
     }
-    model = SiT_models[args.model](
+    
+    # Create SiT with Encoder KV
+    model = SiT_EncoderKV_models[args.model](
         input_size=latent_size,
         in_channels=in_channels,
         num_classes=args.num_classes,
-        use_cfg = (args.cfg_prob > 0),
-        z_dims = z_dims,
+        use_cfg=(args.cfg_prob > 0),
+        z_dims=z_dims,
         encoder_depth=args.encoder_depth,
         projection_layer_type=args.projection_layer_type,
         proj_kwargs_kernel_size=args.proj_kwargs_kernel_size,
+        enc_layer_indices=enc_layer_indices,
+        sit_layer_indices=sit_layer_indices,
+        enc_dim=args.enc_dim,
+        enc_heads=args.enc_heads,
+        kv_proj_type=args.kv_proj_type,
+        kv_proj_hidden_dim=args.kv_proj_hidden_dim,
+        kv_proj_kernel_size=args.kv_proj_kernel_size,
+        kv_norm_type=args.kv_norm_type,
+        kv_zscore_alpha=args.kv_zscore_alpha,
         **block_kwargs
     )
 
@@ -151,7 +197,16 @@ def main(args):
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
 
-    # Load the VAE weights correctly, load the BN stats
+    # Create Encoder K/V extractor
+    # Use the first encoder's model for KV extraction
+    # encoders[0] is a VisionEncoder wrapper; encoders[0].model is the actual torch module
+    if len(encoders) > 0:
+        encoder_kv_extractor = EncoderKVExtractor(encoders[0].model, enc_layer_indices)
+        encoder_kv_extractor.eval()
+    else:
+        raise ValueError("No encoder loaded! Please specify --enc-type.")
+
+    # Load the VAE weights correctly, load the BN stats (sota version style)
     vae = VAE_F8D4().to(device).eval()
     vae_state_dict = torch.load("pretrained_models/sdvae-ft-mse-f8d4.pt", map_location=device, weights_only=False)
     vae.load_state_dict(vae_state_dict)
@@ -160,7 +215,7 @@ def main(args):
     latents_scale = latents_stats['latents_scale'].to(device).view(1, -1, 1, 1)
     latents_bias = latents_stats['latents_bias'].to(device).view(1, -1, 1, 1)
 
-    loss_fn = SILoss(
+    loss_fn = SILossWithEncoderKV(
         prediction=args.prediction,
         path_type=args.path_type, 
         accelerator=accelerator,
@@ -169,10 +224,13 @@ def main(args):
         weighting=args.weighting,
         projection_loss_type=args.projection_loss_type,
         proj_coeff=args.proj_coeff,
-        spnorm_method=args.spnorm_method,
+        distill_coeff=args.distill_coeff,
+        distill_t_threshold=args.distill_t_threshold,
     )
     if accelerator.is_main_process:
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
+        logger.info(f"Encoder KV: {len(enc_layer_indices)} layer pairs")
+        logger.info(f"Encoder layers: {enc_layer_indices} -> SiT layers: {sit_layer_indices}")
     
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     if args.allow_tf32:
@@ -187,13 +245,8 @@ def main(args):
         eps=args.adam_epsilon,
     )    
     
-    # Setup data
-    if args.repa_loss:
-        train_dataset = CustomDataset(args.data_dir)
-    else:
-        train_dataset = HFLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
-    print(train_dataset)
-
+    # Setup data (using sota CustomDataset)
+    train_dataset = CustomDataset(args.data_dir)
     local_batch_size = int(args.batch_size // accelerator.num_processes)
     train_dataloader = DataLoader(
         train_dataset,
@@ -213,10 +266,11 @@ def main(args):
     
     # resume:
     global_step = 0
+    grad_norm = 0.0  # Initialize grad_norm to avoid undefined variable error
     if args.resume_step > 0:
         ckpt_name = str(args.resume_step).zfill(7) +'.pt'
         ckpt = torch.load(
-            f'{os.path.join(args.output_dir, args.exp_name)}/checkpoints/{ckpt_name}',
+            f'{checkpoint_dir}/{ckpt_name}',
             map_location='cpu',
             weights_only=False,
         )
@@ -228,7 +282,9 @@ def main(args):
     if args.compile:
         # Allow larger cache size for DYNAMO compilation
         torch._dynamo.config.cache_size_limit = 64
-        torch._dynamo.config.accumulated_cache_size_limit = 512
+        # accumulated_cache_size_limit may not exist in older PyTorch versions
+        if hasattr(torch._dynamo.config, 'accumulated_cache_size_limit'):
+            torch._dynamo.config.accumulated_cache_size_limit = 512
         model = torch.compile(model, backend="inductor", mode="default")
         # encoders = [torch.compile(encoder, backend="inductor", mode="default") for encoder in encoders]
 
@@ -250,7 +306,7 @@ def main(args):
     if accelerator.is_main_process:
         tracker_config = vars(copy.deepcopy(args))
         accelerator.init_trackers(
-            project_name="REPA-Baseline", 
+            project_name="iREPA-ENCODERKV", 
             config=tracker_config,
             init_kwargs={
                 "wandb": {"name": f"{args.exp_name}"}
@@ -268,10 +324,7 @@ def main(args):
     # Labels to condition the model with:
     sample_batch_size = args.n_samples // accelerator.num_processes
     batch = next(iter(train_dataloader))
-    if args.repa_loss:
-        _, gt_xs, gt_labels = batch
-    else:
-        gt_xs, gt_labels = batch
+    raw_image_sample, gt_xs, gt_labels = batch
     gt_xs = gt_xs[:sample_batch_size]
     gt_labels = gt_labels[:sample_batch_size]
     gt_xs = sample_posterior(
@@ -288,48 +341,70 @@ def main(args):
     spnorm = SpatialNormalization(args.spnorm_method)
     
     for epoch in range(args.epochs):
+
         model.train()
         for batch in train_dataloader:
-            if args.repa_loss:
-                raw_image, x, y = batch
-                raw_image = raw_image.to(device)
-            else:
-                x, y = batch
+            raw_image, x, y = batch
+            raw_image = raw_image.to(device)
             x = x.squeeze(dim=1).to(device)
             y = y.to(device)
+
+            # Auto-stage switching
+            progress = global_step / max(args.max_train_steps, 1)
+            current_stage = 1 if progress < args.stage1_ratio else 2
+
+            # Log stage periodically
+            if accelerator.is_main_process and global_step % 1000 == 0:
+                logger.info(f"Step {global_step}: stage = {current_stage} (progress = {progress:.2%})")
 
             labels = y
             with torch.no_grad():
                 x = sample_posterior(x, latents_scale=latents_scale, latents_bias=latents_bias)
-                zs = []
+                
+                # Extract Encoder K/V and CLS token
+                # Use encoder's built-in preprocess
+                raw_image_enc = encoders[0].preprocess(raw_image)
                 with accelerator.autocast():
-                    for encoder in encoders:
-                        # Preprocess the image using encoder's built-in method
-                        raw_image_ = encoder.preprocess(raw_image)
+                    enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
+                
+                # Extract encoder features for REPA projection loss
+                zs = []
+                if args.repa_loss:
+                    with accelerator.autocast():
+                        for encoder in encoders:
+                            # Preprocess the image using encoder's built-in method
+                            raw_image_ = encoder.preprocess(raw_image)
 
-                        # Encode the features
-                        # outputs dictionary with keys: 'x_norm_patchtokens' and 'x_norm_clstoken'
-                        features = encoder.forward_features(raw_image_) 
+                            # Encode the features
+                            # outputs dictionary with keys: 'x_norm_patchtokens' and 'x_norm_clstoken'
+                            features = encoder.forward_features(raw_image_) 
 
-                        # normalize spatial features
-                        spnorm_kwargs = {
-                            'feat': features['x_norm_patchtokens'],
-                            'cls': features['x_norm_clstoken'],
-                            'cls_weight': args.cls_token_weight,
-                            'zscore_alpha': args.zscore_alpha,
-                            'zscore_proj_skip_std': args.zscore_proj_skip_std,
-                        }
-                        z = spnorm(**spnorm_kwargs)
+                            # normalize spatial features
+                            spnorm_kwargs = {
+                                'feat': features['x_norm_patchtokens'],
+                                'cls': features['x_norm_clstoken'],
+                                'cls_weight': args.cls_token_weight,
+                                'zscore_alpha': args.zscore_alpha,
+                                'zscore_proj_skip_std': args.zscore_proj_skip_std,
+                            }
+                            z = spnorm(**spnorm_kwargs)
 
-                        # append to list
-                        zs.append(z)
+                            # append to list
+                            zs.append(z)
 
             with accelerator.accumulate(model):
-                model_kwargs = dict(y=labels)
-                loss, proj_loss, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
-                loss_mean = loss.mean()
-                proj_loss_mean = proj_loss.mean()
-                loss = loss_mean + proj_loss_mean
+                model_kwargs = dict(
+                    y=labels,
+                    enc_kv_list=enc_kv_list,
+                    stage=current_stage,
+                    align_mode=args.align_mode,
+                    kv_mode=args.kv_mode,
+                )
+                denoising_loss, proj_loss, distill_loss, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
+                denoising_loss_mean = denoising_loss.mean()
+                
+                # Total loss
+                loss = denoising_loss_mean + proj_loss + distill_loss
                     
                 ## optimization
                 accelerator.backward(loss)
@@ -341,9 +416,10 @@ def main(args):
 
                 if accelerator.sync_gradients and global_step % args.ema_update_freq == 0:
                     unwrapped_model = accelerator.unwrap_model(model)
+                    original_model = unwrapped_model._orig_mod if args.compile else unwrapped_model
                     update_ema(
                         ema,
-                        unwrapped_model._orig_mod if args.compile else unwrapped_model,
+                        original_model,
                         decay=args.ema_decay
                     )
             
@@ -375,7 +451,7 @@ def main(args):
                         xT, 
                         ys,
                         num_steps=50, 
-                        cfg_scale=4.0,
+                        cfg_scale=1.0,
                         guidance_low=0.,
                         guidance_high=1.,
                         path_type=args.path_type,
@@ -387,25 +463,36 @@ def main(args):
                     gt_samples = (gt_samples + 1) / 2.
                 out_samples = accelerator.gather(samples.to(torch.float32))
                 gt_samples = accelerator.gather(gt_samples.to(torch.float32))
-                accelerator.log({"samples": wandb.Image(array2grid(out_samples)),
-                                 "gt_samples": wandb.Image(array2grid(gt_samples))})
-                logging.info("Generating EMA samples done.")
+                
+                stage_name = f"stage{current_stage}"
+                accelerator.log({
+                    f"samples_{stage_name}": wandb.Image(array2grid(out_samples)),
+                    "gt_samples": wandb.Image(array2grid(gt_samples))
+                })
+                logging.info(f"Generated samples: Stage {current_stage}")
 
             # Include the loss and grad norms in the logging
-            logs = {
-                "denoising_loss": accelerator.gather(loss_mean).mean().detach().item(),
-                "proj_loss": accelerator.gather(proj_loss_mean).mean().detach().item(),
-                "grad_norm": accelerator.gather(grad_norm).mean().detach().item()
-            }
-            logs.update(loss_dict)
-            progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
+            if accelerator.sync_gradients:
+                logs = {
+                    "loss": loss.detach().item(),
+                    "denoising_loss": denoising_loss_mean.detach().item(),
+                    "proj_loss": proj_loss.detach().item() if isinstance(proj_loss, torch.Tensor) else proj_loss,
+                    "distill_loss": distill_loss.detach().item() if isinstance(distill_loss, torch.Tensor) else distill_loss,
+                    "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                    "stage": current_stage,
+                }
+                logs.update(loss_dict)
+                progress_bar.set_postfix(**logs)
+                accelerator.log(logs, step=global_step)
 
             if global_step >= args.max_train_steps:
                 break
         if global_step >= args.max_train_steps:
             break
 
+    # Cleanup
+    encoder_kv_extractor.remove_hooks()
+    
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
     
@@ -414,8 +501,9 @@ def main(args):
         logger.info("Done!")
     accelerator.end_training()
 
+
 def parse_args(input_args=None):
-    parser = argparse.ArgumentParser(description="Training")
+    parser = argparse.ArgumentParser(description="Training SiT with Encoder KV")
 
     # logging:
     parser.add_argument("--output-dir", type=str, default="exps")
@@ -427,15 +515,48 @@ def parse_args(input_args=None):
     parser.add_argument("--n-samples", type=int, default=256)
 
     # model
-    parser.add_argument("--model", type=str)
+    parser.add_argument("--model", type=str, default="SiT-B/2-EncoderKV")
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--encoder-depth", type=int, default=8)
     parser.add_argument("--fused-attn", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--qk-norm", action=argparse.BooleanOptionalAction, default=False)
     # add arg for type of projection layer: allowed mlp | linear | conv
-    parser.add_argument("--projection-layer-type", type=str, default="mlp", choices=ALL_PROJECTION_LAYER_TYPES)
+    parser.add_argument("--projection-layer-type", type=str, default="conv", choices=["mlp", "linear", "conv"])
     parser.add_argument("--proj-kwargs-kernel-size", type=int, default=1, choices=[1, 3, 5, 7])
 
+    # Encoder KV specific
+    parser.add_argument("--enc-layer-indices", type=str, default="9",
+                        help="Comma-separated Encoder layer indices for K/V extraction (1-based, e.g. 1-12)")
+    parser.add_argument("--sit-layer-indices", type=str, default="5",
+                        help="Comma-separated SiT layer indices for K/V injection (1-based, e.g. 1-12)")
+    parser.add_argument("--stage1-ratio", type=float, default=0.3,
+                        help="Ratio of training for Stage 1. e.g., 0.5 = first 50%")
+    parser.add_argument("--distill-coeff", type=float, default=1.0,
+                        help="Coefficient for attention distillation loss (Stage 2 only)")
+    parser.add_argument("--align-mode", type=str, default="attn_mse",
+                        choices=["logits", "attn_mse", "kv_mse", "k_only", "v_only", "attn_cosine", "attn_kl", "attn_bce", "kv_huber"],
+                        help="Alignment mode: logits, attn_mse, attn_kl, attn_bce, kv_mse, kv_huber, etc.")
+    parser.add_argument("--kv-mode", type=str, default="kv",
+                        choices=["kv", "k_only", "v_only"],
+                        help="Which K/V to replace and align: kv, k_only, or v_only")
+    parser.add_argument("--distill-t-threshold", type=float, default=1.0,
+                        help="Only apply distillation loss when t < threshold (default: 1.0 = always)")
+    parser.add_argument("--kv-proj-type", type=str, default="linear",
+                        choices=["linear", "mlp", "conv"],
+                        help="Projection type for Encoder K/V: linear, mlp, or conv")
+    parser.add_argument("--kv-proj-hidden-dim", type=int, default=None,
+                        help="Hidden dimension for MLP projection (default: max(enc_dim, sit_dim))")
+    parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
+                        help="Kernel size for conv projection (default: 1)")
+    parser.add_argument("--kv-norm-type", type=str, default="layernorm",
+                        choices=["none", "layernorm", "zscore", "zscore_spatial", "batchnorm"],
+                        help="Normalization type for K/V: zscore=per-token, zscore_spatial=per-feature")
+    parser.add_argument("--kv-zscore-alpha", type=float, default=1.0, 
+                        help="Alpha for z-score normalization: (x - alpha * mean) / std")
+    parser.add_argument("--enc-dim", type=int, default=768,
+                        help="Encoder model embedding dimension")
+    parser.add_argument("--enc-heads", type=int, default=12,
+                        help="Encoder model number of attention heads")
     # dataset
     parser.add_argument("--data-dir", type=str, default="../data")
     parser.add_argument("--resolution", type=int, choices=[256, 512], default=256)
@@ -471,9 +592,9 @@ def parse_args(input_args=None):
     parser.add_argument("--prediction", type=str, default="v", choices=["v"]) # currently we only support v-prediction
     parser.add_argument("--cfg-prob", type=float, default=0.1)
     parser.add_argument("--enc-type", type=str, default='dinov2-vit-b')
-    parser.add_argument("--proj-coeff", type=str, default="0.5")
+    parser.add_argument("--proj-coeff", type=str, default="1.0")
     parser.add_argument("--weighting", default="uniform", type=str, help="Max gradient norm.")
-    parser.add_argument("--repa-loss", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--repa-loss", action=argparse.BooleanOptionalAction, default=True)
     # add loss type
     parser.add_argument("--projection-loss-type", type=str, default="cosine", help="Should be a comma-separated list of projection loss types")
 
@@ -487,19 +608,29 @@ def parse_args(input_args=None):
     parser.add_argument("--config", type=str, default=None,
         help="Path to YAML config file (e.g., configs/irepa.yaml)")
 
+    # First parse to get config file path
+    if input_args is not None:
+        args, remaining = parser.parse_known_args(input_args)
+    else:
+        args, remaining = parser.parse_known_args()
+
+    # Load config file if provided (CLI args will override config values)
+    if args.config:
+        from omegaconf import OmegaConf
+        config = OmegaConf.load(args.config)
+        # Set config values as new defaults (CLI args will override these)
+        for key, value in config.items():
+            key_underscore = key.replace('-', '_')
+            for action in parser._actions:
+                if action.dest == key_underscore:
+                    action.default = value
+                    break
+
+    # Re-parse with updated defaults so CLI args take precedence
     if input_args is not None:
         args = parser.parse_args(input_args)
     else:
         args = parser.parse_args()
-
-    # Load config file if provided (config values are overridden by CLI args)
-    if args.config:
-        from omegaconf import OmegaConf
-        config = OmegaConf.load(args.config)
-        for key, value in config.items():
-            key_underscore = key.replace('-', '_')
-            if hasattr(args, key_underscore):
-                setattr(args, key_underscore, value)
 
     return args
 

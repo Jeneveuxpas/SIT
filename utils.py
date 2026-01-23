@@ -110,36 +110,30 @@ def load_legacy_checkpoints(state_dict, encoder_depth):
 ALL_SPNORM_METHODS = ["none", "zscore"]
 
 
-def spatial_zscore(feat: torch.Tensor, alpha: float = 1.0, eps: float = 1e-6) -> torch.Tensor:
+def zscore_norm(x: torch.Tensor, dim: int = -1, alpha: float = 1.0, eps: float = 1e-6) -> torch.Tensor:
     """
-    Z-score normalization along spatial dimension.
+    Functional Z-score normalization: (x - mean) / std.
+    """
+    mean = x.mean(dim=dim, keepdim=True)
+    std = x.std(dim=dim, keepdim=True)
+    return (x - alpha * mean) / (std + eps)
 
+class ZScoreNorm(torch.nn.Module):
+    """
+    Z-score normalization module using zscore_norm.
+    
     Args:
-        feat: (B, T, D) patch tokens
-        alpha: scaling factor for mean subtraction (default 1.0)
-        eps: small constant for numerical stability
-
-    Returns:
-        Normalized features (B, T, D)
+        dim: Dimension to normalize along
+            - dim=-1 (D): per-token normalization
+            - dim=1 (T): per-feature spatial normalization
+        alpha: Scaling factor for mean subtraction (default 1.0)
+        eps: Small constant for numerical stability
     """
-    mean = feat.mean(dim=1, keepdim=True)
-    std = feat.std(dim=1, keepdim=True)
-    return (feat - alpha * mean) / (std + eps)
-
-
-class SpatialNormalization:
-    """
-    Spatial normalization wrapper for backward compatibility.
-
-    Only supports "none" and "zscore" methods.
-    """
-    def __init__(self, method: str, *, eps: float = 1e-6):
-        assert method in ALL_SPNORM_METHODS, f"Invalid method: {method}. Must be one of {ALL_SPNORM_METHODS}"
-        self.method = method
+    def __init__(self, dim: int = -1, alpha: float = 1.0, eps: float = 1e-6):
+        super().__init__()
+        self.dim = dim
+        self.alpha = alpha
         self.eps = eps
-
-    def __call__(self, feat: torch.Tensor, **kwargs) -> torch.Tensor:
-        if self.method == "none":
-            return feat
-        alpha = kwargs.get('zscore_alpha', 1.0)
-        return spatial_zscore(feat, alpha=alpha, eps=self.eps)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return zscore_norm(x, dim=self.dim, alpha=self.alpha, eps=self.eps)
