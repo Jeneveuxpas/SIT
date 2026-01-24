@@ -37,14 +37,6 @@ from dataset import CustomDataset
 import wandb
 from torchvision.utils import make_grid
 from utils import ALL_SPNORM_METHODS
-
-# def preprocess_for_encoder(x, resolution=256):
-#     """Preprocess raw images for Encoder."""
-#     # Ensure float type (input may be uint8)
-#     x = x.float() / 255.0
-#     x = normalize(x, mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
-#     x = F.interpolate(x, 224 * (resolution // 256), mode='bicubic', align_corners=False)
-#     return x
     
 #################################################################################
 #                                  Utils                                       #
@@ -99,6 +91,19 @@ def requires_grad(model, flag=True):
     for p in model.parameters():
         p.requires_grad = flag
 
+
+def safe_unwrap_model(model):
+    """
+    Safely unwrap model from DDP and torch.compile wrappers.
+    This avoids issues with accelerate's unwrap_model causing KeyErrors on _orig_mod.
+    """
+    # Unwrap DDP first
+    if hasattr(model, 'module'):
+        model = model.module
+    # Unwrap torch.compile (Iteratively check for _orig_mod to handle multiple compilations if any)
+    while hasattr(model, '_orig_mod'):
+        model = model._orig_mod
+    return model
 
 def parse_layer_indices(indices_str: str) -> list:
     """Parse comma-separated layer indices string to list of ints (1-based -> 0-based)."""
@@ -215,6 +220,11 @@ def main(args):
     latents_scale = latents_stats['latents_scale'].to(device).view(1, -1, 1, 1)
     latents_bias = latents_stats['latents_bias'].to(device).view(1, -1, 1, 1)
 
+    projection_loss_kwargs = {
+        'spnorm_method': args.spnorm_method,
+        'zscore_alpha': args.zscore_alpha,
+    }
+
     loss_fn = SILossWithEncoderKV(
         prediction=args.prediction,
         path_type=args.path_type, 
@@ -223,6 +233,7 @@ def main(args):
         latents_bias=latents_bias,
         weighting=args.weighting,
         projection_loss_type=args.projection_loss_type,
+        projection_loss_kwargs=projection_loss_kwargs,
         proj_coeff=args.proj_coeff,
         distill_coeff=args.distill_coeff,
         distill_t_threshold=args.distill_t_threshold,
@@ -338,7 +349,6 @@ def main(args):
     # No longer need separate processors - encoders handle their own preprocessing
 
     # define spatial normalization class object
-    spnorm = SpatialNormalization(args.spnorm_method)
     
     for epoch in range(args.epochs):
 
@@ -380,14 +390,10 @@ def main(args):
                             features = encoder.forward_features(raw_image_) 
 
                             # normalize spatial features
-                            spnorm_kwargs = {
-                                'feat': features['x_norm_patchtokens'],
-                                'cls': features['x_norm_clstoken'],
-                                'cls_weight': args.cls_token_weight,
-                                'zscore_alpha': args.zscore_alpha,
-                                'zscore_proj_skip_std': args.zscore_proj_skip_std,
-                            }
-                            z = spnorm(**spnorm_kwargs)
+                            # normalize spatial features (handled in loss now)
+                            # Legacy Note: args.cls_token_weight was previously passed but ignored by SpatialNormalization.
+                            # We keep it ignored here to match original behavior.
+                            z = features['x_norm_patchtokens']
 
                             # append to list
                             zs.append(z)
@@ -415,8 +421,7 @@ def main(args):
                 optim_step_fn()
 
                 if accelerator.sync_gradients and global_step % args.ema_update_freq == 0:
-                    unwrapped_model = accelerator.unwrap_model(model)
-                    original_model = unwrapped_model._orig_mod if args.compile else unwrapped_model
+                    original_model = safe_unwrap_model(model)
                     update_ema(
                         ema,
                         original_model,
@@ -429,8 +434,7 @@ def main(args):
                 global_step += 1                
             if global_step % args.checkpointing_steps == 0 and global_step > 0:
                 if accelerator.is_main_process:
-                    unwrapped_model = accelerator.unwrap_model(model)
-                    original_model = unwrapped_model._orig_mod if args.compile else unwrapped_model
+                    original_model = safe_unwrap_model(model)
 
                     checkpoint = {
                         "model": original_model.state_dict(),
