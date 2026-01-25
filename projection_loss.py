@@ -103,9 +103,15 @@ class MSEProjectionLoss(ProjectionLoss):
     def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
         if self.spnorm_method == "none":
             return feat
-        elif self.spnorm_method == "zscore":
+        elif self.spnorm_method in ["zscore", "zscore_spatial"]:
             # feat is (B, T, D), we normalize over spatial dim T (dim=1)
             return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "zscore_token":
+            # Normalize over feature dim D (dim=-1)
+            return zscore_norm(feat, dim=-1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "layernorm":
+            # Standard LayerNorm over feature dim D
+            return F.layer_norm(feat, normalized_shape=(feat.shape[-1],), eps=self.eps)
         else:
             raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
 
@@ -148,8 +154,12 @@ class MSEVelocityProjectionLoss(ProjectionLoss):
     def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
         if self.spnorm_method == "none":
             return feat
-        elif self.spnorm_method == "zscore":
+        elif self.spnorm_method in ["zscore", "zscore_spatial"]:
             return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "zscore_token":
+            return zscore_norm(feat, dim=-1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "layernorm":
+            return F.layer_norm(feat, normalized_shape=(feat.shape[-1],), eps=self.eps)
         else:
             raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
 
@@ -218,8 +228,12 @@ class MSENoisyProjectionLoss(ProjectionLoss):
     def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
         if self.spnorm_method == "none":
             return feat
-        elif self.spnorm_method == "zscore":
+        elif self.spnorm_method in ["zscore", "zscore_spatial"]:
             return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "zscore_token":
+            return zscore_norm(feat, dim=-1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "layernorm":
+            return F.layer_norm(feat, normalized_shape=(feat.shape[-1],), eps=self.eps)
         else:
             raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
 

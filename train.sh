@@ -310,7 +310,7 @@ accelerate launch \
     --mixed-precision fp16 \
     --allow-tf32 \
     ${REPA_LOSS_ARG} \
-    --spnorm-method zscore \
+    --spnorm-method zscore_spatial \
     --num-workers 12
 
 # 检查训练是否成功

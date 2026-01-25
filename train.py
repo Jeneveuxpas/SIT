@@ -131,16 +131,17 @@ def main(args):
         kwargs_handlers=[ddp_kwargs],
     )
     
+    save_dir = os.path.join(args.output_dir, args.exp_name)
+    checkpoint_dir = f"{save_dir}/checkpoints"
+
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
-        save_dir = os.path.join(args.output_dir, args.exp_name)
         os.makedirs(save_dir, exist_ok=True)
         args_dict = vars(args)
         # Save to a JSON file
         json_dir = os.path.join(save_dir, "args.json")
         with open(json_dir, 'w') as f:
             json.dump(args_dict, f, indent=4)
-        checkpoint_dir = f"{save_dir}/checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(save_dir)
         logger.info(f"Experiment directory created at {save_dir}")
@@ -553,7 +554,7 @@ def parse_args(input_args=None):
     parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
                         help="Kernel size for conv projection (default: 1)")
     parser.add_argument("--kv-norm-type", type=str, default="layernorm",
-                        choices=["none", "layernorm", "zscore", "zscore_spatial", "batchnorm"],
+                        choices=["none", "layernorm", "zscore", "zscore_spatial", "zscore_token", "batchnorm"],
                         help="Normalization type for K/V: zscore=per-token, zscore_spatial=per-feature")
     parser.add_argument("--kv-zscore-alpha", type=float, default=1.0, 
                         help="Alpha for z-score normalization: (x - alpha * mean) / std")

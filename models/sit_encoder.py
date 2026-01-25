@@ -150,6 +150,8 @@ class AttentionWithEncoderKV(nn.Module):
                 # term is - sum P log Q. 
                 # input=log_prob(Q), target=P. 
                 distill_loss = F.kl_div(log_attn_weights_sit, attn_weights_enc.detach(), reduction='batchmean')
+                # batchmean sums over non-batch dims (Heads, N, N). We normalize by Heads and N.
+                distill_loss = distill_loss / (self.num_heads * N)
 
             elif align_mode == 'attn_bce':
                 logits_enc = (q @ k_enc.transpose(-2, -1)) * self.scale

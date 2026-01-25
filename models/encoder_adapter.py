@@ -100,7 +100,7 @@ class EncoderKVExtractor(nn.Module):
 
 
 KV_PROJ_TYPES = ["linear", "mlp", "conv"]
-KV_NORM_TYPES = ["none", "layernorm", "zscore", "zscore_spatial", "batchnorm"]
+KV_NORM_TYPES = ["none", "layernorm", "zscore", "zscore_spatial", "zscore_token", "batchnorm"]
 
 
 def build_kv_norm(norm_type: str, dim: int, num_patches: int = 256, alpha: float = 1.0):
@@ -111,10 +111,10 @@ def build_kv_norm(norm_type: str, dim: int, num_patches: int = 256, alpha: float
         return nn.Identity()
     elif norm_type == "layernorm":
         return nn.LayerNorm(dim)
-    elif norm_type == "zscore":
-        return ZScoreNorm(dim=-1, alpha=alpha)  # per-token normalization
-    elif norm_type == "zscore_spatial":
+    elif norm_type in ["zscore", "zscore_spatial"]:
         return ZScoreNorm(dim=1, alpha=alpha)   # per-feature spatial normalization
+    elif norm_type == "zscore_token":
+        return ZScoreNorm(dim=-1, alpha=alpha)  # per-token normalization
     elif norm_type == "batchnorm":
         return nn.BatchNorm1d(dim)
     else:
