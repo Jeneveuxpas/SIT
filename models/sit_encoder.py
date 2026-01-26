@@ -58,7 +58,6 @@ class AttentionWithEncoderKV(nn.Module):
         v_enc: Optional[torch.Tensor] = None,
         stage: int = 2,
         align_mode: str = 'attn_mse',
-        kv_mode: str = 'kv',
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward attention with staged Encoder-KV training.
@@ -77,108 +76,39 @@ class AttentionWithEncoderKV(nn.Module):
         distill_loss = None
         
         if stage == 1 and k_enc is not None and v_enc is not None:
-            # Stage 1: Use Encoder K/V directly for attention (based on kv_mode)
-            if kv_mode == 'kv':
-                k = k_enc
-                v = v_enc
-            elif kv_mode == 'k_only':
-                k = k_enc
-                v = v_sit
-            elif kv_mode == 'v_only':
-                k = k_sit
-                v = v_enc
-            else:
-                k = k_enc
-                v = v_enc
+            k = k_enc
+            v = v_enc
         elif stage == 2 and k_enc is not None and v_enc is not None:
             # Stage 2: Use SiT K/V with alignment loss
             
             if align_mode == 'logits':
                 logits_enc = (q @ k_enc.transpose(-2, -1)) * self.scale
                 logits_sit = (q @ k_sit.transpose(-2, -1)) * self.scale
-                logits_enc_n = F.normalize(logits_enc, dim=-1)
-                logits_sit_n = F.normalize(logits_sit, dim=-1)
+                logits_enc_n = F.normalize(logits_enc.float(), dim=-1)
+                logits_sit_n = F.normalize(logits_sit.float(), dim=-1)
                 distill_loss = 1 - F.cosine_similarity(logits_sit_n, logits_enc_n.detach(), dim=-1).mean()
                 
             elif align_mode == 'attn_mse':
                 if self.fused_attn:
-                    attn_enc = F.scaled_dot_product_attention(q, k_enc, v_enc)
-                    attn_sit = F.scaled_dot_product_attention(q, k_sit, v_sit)
+                    # F.scaled_dot_product_attention might return different dtypes depending on impl, cast to float
+                    attn_enc = F.scaled_dot_product_attention(q, k_enc, v_enc).float()
+                    attn_sit = F.scaled_dot_product_attention(q, k_sit, v_sit).float()
                 else:
                     attn_weights_enc = (q @ k_enc.transpose(-2, -1)) * self.scale
                     attn_weights_enc = attn_weights_enc.softmax(dim=-1)
-                    attn_enc = attn_weights_enc @ v_enc
+                    attn_enc = (attn_weights_enc @ v_enc).float()
                     
                     attn_weights_sit = (q @ k_sit.transpose(-2, -1)) * self.scale
                     attn_weights_sit = attn_weights_sit.softmax(dim=-1)
-                    attn_sit = attn_weights_sit @ v_sit
+                    attn_sit = (attn_weights_sit @ v_sit).float()
                 
                 distill_loss = F.mse_loss(attn_sit, attn_enc.detach())
 
-            elif align_mode == 'attn_cosine':
-                if self.fused_attn:
-                    attn_enc = F.scaled_dot_product_attention(q, k_enc, v_enc)
-                    attn_sit = F.scaled_dot_product_attention(q, k_sit, v_sit)
-                else:
-                    attn_weights_enc = (q @ k_enc.transpose(-2, -1)) * self.scale
-                    attn_weights_enc = attn_weights_enc.softmax(dim=-1)
-                    attn_enc = attn_weights_enc @ v_enc
-                    
-                    attn_weights_sit = (q @ k_sit.transpose(-2, -1)) * self.scale
-                    attn_weights_sit = attn_weights_sit.softmax(dim=-1)
-                    attn_sit = attn_weights_sit @ v_sit
-
-                attn_sit_n = F.normalize(attn_sit, dim=-1)
-                attn_enc_n = F.normalize(attn_enc, dim=-1)
-                distill_loss = 1 - F.cosine_similarity(attn_sit_n, attn_enc_n.detach(), dim=-1).mean()
-
-            elif align_mode == 'attn_kl':
-                # KL Divergence requires attention weights (probabilities)
-                # We must compute them manually even if fused_attn is True for the forward pass
-                logits_enc = (q @ k_enc.transpose(-2, -1)) * self.scale
-                attn_weights_enc = logits_enc.softmax(dim=-1)
-                
-                logits_sit = (q @ k_sit.transpose(-2, -1)) * self.scale
-                # F.kl_div requires log-probabilities for input
-                log_attn_weights_sit = F.log_softmax(logits_sit, dim=-1)
-                
-                # KL(P || Q) where P=Teacher(Enc), Q=Student(SiT)
-                # Standard distillation minimizes KL(Teacher || Student) ? 
-                # PyTorch F.kl_div(input, target) minimizes sums of target * (log(target) - input)
-                # We want to match existing distribution, usually forward KL: KL(P||Q) -> sum P log(P/Q)
-                # P = Enc (fixed), Q = SiT (learnable)
-                # term is - sum P log Q. 
-                # input=log_prob(Q), target=P. 
-                distill_loss = F.kl_div(log_attn_weights_sit, attn_weights_enc.detach(), reduction='batchmean')
-                # batchmean sums over non-batch dims (Heads, N, N). We normalize by Heads and N.
-                distill_loss = distill_loss / (self.num_heads * N)
-
-            elif align_mode == 'attn_bce':
-                logits_enc = (q @ k_enc.transpose(-2, -1)) * self.scale
-                attn_weights_enc = logits_enc.softmax(dim=-1)
-                
-                logits_sit = (q @ k_sit.transpose(-2, -1)) * self.scale
-                attn_weights_sit = logits_sit.softmax(dim=-1)
-                
-                # BCE between two probability distributions
-                distill_loss = F.binary_cross_entropy(attn_weights_sit, attn_weights_enc.detach())
-
             elif align_mode == 'kv_mse':
-                k_loss = F.mse_loss(k_sit, k_enc.detach())
-                v_loss = F.mse_loss(v_sit, v_enc.detach())
+                k_loss = F.mse_loss(k_sit.float(), k_enc.float().detach())
+                v_loss = F.mse_loss(v_sit.float(), v_enc.float().detach())
                 distill_loss = k_loss + v_loss
-            
-            elif align_mode == 'kv_huber':
-                k_loss = F.huber_loss(k_sit, k_enc.detach())
-                v_loss = F.huber_loss(v_sit, v_enc.detach())
-                distill_loss = k_loss + v_loss
-                
-            elif align_mode == 'k_only':
-                distill_loss = F.mse_loss(k_sit, k_enc.detach())
-            
-            elif align_mode == 'v_only':
-                distill_loss = F.mse_loss(v_sit, v_enc.detach())
-                
+
             else:
                 raise ValueError(f"Unknown align_mode: {align_mode}")
             
@@ -261,7 +191,6 @@ class SiTBlockWithEncoderKV(nn.Module):
         enc_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         stage: int = 2,
         align_mode: str = 'logits_attn',
-        kv_mode: str = 'kv',
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass.
@@ -285,7 +214,6 @@ class SiTBlockWithEncoderKV(nn.Module):
             v_enc=v_enc,
             stage=stage,
             align_mode=align_mode,
-            kv_mode=kv_mode,
         )
         x = x + gate_msa.unsqueeze(1) * attn_out
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
@@ -399,7 +327,7 @@ class SiTWithEncoderKV(nn.Module):
 
     def initialize_weights(self):
         def _basic_init(module):
-            if isinstance(module, nn.Linear):
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
@@ -446,7 +374,6 @@ class SiTWithEncoderKV(nn.Module):
         enc_kv_list: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
         stage: int = 2,
         align_mode: str = 'logits_attn',
-        kv_mode: str = 'kv',
         return_logvar: bool = False,
     ):
         """
@@ -476,7 +403,7 @@ class SiTWithEncoderKV(nn.Module):
                     enc_list_idx += 1
             
             x, block_distill_loss = block(
-                x, c, enc_kv=enc_kv, stage=stage, align_mode=align_mode, kv_mode=kv_mode
+                x, c, enc_kv=enc_kv, stage=stage, align_mode=align_mode
             )
             
             if block_distill_loss is not None:

@@ -446,9 +446,13 @@ class SAMEncoder(VisionEncoder):
         else:
             raise NotImplementedError(f"model size {self.model_config} not supported")
 
-        sam_model = SamModel.from_pretrained(model_name).to(self.device).eval()
-        self.model = sam_model.vision_encoder
+        # Load on CPU first to avoid OOM
+        sam_model = SamModel.from_pretrained(model_name).eval()
+        self.model = sam_model.vision_encoder.to(self.device)
         self._embed_dim = self.model.config.output_channels
+        
+        # Clean up
+        del sam_model
 
     def preprocess(self, x):
         # SAM only takes 1024 input
@@ -477,18 +481,27 @@ class SAM2Encoder(VisionEncoder):
     def load_model(self):
         from transformers import Sam2Model
 
-        if self.model_config == "s":
+        if self.model_config in ["s", "hiera-s", "small"]:
             model_name = "facebook/sam2-hiera-small"
-        elif self.model_config == "b":
+        elif self.model_config in ["b", "hiera-b", "base", "base-plus"]:
             model_name = "facebook/sam2-hiera-base-plus"
-        elif self.model_config == "l":
+        elif self.model_config in ["l", "hiera-l", "large"]:
             model_name = "facebook/sam2-hiera-large"
+        elif self.model_config in ["t", "hiera-t", "tiny"]:
+            model_name = "facebook/sam2-hiera-tiny"
+        elif "/" in self.model_config:
+            model_name = self.model_config
         else:
             raise NotImplementedError(f"model size {self.model_config} not supported")
 
-        sam_model = Sam2Model.from_pretrained(model_name).to(self.device).eval()
-        self.model = sam_model.vision_encoder
+        # Force eager attention implementation to avoid "CUDA error: invalid configuration argument" with SDPA + FP16
+        # Load on CPU first
+        sam_model = Sam2Model.from_pretrained(model_name, attn_implementation="eager").eval()
+        self.model = sam_model.vision_encoder.to(self.device)
         self._embed_dim = self.model.config.backbone_config.embed_dim_per_stage[-1]
+        
+        # Clean up
+        del sam_model
 
     def preprocess(self, x):
         # SAM2 has 32x downsample rate
@@ -695,7 +708,13 @@ class WebSSLEncoder(VisionEncoder):
     def load_model(self):
         from transformers import Dinov2Model, AutoImageProcessor
         
-        model_name = f"facebook/webssl-{self.model_config.replace('_', '-')}"
+        # Check if full path is provided or just config suffix
+        if "/" in self.model_config:
+            model_name = self.model_config
+        else:
+            model_name = f"facebook/webssl-{self.model_config.replace('_', '-')}"
+            
+        print(f"Loading WebSSL model from: {model_name}")
         self.model = Dinov2Model.from_pretrained(model_name)
         self.model.to(self.device)
         self.model.eval()
@@ -1165,25 +1184,44 @@ def create_encoder(encoder_string: str, device: torch.device,
         resolution: Input image resolution
         accelerator: Optional accelerator for distributed training
     
-    Returns:
+
         VisionEncoder instance
     """
-    parts = encoder_string.split('-')
-    if len(parts) != 3:
-        raise ValueError(f"Invalid encoder string format: {encoder_string}. "
-                        f"Expected format: encoder_type-architecture-model_config")
+    # Simply split by first hyphen to separate type from config
+    parts = encoder_string.split('-', 1)
+    if len(parts) < 2:
+         # Fallback for simpler names if we add them, or just use full name as type if no dash
+         # But existing logic relied on parts[0] is type, parts[1] is config.
+         # For "webssl-dino1b-full2b-224", type is webssl, config is dino1b-full2b-224
+         enc_type_key = encoder_string
+         model_config = ""
+    else:
+        enc_type_key = parts[0]
+        model_config = parts[1]
+
+    # Handle special case where user put full path? No, assuming user uses prefix like "webssl-"
+    # If using full huggingface ID without standard prefix, we need a way to detect type.
+    # But current train.sh passes "webssl-..." which maps to 'webssl' type.
     
-    encoder_type, architecture, model_config = parts
+    # Try direct mapping first
+    if enc_type_key in ENCODER_REGISTRY:
+        encoder_cls = ENCODER_REGISTRY[enc_type_key]
+        encoder = encoder_cls(enc_type_key, enc_type_key, model_config, device, resolution, accelerator) # Pass enc_type_key as architecture for now
+        encoder.load_model()
+        return encoder
     
-    if encoder_type not in ENCODER_REGISTRY:
-        raise ValueError(f"Unknown encoder type: {encoder_type}. "
-                        f"Available types: {list(ENCODER_REGISTRY.keys())}")
+    # Fallback: maybe specific handling or error
+    # If the user passed "facebook/webssl-...", splitting strictly by '-' might be messy if it contains slashes
+    # But current usage is --encoder webssl-dino1b...
     
-    encoder_class = ENCODER_REGISTRY[encoder_type]
-    encoder = encoder_class(encoder_type, architecture, model_config, 
-                            device, resolution, accelerator)
+    # Let's trust the first part is key.
+    if enc_type_key not in ENCODER_REGISTRY:
+         # Maybe the user didn't use a dash?
+         raise ValueError(f"Unknown encoder type: {enc_type_key}. Supported: {list(ENCODER_REGISTRY.keys())}")
+
+    encoder_cls = ENCODER_REGISTRY[enc_type_key]
+    encoder = encoder_cls(enc_type_key, enc_type_key, model_config, device, resolution, accelerator) # Pass enc_type_key as architecture for now
     encoder.load_model()
-    
     return encoder
 
 
@@ -1212,8 +1250,8 @@ def load_encoders(enc_type: str, device: torch.device, resolution: int = 256,
     for enc_name in enc_names:
         # Parse encoder specification
         parts = enc_name.split('-')
-        if len(parts) != 3:
-            raise ValueError(f"Invalid encoder format: {enc_name}")
+        # if len(parts) != 3:
+        #    raise ValueError(f"Invalid encoder format: {enc_name}")
         
         encoder = create_encoder(enc_name, device, resolution, accelerator)
         encoder.eval()

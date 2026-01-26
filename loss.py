@@ -44,7 +44,6 @@ class SILossWithEncoderKV:
             projection_loss_kwargs={},
             proj_coeff=[0.5],
             distill_coeff=1.0,
-            distill_t_threshold=1.0,  # Only distill when t < threshold
         ):
         self.prediction = prediction
         self.weighting = weighting
@@ -53,7 +52,6 @@ class SILossWithEncoderKV:
         self.latents_scale = latents_scale
         self.latents_bias = latents_bias
         self.distill_coeff = distill_coeff
-        self.distill_t_threshold = distill_t_threshold
 
         # parse projection loss type and coeff
         self.projection_loss_type = [elem.strip() for elem in projection_loss_type.split(",") if elem.strip()]
@@ -138,34 +136,32 @@ class SILossWithEncoderKV:
             model_input, time_input.flatten(), **model_kwargs
         )
         
-        # Denoising loss
-        denoising_loss = mean_flat((model_output - model_target) ** 2)
-
-        # Create mask: only apply repa/distillation when t < threshold
-        t_mask = (time_input.flatten() < self.distill_t_threshold).float()
         
-        # Projection loss (REPA) - only apply when t < threshold
+        # Denoising loss
+        denoising_loss = mean_flat((model_output.float() - model_target.float()) ** 2)
+        
+        # Projection loss (REPA)
         total_proj_loss = 0.
         proj_loss_dict = {}
         for proj_loss_name, proj_loss_fn, coeff in zip(self.projection_loss_type, self.projection_loss, self.proj_coeff):
-            proj_loss = torch.tensor(0.0, device=images.device, dtype=images.dtype)
+            # Initialize with float32
+            proj_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
             if len(zs) > 0 and zs_tilde is not None and len(zs_tilde) > 0:
                 for z, z_tilde, z_tilde_original in zip(zs, zs_tilde, zs_tilde_original):
                     proj_loss = proj_loss + proj_loss_fn(z, z_tilde, z_tilde_original, 
                                                          alpha_t=alpha_t, sigma_t=sigma_t,
                                                          d_alpha_t=d_alpha_t, d_sigma_t=d_sigma_t)
                 proj_loss /= len(zs)
-            # Apply t_mask
-            proj_loss = proj_loss * t_mask.mean()
+
             proj_loss_dict[proj_loss_name] = proj_loss.detach().item()
             proj_loss_dict[f"{proj_loss_name}_weighted"] = proj_loss.detach().item() * coeff
             total_proj_loss = total_proj_loss + coeff * proj_loss
         
         # Handle distillation loss with t threshold
         if distill_loss is None or not isinstance(distill_loss, torch.Tensor):
-            distill_loss = torch.tensor(0.0, device=images.device, dtype=images.dtype)
-        
-        distill_loss = distill_loss * t_mask.mean()  # Scale by mask mean
+            distill_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
+        else:
+            distill_loss = distill_loss.float()
         
         # Aggregate loss dict
         loss_dict = proj_loss_dict.copy()

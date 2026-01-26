@@ -14,7 +14,11 @@ class EncoderKVExtractor(nn.Module):
     """
     Extract K/V from specified encoder layers using forward hooks.
     
-    Currently assumes DINOv2 structure but named generically.
+    Supports:
+    - Timm-style models (e.g. DINOv2 from torch.hub)
+    - HF ViT/DINOv2 models (e.g. WebSSL)
+    - SAM2 (Hiera) backbone
+    
     Weights are frozen.
     """
     def __init__(self, encoder_model: nn.Module, layer_indices: List[int]):
@@ -22,7 +26,11 @@ class EncoderKVExtractor(nn.Module):
         self.encoder_model = encoder_model
         self.layer_indices = layer_indices
         self.captured_kv: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        self.captured_feat: Dict[int, torch.Tensor] = {}
         self._hooks = []
+        
+        # Flatten blocks to allow index-based access
+        self.blocks = self._get_model_blocks(encoder_model)
         
         # Register hooks
         self._register_hooks()
@@ -30,38 +38,257 @@ class EncoderKVExtractor(nn.Module):
         # Freeze encoder
         for param in self.encoder_model.parameters():
             param.requires_grad = False
-    
+            
+    def _get_model_blocks(self, model: nn.Module) -> List[nn.Module]:
+        """Flatten model blocks into a list for consistent indexing."""
+        # 1. Timm / TorchHub DINOv2
+        if hasattr(model, "blocks"):
+            return list(model.blocks)
+        
+        # 2. HF ViT / DINOv2 (WebSSL)
+        # e.g. model.encoder.layer (ModuleList)
+        if hasattr(model, "encoder") and hasattr(model.encoder, "layer"):
+            return list(model.encoder.layer)
+        
+        
+        # 3. SAM2 (Hiera) - Option A: Direct blocks in backbone
+        if hasattr(model, "backbone") and hasattr(model.backbone, "blocks"):
+            return list(model.backbone.blocks)
+
+        # 4. SAM2 (Hiera) - Option B: Stages
+        # Structure: model.backbone.stages (ModuleList) -> each stage has blocks
+        # We need to check if it's the specific SAM2 Vision Encoder structure
+        if hasattr(model, "backbone") and hasattr(model.backbone, "stages"):
+            blocks = []
+            for stage in model.backbone.stages:
+                # specific to Hiera implementation in transformers
+                if hasattr(stage, "blocks"):
+                    blocks.extend(list(stage.blocks))
+                else: 
+                     # Some implementations might behave differently, but Hiera usually has blocks
+                     # Fallback or strict check
+                     pass
+            return blocks
+
+        raise ValueError(f"Unsupported encoder architecture: {type(model)}")
+
     def _register_hooks(self):
         """Register forward hooks on specified encoder attention layers."""
         for idx in self.layer_indices:
-            # Assuming DINOv2 structure for now: blocks[i].attn.qkv
-            # TODO: Abstraction for other encoders
-            block = self.encoder_model.blocks[idx]
-            attn = block.attn
+            if idx >= len(self.blocks):
+                raise ValueError(f"Layer index {idx} out of range (num_blocks={len(self.blocks)})")
+                
+            block = self.blocks[idx]
             
-            # Create hook that captures K/V
-            def make_hook(layer_idx):
-                def hook_fn(module, input, output):
-                    # DINOv2 Attention: input is (x,) after norm
-                    x = input[0]
-                    B, N, C = x.shape
-                    
-                    # Recompute qkv to get K, V
-                    qkv = module.qkv(x)
-                    qkv = qkv.reshape(B, N, 3, module.num_heads, C // module.num_heads)
-                    qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, heads, N, head_dim)
-                    q, k, v = qkv.unbind(0)
-                    
-                    # Remove CLS token (first token) - DINO has 257 tokens, we need 256
-                    k = k[:, :, 1:, :]  # Skip CLS token
-                    v = v[:, :, 1:, :]  # Skip CLS token
-                    
-                    # Store K, V (B, heads, num_patches, head_dim)
-                    self.captured_kv[layer_idx] = (k.detach(), v.detach())
-                return hook_fn
+            # Identify attention module and Hook type
+            # print(f"Inspecting block {idx} of type {type(block)}")
             
-            hook = attn.register_forward_hook(make_hook(idx))
-            self._hooks.append(hook)
+            # Case C: SAM2 Hiera -> has 'qkv' and 'query_stride' (specific to Hiera/SAM2)
+            if hasattr(block, "attn") and hasattr(block.attn, "qkv") and hasattr(block.attn, "query_stride"):
+                # print("Selected: SAM2 (qkv) hook")
+                self._register_hf_sam2_qkv_hook(block.attn, idx)
+            # Case A: Timm DINOv2 -> block.attn.qkv
+            elif hasattr(block, "attn") and hasattr(block.attn, "qkv"):
+                # print("Selected: Timm hook")
+                self._register_timm_hook(block.attn, idx)
+            # Case B: HF DINOv2/ViT -> block.attention.attention.query/key/value
+            elif hasattr(block, "attention") and hasattr(block.attention, "attention"):
+                 # print("Selected: HF ViT hook")
+                 self._register_hf_vit_hook(block.attention.attention, idx)
+            # Case D: Generic HF SAM2 Hiera check (fallback for versions without qkv?)
+            elif hasattr(block, "attn") and hasattr(block.attn, "q_proj"):
+                # print("Selected: SAM2 (separate proj) hook")
+                self._register_hf_sam2_hook(block.attn, idx)
+
+            else:
+                # Try to find something that looks like attention
+                raise NotImplementedError(f"Could not find supported attention block in {type(block)}")
+    
+    def get_layer_dim(self, idx: int) -> int:
+        """Get the embedding dimension of the specified layer."""
+        if idx >= len(self.blocks):
+            return 0
+            
+        block = self.blocks[idx]
+        
+        # SAM2 Hiera
+        if hasattr(block, "attn") and hasattr(block.attn, "dim"):
+            return block.attn.dim
+        # Timm DINOv2
+        elif hasattr(block, "attn") and hasattr(block.attn, "qkv"):
+             if hasattr(block.attn, "dim"):
+                 return block.attn.dim
+             elif hasattr(block.attn, "qkv") and hasattr(block.attn.qkv, "in_features"):
+                 return block.attn.qkv.in_features
+        # HF ViT/DINOv2
+        elif hasattr(block, "attention") and hasattr(block.attention, "attention"):
+             # BERT/ViT style: attention.attention.key.in_features
+             return block.attention.attention.key.in_features
+             
+        # Fallback: try to find linear layers in attention
+        return 0
+                
+    def _register_timm_hook(self, attn_module, layer_idx):
+        def hook_fn(module, input, output):
+            # DINOv2 Attention: input is (x,) after norm
+            x = input[0]
+            B, N, C = x.shape
+            
+            # Recompute qkv to get K, V
+            qkv = module.qkv(x)
+            qkv = qkv.reshape(B, N, 3, module.num_heads, C // module.num_heads)
+            qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, heads, N, head_dim)
+            q, k, v = qkv.unbind(0)
+            
+            # Remove CLS token (first token) - DINO has 257 tokens, we need 256
+            k = k[:, :, 1:, :]  # Skip CLS token
+            v = v[:, :, 1:, :]  # Skip CLS token
+            
+            # Store K, V (B, heads, num_patches, head_dim)
+            self.captured_kv[layer_idx] = (k.detach(), v.detach())
+            self.captured_feat[layer_idx] = x.detach()
+        
+        hook = attn_module.register_forward_hook(hook_fn)
+        self._hooks.append(hook)
+
+    def _register_hf_vit_hook(self, attn_module, layer_idx):
+        """Hook for HF ViT/DINOv2 (separated query/key/value layers)"""
+        def hook_fn(module, input, output):
+            # HF passes (hidden_states, ...)
+            x = input[0]
+            # In HF, internal attention module usually does the projection inside forward
+            # But we are hooking the module that HAS .query, .key, .value
+            # We can just manually call the projection layers
+            
+            # Get properties from module
+            head_dim = module.head_dim if hasattr(module, 'head_dim') else (module.all_head_size // module.num_attention_heads)
+            num_heads = module.num_attention_heads
+            B, N, C = x.shape
+            
+            # Recompute K, V
+            key_layer = module.key(x)
+            value_layer = module.value(x)
+            
+            # Reshape: [B, N, heads, head_dim] -> transpose -> [B, heads, N, head_dim]
+            k = key_layer.view(B, N, num_heads, head_dim).transpose(1, 2)
+            v = value_layer.view(B, N, num_heads, head_dim).transpose(1, 2)
+            
+            # Remove CLS token logic
+            # HF ViT usually has CLS token at index 0
+            # Warning: Some models might not. We assume standard ViT behavior here.
+            # DINOv2 (WebSSL) has CLS token.
+            k = k[:, :, 1:, :]
+            v = v[:, :, 1:, :]
+            
+            self.captured_kv[layer_idx] = (k.detach(), v.detach())
+            self.captured_feat[layer_idx] = x.detach()
+
+        hook = attn_module.register_forward_hook(hook_fn)
+        self._hooks.append(hook)
+
+    def _register_hf_sam2_hook(self, attn_module, layer_idx):
+        """Hook for SAM2 Hiera Attention"""
+        def hook_fn(module, args, kwargs, output):
+            # Hiera forward(x, ...). x is [B, N, C]
+            # Handle args or kwargs
+            if len(args) > 0:
+                x = args[0]
+            elif 'hidden_states' in kwargs:
+                x = kwargs['hidden_states']
+            else:
+                # Fallback or error
+                # print("Warning: No input found in SAM2 hook")
+                return
+
+            B, N, C = x.shape
+            
+            # Check structure of HieraAttention
+            # It has q_proj, k_proj, v_proj
+            num_heads = module.num_heads
+            head_dim = module.head_dim
+            
+            # Recompute K, V using the module's projections
+            k = module.k_proj(x)
+            v = module.v_proj(x)
+            
+            # Reshape [B, N, heads, head_dim] -> [B, heads, N, head_dim]
+            k = k.view(B, N, num_heads, head_dim).transpose(1, 2)
+            v = v.view(B, N, num_heads, head_dim).transpose(1, 2)
+            
+            self.captured_kv[layer_idx] = (k.detach(), v.detach())
+            self.captured_feat[layer_idx] = x.detach()
+
+        # Use with_kwargs=True to capture named arguments (transformers often uses kwargs)
+        hook = attn_module.register_forward_hook(hook_fn, with_kwargs=True)
+        self._hooks.append(hook)
+
+    def _register_hf_sam2_qkv_hook(self, attn_module, layer_idx):
+        """Hook for SAM2 Hiera Attention with Fused QKV"""
+        def hook_fn(module, args, kwargs, output):
+            # Handle input
+            if len(args) > 0:
+                x = args[0]
+            elif 'hidden_states' in kwargs:
+                x = kwargs['hidden_states']
+            else:
+                return
+
+            if len(x.shape) == 3:
+                 B, N, C = x.shape
+            elif len(x.shape) == 4:
+                 # Handle 4D: (B, C, H, W) or (B, H, W, C)
+                 # Determine channel dim
+                 dim_val = module.dim if hasattr(module, 'dim') else (module.qkv.in_features if hasattr(module, 'qkv') else None)
+                 
+                 if dim_val and x.shape[1] == dim_val: # channels first (B, C, H, W)
+                     x = x.flatten(2).transpose(1, 2) # -> B, N, C
+                 elif dim_val and x.shape[3] == dim_val: # channels last (B, H, W, C)
+                     x = x.flatten(1, 2) # -> B, N, C
+                 elif dim_val is None:
+                     # Fallback assumption: (B, C, H, W) is standard for many vision models, 
+                     # but Hiera/SAM2 often uses (B, H, W, C).
+                     # Based on debug (B, H, W, 384), it is channels last.
+                     # Heuristic: smallest dim is usually channels? No, tokens are many.
+                     # Heuristic: 3 for channels usually? No, embedding dim is large.
+                     # Let's assume channels last if last dim > 3.
+                     if x.shape[3] > 3:
+                         x = x.flatten(1, 2)
+                     else:
+                         x = x.flatten(2).transpose(1, 2)
+                 else:
+                     # If dim match fails or ambiguous
+                     if x.shape[3] == dim_val:
+                         x = x.flatten(1, 2)
+                     else:
+                          x = x.flatten(2).transpose(1, 2)
+                 
+                 B, N, C = x.shape
+            else:
+                return
+
+
+            
+            # Recompute qkv
+            # SAM2 Hiera qkv: Linear(dim, 3*dim, bias=True)
+            # Output shape: [B, N, 3*dim]
+            qkv = module.qkv(x)
+            
+            # Reshape to [B, N, 3, heads, head_dim]
+            # Need to get num_heads. 
+            num_heads = module.num_attention_heads
+            head_dim = C // num_heads # Assuming dim_out == dim, usually true for attention blocks
+            
+            qkv = qkv.reshape(B, N, 3, num_heads, head_dim)
+            qkv = qkv.permute(2, 0, 3, 1, 4) # [3, B, heads, N, head_dim]
+            q, k, v = qkv.unbind(0)
+            
+            self.captured_kv[layer_idx] = (k.detach(), v.detach())
+            self.captured_feat[layer_idx] = x.detach()
+
+        hook = attn_module.register_forward_hook(hook_fn, with_kwargs=True)
+        self._hooks.append(hook)
+            
+
     
     def remove_hooks(self):
         """Remove all registered hooks."""
@@ -83,16 +310,49 @@ class EncoderKVExtractor(nn.Module):
             cls_token: CLS token (B, enc_dim)
         """
         self.captured_kv = {}
+        self.captured_feat = {}
         
         # Forward through encoder and get CLS token
-        output = self.encoder_model.forward_features(x)
-        cls_token = output['x_norm_clstoken']  # (B, enc_dim)
+        if hasattr(self.encoder_model, "forward_features"):
+            output = self.encoder_model.forward_features(x)
+            # Timm DINOv2 returns dict if our wrapper, but raw timm model returns tensor or tuple
+            # Wait, standard timm model returns tensor or (tensor, tensor).
+            # But the 'vision_encoder.py' DINOEncoder.load_model uses torch.hub.
+            # torch.hub DINOv2 has forward_features.
+            if isinstance(output, dict):
+                cls_token = output.get('x_norm_clstoken')
+            else:
+                # Assuming simple feature return if not dict
+                cls_token = None
+        else:
+            # Fallback for HF models (forward)
+            output = self.encoder_model(x)
+            # HF models return output object or tuple
+            # Attempt to extract CLS token if present (e.g. pooler_output)
+            if hasattr(output, "pooler_output"):
+                cls_token = output.pooler_output
+            elif hasattr(output, "last_hidden_state"):
+                # Check if it has CLS token at 0?
+                # For ViT, yes. For SAM2, no.
+                # We can try to infer from model type or just leave None
+                cls_token = None
+            else:
+                cls_token = None
+
+        
         
         # Collect K/V in order of layer_indices
         kv_list = []
+        feat_list = []
         for idx in self.layer_indices:
             if idx in self.captured_kv:
                 kv_list.append(self.captured_kv[idx])
+                # Feature might be captured (if configured)
+                if idx in self.captured_feat:
+                    feat_list.append(self.captured_feat[idx])
+                else:
+                     # Fallback check
+                     pass
             else:
                 raise RuntimeError(f"K/V for layer {idx} not captured")
         

@@ -10,15 +10,16 @@
 #   --enc-layers        Encoder层索引 (默认: 9, 1-based)
 #   --sit-layers        SiT层索引 (默认: 5, 1-based)
 #   --stage1-ratio      Stage 1比例 (默认: 0.5)
-#   --align-mode        对齐模式 (默认: logits_attn)可选: logits, logits_attn, attn_mse, kv_mse, k_only, attn_kl
+#   --align-mode        对齐模式 (默认: logits_attn)可选: logits, logits_attn, attn_mse, kv_mse, k_only
 #   --proj-coeff        REPA投影系数 (默认: 1.0)
 #   --distill-coeff     蒸馏loss系数 (默认: 1.0)
 #   --encoder-depth     REPA对齐层 (默认: 8)
 #   --model-size        模型大小 B/L/XL (默认: B)
+#   --encoder           Encoder类型 (默认: dinov2-vit-b, 可选: dinov2-vit-b/l/g, sam2-hiera-s/b/l)
 #   --gpu               使用哪张GPU (默认: 0,1)
 #
 # 示例:
-#./train.sh --gpu 0,1 --model-size XL --enc-layers 9 --sit-layers 5 --encoder-depth 10 --projection-loss-type mse_v --proj-coeff 1.0 --max-steps 100000 --stage1-ratio 0.3 --distill-coeff 2.0 --align-mode attn_mse --kv-proj-type conv --kv-norm-type zscore
+#./train.sh --gpu 1 --model-size B --enc-layers 11 --sit-layers 4 --encoder-depth 6 --projection-loss-type mse_v --proj-coeff 1.0 --max-steps 100000 --stage1-ratio 0.3 --distill-coeff 2.0 --align-mode attn_mse --kv-proj-type linear --kv-norm-type zscore --encoder sam2-hiera-s
 # ============================================================================
 set -e
 
@@ -101,6 +102,10 @@ while [[ $# -gt 0 ]]; do
             MODEL_SIZE_ARG="$2"
             shift 2
             ;;
+        --encoder)
+            ENCODER_ARG="$2"
+            shift 2
+            ;;
         *)
             echo "未知参数: $1"
             exit 1
@@ -136,8 +141,8 @@ case "$MODEL_SIZE" in
         exit 1
         ;;
 esac
-# DINO encoder 继续使用 dinov2-vit-b
-ENCODER_TYPE="dinov2-vit-b"
+# Encoder 类型 (支持: dinov2-vit-b/l/g, sam2-hiera-s/b/l)
+ENCODER_TYPE="${ENCODER_ARG:-dinov2-vit-b}"
 ENCODER_DEPTH="${ENCODER_DEPTH_ARG:-8}"
 Z_DIMS="768"
 
@@ -168,12 +173,12 @@ fi
 # ============================================================================
 # 训练配置
 # ============================================================================
-BATCH_SIZE=256
-GRADIENT_ACCUMULATION_STEPS=1
+BATCH_SIZE=128
+GRADIENT_ACCUMULATION_STEPS=2
 LEARNING_RATE=1e-4
 MAX_STEPS="${MAX_STEPS_ARG:-400000}"
 CHECKPOINT_STEPS=10000
-SAMPLING_STEPS=10000
+SAMPLING_STEPS=100000
 RESUME_STEP="${RESUME_STEP_ARG:-0}"
 
 # ============================================================================
@@ -242,6 +247,7 @@ echo "Encoder-KV Distillation for iREPA"
 echo "================================================"
 echo "实验名称: ${EXP_NAME}"
 echo "Encoder层: ${ENC_LAYER_INDICES}"
+echo "Encoder类型: ${ENCODER_TYPE}"
 echo "SiT层: ${SIT_LAYER_INDICES}"
 echo "Stage1比例: ${STAGE1_RATIO}"
 echo "对齐模式: ${ALIGN_MODE}"

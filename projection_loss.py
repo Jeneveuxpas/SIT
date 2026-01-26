@@ -67,6 +67,10 @@ class CosineProjectionLoss(ProjectionLoss):
 
     def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
         self._check(zs, zs_tilde)
+        # cast to float32
+        zs = zs.float()
+        zs_tilde = zs_tilde.float()
+        
         # normalize zs and zs_tilde
         zs = F.normalize(zs, dim=-1)
         zs_tilde = F.normalize(zs_tilde, dim=-1)
@@ -117,6 +121,10 @@ class MSEProjectionLoss(ProjectionLoss):
 
     def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
         self._check(zs, zs_tilde)
+        # cast to float32
+        zs = zs.float()
+        zs_tilde = zs_tilde.float()
+        
         # Apply spatial normalization to both
         zs_norm = self._apply_spnorm(zs)
         zs_tilde_norm = self._apply_spnorm(zs_tilde)
@@ -165,6 +173,10 @@ class MSEVelocityProjectionLoss(ProjectionLoss):
 
     def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
         self._check(zs, zs_tilde)
+
+        # cast to float32
+        zs = zs.float()
+        zs_tilde = zs_tilde.float()
         
         # Get d_alpha_t and d_sigma_t from kwargs (passed from loss function)
         d_alpha_t = kwargs.get('d_alpha_t', None)
@@ -182,8 +194,8 @@ class MSEVelocityProjectionLoss(ProjectionLoss):
         # We need to reshape them for broadcasting with (B, T, D)
         if isinstance(d_alpha_t, torch.Tensor):
             # Reshape from (B, 1, 1, 1) to (B, 1, 1) for broadcasting
-            d_alpha_t = d_alpha_t.view(d_alpha_t.shape[0], 1, 1)
-            d_sigma_t = d_sigma_t.view(d_sigma_t.shape[0], 1, 1)
+            d_alpha_t = d_alpha_t.view(d_alpha_t.shape[0], 1, 1).float()
+            d_sigma_t = d_sigma_t.view(d_sigma_t.shape[0], 1, 1).float()
 
         zs = self._apply_spnorm(zs)
         z_target_norm = d_alpha_t * zs + d_sigma_t * noise_feat
@@ -240,6 +252,10 @@ class MSENoisyProjectionLoss(ProjectionLoss):
     def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
         self._check(zs, zs_tilde)
         
+        # cast to float32
+        zs = zs.float()
+        zs_tilde = zs_tilde.float()
+
         # Get alpha_t and sigma_t from kwargs (passed from loss function)
         alpha_t = kwargs.get('alpha_t', None)
         sigma_t = kwargs.get('sigma_t', None)
@@ -254,8 +270,8 @@ class MSENoisyProjectionLoss(ProjectionLoss):
         # Reshape alpha_t and sigma_t for broadcasting with (B, T, D)
         # They are typically (B, 1, 1, 1) shaped for image latents
         if isinstance(alpha_t, torch.Tensor):
-            alpha_t = alpha_t.view(alpha_t.shape[0], 1, 1)
-            sigma_t = sigma_t.view(sigma_t.shape[0], 1, 1)
+            alpha_t = alpha_t.view(alpha_t.shape[0], 1, 1).float()
+            sigma_t = sigma_t.view(sigma_t.shape[0], 1, 1).float()
         
         # Normalize zs FIRST, then add noise (for better scale matching with gaussian noise)
         zs_norm = self._apply_spnorm(zs)

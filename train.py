@@ -167,11 +167,35 @@ def main(args):
         args.enc_type, device, args.resolution, accelerator=accelerator
     )
     
-    # z_dims is used for REPA projectors. 
-    # If repa_loss is False, we might want to avoid creating projectors, but keeping it simple for now.
-    # Or strict: z_dims = [e.embed_dim for e in encoders] if args.repa_loss else []
-    # But usually enc_type implies intention. Let's pass valid z_dims.
+    # Create Encoder K/V extractor first to detect dimension
+    encoder_kv_extractor = None
+    if len(encoders) > 0:
+        encoder_kv_extractor = EncoderKVExtractor(encoders[0].model, enc_layer_indices)
+        encoder_kv_extractor.eval()
+        
+        # Auto-detect real dimension of the extracted layer
+        # This is critical for hierarchical models (SAM2/Hiera) where dims change across stages
+        if len(enc_layer_indices) > 0:
+            real_dim = encoder_kv_extractor.get_layer_dim(enc_layer_indices[0])
+            if real_dim > 0 and args.enc_dim != real_dim:
+                if accelerator.is_main_process:
+                    logger.info(f"Overwriting args.enc_dim {args.enc_dim} -> {real_dim} based on extracted layer {enc_layer_indices[0]}.")
+                args.enc_dim = real_dim
+            elif real_dim == 0:
+                 # Fallback to model embedding dim
+                 z_dims = [encoder.embed_dim for encoder in encoders]
+                 if len(z_dims) > 0 and args.enc_dim != z_dims[0]:
+                    if accelerator.is_main_process:
+                        logger.info(f"Overwriting args.enc_dim {args.enc_dim} -> {z_dims[0]} based on encoder.embed_dim.")
+                    args.enc_dim = z_dims[0]
+                    
+    # z_dims should reflect the TARGET REPA dimension (typically final output)
+    # args.enc_dim should reflect the K/V SOURCE dimension (intermediate layer)
+    # So we do NOT overwrite z_dims with args.enc_dim here.
+    # z_dims = [encoder.embed_dim for encoder in encoders] is already correct (set at line 172).
+    # We ensure z_dims comes from the encoder object, not the potentially modified args.enc_dim.
     z_dims = [encoder.embed_dim for encoder in encoders]
+    
     block_kwargs = {
         "fused_attn": args.fused_attn, 
         "qk_norm": args.qk_norm,
@@ -203,15 +227,6 @@ def main(args):
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
 
-    # Create Encoder K/V extractor
-    # Use the first encoder's model for KV extraction
-    # encoders[0] is a VisionEncoder wrapper; encoders[0].model is the actual torch module
-    if len(encoders) > 0:
-        encoder_kv_extractor = EncoderKVExtractor(encoders[0].model, enc_layer_indices)
-        encoder_kv_extractor.eval()
-    else:
-        raise ValueError("No encoder loaded! Please specify --enc-type.")
-
     # Load the VAE weights correctly, load the BN stats (sota version style)
     vae = VAE_F8D4().to(device).eval()
     vae_state_dict = torch.load("pretrained_models/sdvae-ft-mse-f8d4.pt", map_location=device, weights_only=False)
@@ -237,7 +252,6 @@ def main(args):
         projection_loss_kwargs=projection_loss_kwargs,
         proj_coeff=args.proj_coeff,
         distill_coeff=args.distill_coeff,
-        distill_t_threshold=args.distill_t_threshold,
     )
     if accelerator.is_main_process:
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -412,6 +426,8 @@ def main(args):
                 
                 # Total loss
                 loss = denoising_loss_mean + proj_loss + distill_loss
+                # Ensure loss is float32 for scaler
+                loss = loss.float()
                     
                 ## optimization
                 accelerator.backward(loss)
@@ -530,22 +546,17 @@ def parse_args(input_args=None):
     parser.add_argument("--proj-kwargs-kernel-size", type=int, default=1, choices=[1, 3, 5, 7])
 
     # Encoder KV specific
-    parser.add_argument("--enc-layer-indices", type=str, default="9",
+    parser.add_argument("--enc-layer-indices", type=str, default="11",
                         help="Comma-separated Encoder layer indices for K/V extraction (1-based, e.g. 1-12)")
-    parser.add_argument("--sit-layer-indices", type=str, default="5",
+    parser.add_argument("--sit-layer-indices", type=str, default="10",
                         help="Comma-separated SiT layer indices for K/V injection (1-based, e.g. 1-12)")
     parser.add_argument("--stage1-ratio", type=float, default=0.3,
                         help="Ratio of training for Stage 1. e.g., 0.5 = first 50%")
-    parser.add_argument("--distill-coeff", type=float, default=1.0,
+    parser.add_argument("--distill-coeff", type=float, default=2.0,
                         help="Coefficient for attention distillation loss (Stage 2 only)")
     parser.add_argument("--align-mode", type=str, default="attn_mse",
-                        choices=["logits", "attn_mse", "kv_mse", "k_only", "v_only", "attn_cosine", "attn_kl", "attn_bce", "kv_huber"],
-                        help="Alignment mode: logits, attn_mse, attn_kl, attn_bce, kv_mse, kv_huber, etc.")
-    parser.add_argument("--kv-mode", type=str, default="kv",
-                        choices=["kv", "k_only", "v_only"],
-                        help="Which K/V to replace and align: kv, k_only, or v_only")
-    parser.add_argument("--distill-t-threshold", type=float, default=1.0,
-                        help="Only apply distillation loss when t < threshold (default: 1.0 = always)")
+                        choices=["logits", "attn_mse", "kv_mse"],
+                        help="Alignment mode: logits, attn_mse,kv_mse")
     parser.add_argument("--kv-proj-type", type=str, default="linear",
                         choices=["linear", "mlp", "conv"],
                         help="Projection type for Encoder K/V: linear, mlp, or conv")
@@ -604,7 +615,7 @@ def parse_args(input_args=None):
     parser.add_argument("--projection-loss-type", type=str, default="cosine", help="Should be a comma-separated list of projection loss types")
 
     # whether to normalize spatial features
-    parser.add_argument("--spnorm-method", type=str, default="none", choices=ALL_SPNORM_METHODS)
+    parser.add_argument("--spnorm-method", type=str, default="zscore", choices=["none", "zscore", "zscore_spatial", "zscore_token", "layernorm"])
     parser.add_argument("--cls-token-weight", type=float, default=0.2)
     parser.add_argument("--zscore-alpha", type=float, default=0.6)
     parser.add_argument("--zscore-proj-skip-std", action=argparse.BooleanOptionalAction, default=False)
