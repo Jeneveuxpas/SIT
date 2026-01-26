@@ -90,14 +90,6 @@ while [[ $# -gt 0 ]]; do
             PROJECTION_LAYER_TYPE_ARG="$2"
             shift 2
             ;;
-        --distill-t-threshold)
-            DISTILL_T_THRESHOLD_ARG="$2"
-            shift 2
-            ;;
-        --kv-mode)
-            KV_MODE_ARG="$2"
-            shift 2
-            ;;
         --model-size)
             MODEL_SIZE_ARG="$2"
             shift 2
@@ -155,8 +147,6 @@ STAGE1_RATIO="${STAGE1_RATIO_ARG:-0.3}"
 ALIGN_MODE="${ALIGN_MODE_ARG:-logits_attn}"
 PROJ_COEFF="${PROJ_COEFF_ARG:-1.0}"
 DISTILL_COEFF="${DISTILL_COEFF_ARG:-1.0}"
-DISTILL_T_THRESHOLD="${DISTILL_T_THRESHOLD_ARG:-1.0}"
-KV_MODE="${KV_MODE_ARG:-kv}"
 PROJECTION_LOSS_TYPE="${PROJECTION_LOSS_TYPE_ARG:-cosine}"
 KV_NORM_TYPE="${KV_NORM_TYPE_ARG:-layernorm}"
 KV_ZSCORE_ALPHA="${KV_ZSCORE_ALPHA_ARG:-1.0}"
@@ -230,14 +220,6 @@ if [ -z "$EXP_NAME_ARG" ]; then
     if [ "$DISTILL_COEFF" != "2.0" ]; then
         EXP_NAME="${EXP_NAME}_dc${DISTILL_COEFF}"
     fi
-    # Add distill t threshold to name (skip default 1.0)
-    if [ "$DISTILL_T_THRESHOLD" != "1.0" ]; then
-        EXP_NAME="${EXP_NAME}_dt${DISTILL_T_THRESHOLD}"
-    fi
-    # Add kv mode to name (skip default kv)
-    if [ "$KV_MODE" != "kv" ]; then
-        EXP_NAME="${EXP_NAME}_${KV_MODE}"
-    fi
 else
     EXP_NAME="$EXP_NAME_ARG"
 fi
@@ -304,8 +286,6 @@ accelerate launch \
     --kv-zscore-alpha ${KV_ZSCORE_ALPHA} \
     --kv-proj-type ${KV_PROJ_TYPE} \
     --distill-coeff ${DISTILL_COEFF} \
-    --distill-t-threshold ${DISTILL_T_THRESHOLD} \
-    --kv-mode ${KV_MODE} \
     --batch-size ${BATCH_SIZE} \
     --gradient-accumulation-steps ${GRADIENT_ACCUMULATION_STEPS} \
     --learning-rate ${LEARNING_RATE} \

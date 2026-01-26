@@ -167,33 +167,31 @@ def main(args):
         args.enc_type, device, args.resolution, accelerator=accelerator
     )
     
-    # Create Encoder K/V extractor first to detect dimension
+    # Create Encoder K/V extractor first to detect dimension and heads
     encoder_kv_extractor = None
+    enc_dim = None
+    enc_heads = None
     if len(encoders) > 0:
         encoder_kv_extractor = EncoderKVExtractor(encoders[0].model, enc_layer_indices)
         encoder_kv_extractor.eval()
         
-        # Auto-detect real dimension of the extracted layer
-        # This is critical for hierarchical models (SAM2/Hiera) where dims change across stages
+        # Auto-detect enc_dim and enc_heads from the encoder layer
         if len(enc_layer_indices) > 0:
-            real_dim = encoder_kv_extractor.get_layer_dim(enc_layer_indices[0])
-            if real_dim > 0 and args.enc_dim != real_dim:
-                if accelerator.is_main_process:
-                    logger.info(f"Overwriting args.enc_dim {args.enc_dim} -> {real_dim} based on extracted layer {enc_layer_indices[0]}.")
-                args.enc_dim = real_dim
-            elif real_dim == 0:
-                 # Fallback to model embedding dim
-                 z_dims = [encoder.embed_dim for encoder in encoders]
-                 if len(z_dims) > 0 and args.enc_dim != z_dims[0]:
-                    if accelerator.is_main_process:
-                        logger.info(f"Overwriting args.enc_dim {args.enc_dim} -> {z_dims[0]} based on encoder.embed_dim.")
-                    args.enc_dim = z_dims[0]
+            enc_dim = encoder_kv_extractor.get_layer_dim(enc_layer_indices[0])
+            enc_heads = encoder_kv_extractor.get_layer_heads(enc_layer_indices[0])
+            
+            # Fallback to model embedding dim if detection failed
+            if enc_dim == 0:
+                enc_dim = encoders[0].embed_dim
+            
+            # Fallback for heads: try enc_dim // 64 (common head_dim)
+            if enc_heads == 0:
+                enc_heads = enc_dim // 64 if enc_dim >= 64 else 1
+            
+            if accelerator.is_main_process:
+                logger.info(f"Auto-detected encoder config: enc_dim={enc_dim}, enc_heads={enc_heads}")
                     
-    # z_dims should reflect the TARGET REPA dimension (typically final output)
-    # args.enc_dim should reflect the K/V SOURCE dimension (intermediate layer)
-    # So we do NOT overwrite z_dims with args.enc_dim here.
-    # z_dims = [encoder.embed_dim for encoder in encoders] is already correct (set at line 172).
-    # We ensure z_dims comes from the encoder object, not the potentially modified args.enc_dim.
+    # z_dims reflects the TARGET REPA dimension (encoder final output)
     z_dims = [encoder.embed_dim for encoder in encoders]
     
     block_kwargs = {
@@ -213,8 +211,8 @@ def main(args):
         proj_kwargs_kernel_size=args.proj_kwargs_kernel_size,
         enc_layer_indices=enc_layer_indices,
         sit_layer_indices=sit_layer_indices,
-        enc_dim=args.enc_dim,
-        enc_heads=args.enc_heads,
+        enc_dim=enc_dim,
+        enc_heads=enc_heads,
         kv_proj_type=args.kv_proj_type,
         kv_proj_hidden_dim=args.kv_proj_hidden_dim,
         kv_proj_kernel_size=args.kv_proj_kernel_size,
@@ -419,7 +417,6 @@ def main(args):
                     enc_kv_list=enc_kv_list,
                     stage=current_stage,
                     align_mode=args.align_mode,
-                    kv_mode=args.kv_mode,
                 )
                 denoising_loss, proj_loss, distill_loss, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
                 denoising_loss_mean = denoising_loss.mean()
@@ -565,14 +562,11 @@ def parse_args(input_args=None):
     parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
                         help="Kernel size for conv projection (default: 1)")
     parser.add_argument("--kv-norm-type", type=str, default="layernorm",
-                        choices=["none", "layernorm", "zscore", "zscore_spatial", "zscore_token", "batchnorm"],
-                        help="Normalization type for K/V: zscore=per-token, zscore_spatial=per-feature")
+                        choices=["none", "layernorm", "zscore", "zscore_token", "batchnorm"],
+                        help="Normalization type for K/V: zscore=per-spatial, zscore_token=per-token")
     parser.add_argument("--kv-zscore-alpha", type=float, default=1.0, 
                         help="Alpha for z-score normalization: (x - alpha * mean) / std")
-    parser.add_argument("--enc-dim", type=int, default=768,
-                        help="Encoder model embedding dimension")
-    parser.add_argument("--enc-heads", type=int, default=12,
-                        help="Encoder model number of attention heads")
+    # enc-dim and enc-heads are now auto-detected from encoder
     # dataset
     parser.add_argument("--data-dir", type=str, default="../data")
     parser.add_argument("--resolution", type=int, choices=[256, 512], default=256)
@@ -615,7 +609,7 @@ def parse_args(input_args=None):
     parser.add_argument("--projection-loss-type", type=str, default="cosine", help="Should be a comma-separated list of projection loss types")
 
     # whether to normalize spatial features
-    parser.add_argument("--spnorm-method", type=str, default="zscore", choices=["none", "zscore", "zscore_spatial", "zscore_token", "layernorm"])
+    parser.add_argument("--spnorm-method", type=str, default="zscore", choices=["none", "zscore", "zscore_token", "layernorm"])
     parser.add_argument("--cls-token-weight", type=float, default=0.2)
     parser.add_argument("--zscore-alpha", type=float, default=0.6)
     parser.add_argument("--zscore-proj-skip-std", action=argparse.BooleanOptionalAction, default=False)

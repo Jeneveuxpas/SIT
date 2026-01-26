@@ -61,9 +61,10 @@ class ProjectionLoss:
 
 @register_loss("cosine")
 class CosineProjectionLoss(ProjectionLoss):
-    # accepts only these kwargs; others will be ignored by factory unless strict=True
-    def __init__(self, **kwargs):
-        pass
+    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-6, **kwargs):
+        self.spnorm_method = spnorm_method
+        self.zscore_alpha = zscore_alpha
+        self.eps = eps
 
     def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
         self._check(zs, zs_tilde)
@@ -71,9 +72,13 @@ class CosineProjectionLoss(ProjectionLoss):
         zs = zs.float()
         zs_tilde = zs_tilde.float()
         
-        # normalize zs and zs_tilde
+        # Step 1: Spatial zscore normalization (per REPA paper)
+        zs = self._apply_spnorm(zs)
+        
+        # Step 2: L2 normalize for cosine similarity
         zs = F.normalize(zs, dim=-1)
         zs_tilde = F.normalize(zs_tilde, dim=-1)
+        
         # compute cosine similarity
         cos_sim = (zs * zs_tilde).sum(dim=-1)    # [B,T]
         loss = -cos_sim
@@ -107,7 +112,7 @@ class MSEProjectionLoss(ProjectionLoss):
     def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
         if self.spnorm_method == "none":
             return feat
-        elif self.spnorm_method in ["zscore", "zscore_spatial"]:
+        elif self.spnorm_method == "zscore":
             # feat is (B, T, D), we normalize over spatial dim T (dim=1)
             return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
         elif self.spnorm_method == "zscore_token":
@@ -127,9 +132,8 @@ class MSEProjectionLoss(ProjectionLoss):
         
         # Apply spatial normalization to both
         zs_norm = self._apply_spnorm(zs)
-        zs_tilde_norm = self._apply_spnorm(zs_tilde)
         # Compute MSE loss
-        loss = F.mse_loss(zs_norm, zs_tilde_norm)
+        loss = F.mse_loss(zs_norm, zs_tilde)
         return loss
 
 
@@ -162,7 +166,7 @@ class MSEVelocityProjectionLoss(ProjectionLoss):
     def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
         if self.spnorm_method == "none":
             return feat
-        elif self.spnorm_method in ["zscore", "zscore_spatial"]:
+        elif self.spnorm_method == "zscore":
             return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
         elif self.spnorm_method == "zscore_token":
             return zscore_norm(feat, dim=-1, alpha=self.zscore_alpha, eps=self.eps)
@@ -189,25 +193,89 @@ class MSEVelocityProjectionLoss(ProjectionLoss):
         # Generate noise in feature space (same shape as zs)
         noise_feat = torch.randn_like(zs)
         
-        # Compute velocity target in feature space: v = d_alpha_t * zs + d_sigma_t * noise
-        # d_alpha_t and d_sigma_t are scalars or (B, 1, 1, 1) shaped
-        # We need to reshape them for broadcasting with (B, T, D)
+        # Reshape d_alpha_t and d_sigma_t for broadcasting with (B, T, D)
         if isinstance(d_alpha_t, torch.Tensor):
-            # Reshape from (B, 1, 1, 1) to (B, 1, 1) for broadcasting
             d_alpha_t = d_alpha_t.view(d_alpha_t.shape[0], 1, 1).float()
             d_sigma_t = d_sigma_t.view(d_sigma_t.shape[0], 1, 1).float()
 
-        zs = self._apply_spnorm(zs)
-        z_target_norm = d_alpha_t * zs + d_sigma_t * noise_feat
+        # Normalize encoder features for stable target scale
+        zs_norm = self._apply_spnorm(zs)
         
-        # Apply spatial normalization to both
-        zs_tilde_norm = self._apply_spnorm(zs_tilde)
+        # Compute velocity target in feature space: v = d_alpha_t * zs + d_sigma_t * noise
+        z_target = d_alpha_t * zs_norm + d_sigma_t * noise_feat
         
-        # Compute MSE loss
-        loss = F.mse_loss(zs_tilde_norm, z_target_norm)
+        # Compute MSE loss (zs_tilde not normalized - projector learns direct mapping)
+        loss = F.mse_loss(zs_tilde, z_target)
         return loss
 
 
+
+@register_loss("mse_v_norm")
+class MSEVelocityProjectionLoss(ProjectionLoss):
+    """
+    MSE loss for velocity prediction in feature space.
+    
+    Computes: MSE(z_tilde, d_alpha_t * zs + d_sigma_t * noise_feat)
+    
+    This is analogous to v-prediction in latent space, but applied to
+    encoder features. Requires passing d_alpha_t and d_sigma_t through kwargs.
+    
+    Args:
+        spnorm_method: "none" or "zscore" (default: "zscore")
+        zscore_alpha: scaling factor for zscore normalization (default: 1.0)
+        eps: small constant for numerical stability (default: 1e-6)
+    """
+    KWARG_ALIASES = {"spnorm": "spnorm_method"}
+    
+    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-6, **kwargs):
+        self.spnorm_method = spnorm_method
+        self.zscore_alpha = zscore_alpha
+        self.eps = eps
+
+    def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
+        if self.spnorm_method == "none":
+            return feat
+        elif self.spnorm_method == "zscore":
+            return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "zscore_token":
+            return zscore_norm(feat, dim=-1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "layernorm":
+            return F.layer_norm(feat, normalized_shape=(feat.shape[-1],), eps=self.eps)
+        else:
+            raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
+
+    def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
+        self._check(zs, zs_tilde)
+
+        # cast to float32
+        zs = zs.float()
+        zs_tilde = zs_tilde.float()
+        
+        # Get d_alpha_t and d_sigma_t from kwargs (passed from loss function)
+        d_alpha_t = kwargs.get('d_alpha_t', None)
+        d_sigma_t = kwargs.get('d_sigma_t', None)
+        
+        if d_alpha_t is None or d_sigma_t is None:
+            raise ValueError("mse_v loss requires d_alpha_t and d_sigma_t in kwargs. "
+                             "Make sure the loss function passes these values.")
+        
+        # Generate noise in feature space (same shape as zs)
+        noise_feat = torch.randn_like(zs)
+        
+        # Reshape d_alpha_t and d_sigma_t for broadcasting with (B, T, D)
+        if isinstance(d_alpha_t, torch.Tensor):
+            d_alpha_t = d_alpha_t.view(d_alpha_t.shape[0], 1, 1).float()
+            d_sigma_t = d_sigma_t.view(d_sigma_t.shape[0], 1, 1).float()
+
+        # Normalize encoder features for stable target scale
+        zs_norm = self._apply_spnorm(zs)
+        zs_tilde_norm = self._apply_spnorm(zs_tilde)
+        # Compute velocity target in feature space: v = d_alpha_t * zs + d_sigma_t * noise
+        z_target = d_alpha_t * zs_norm + d_sigma_t * noise_feat
+        
+        # Compute MSE loss (zs_tilde not normalized - projector learns direct mapping)
+        loss = F.mse_loss(zs_tilde_norm, z_target)
+        return loss
 # =========================================
 # MSE-Noisy: Noisy interpolation loss in feature space
 # =========================================
@@ -240,7 +308,7 @@ class MSENoisyProjectionLoss(ProjectionLoss):
     def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
         if self.spnorm_method == "none":
             return feat
-        elif self.spnorm_method in ["zscore", "zscore_spatial"]:
+        elif self.spnorm_method == "zscore":
             return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
         elif self.spnorm_method == "zscore_token":
             return zscore_norm(feat, dim=-1, alpha=self.zscore_alpha, eps=self.eps)

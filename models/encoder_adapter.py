@@ -127,6 +127,31 @@ class EncoderKVExtractor(nn.Module):
              
         # Fallback: try to find linear layers in attention
         return 0
+
+    def get_layer_heads(self, idx: int) -> int:
+        """Get the number of attention heads of the specified layer."""
+        if idx >= len(self.blocks):
+            return 0
+            
+        block = self.blocks[idx]
+        
+        # SAM2 Hiera
+        if hasattr(block, "attn") and hasattr(block.attn, "num_attention_heads"):
+            return block.attn.num_attention_heads
+        elif hasattr(block, "attn") and hasattr(block.attn, "num_heads"):
+            return block.attn.num_heads
+        # Timm DINOv2
+        elif hasattr(block, "attn") and hasattr(block.attn, "num_heads"):
+            return block.attn.num_heads
+        # HF ViT/DINOv2
+        elif hasattr(block, "attention") and hasattr(block.attention, "attention"):
+            if hasattr(block.attention.attention, "num_attention_heads"):
+                return block.attention.attention.num_attention_heads
+            elif hasattr(block.attention.attention, "num_heads"):
+                return block.attention.attention.num_heads
+             
+        # Fallback
+        return 0
                 
     def _register_timm_hook(self, attn_module, layer_idx):
         def hook_fn(module, input, output):
@@ -360,7 +385,7 @@ class EncoderKVExtractor(nn.Module):
 
 
 KV_PROJ_TYPES = ["linear", "mlp", "conv"]
-KV_NORM_TYPES = ["none", "layernorm", "zscore", "zscore_spatial", "zscore_token", "batchnorm"]
+KV_NORM_TYPES = ["none", "layernorm", "zscore", "zscore_token", "batchnorm"]
 
 
 def build_kv_norm(norm_type: str, dim: int, num_patches: int = 256, alpha: float = 1.0):
@@ -371,7 +396,7 @@ def build_kv_norm(norm_type: str, dim: int, num_patches: int = 256, alpha: float
         return nn.Identity()
     elif norm_type == "layernorm":
         return nn.LayerNorm(dim)
-    elif norm_type in ["zscore", "zscore_spatial"]:
+    elif norm_type == "zscore":
         return ZScoreNorm(dim=1, alpha=alpha)   # per-feature spatial normalization
     elif norm_type == "zscore_token":
         return ZScoreNorm(dim=-1, alpha=alpha)  # per-token normalization

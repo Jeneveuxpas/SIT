@@ -107,7 +107,7 @@ def load_legacy_checkpoints(state_dict, encoder_depth):
 #################################################################################
 # spatial normalization
 #################################################################################
-ALL_SPNORM_METHODS = ["none", "zscore", "zscore_spatial", "zscore_token", "layernorm"]
+ALL_SPNORM_METHODS = ["none", "zscore", "zscore_token", "layernorm"]
 
 
 def zscore_norm(x: torch.Tensor, dim: int = -1, alpha: float = 1.0, eps: float = 1e-6) -> torch.Tensor:
