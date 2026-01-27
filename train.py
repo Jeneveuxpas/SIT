@@ -372,13 +372,12 @@ def main(args):
             x = x.squeeze(dim=1).to(device)
             y = y.to(device)
 
-            # Auto-stage switching
-            progress = global_step / max(args.max_train_steps, 1)
-            current_stage = 1 if progress < args.stage1_ratio else 2
+            # Auto-stage switching (by step count)
+            current_stage = 1 if global_step < args.stage1_steps else 2
 
             # Log stage periodically
             if accelerator.is_main_process and global_step % 1000 == 0:
-                logger.info(f"Step {global_step}: stage = {current_stage} (progress = {progress:.2%})")
+                logger.info(f"Step {global_step}: stage = {current_stage} (switch at step {args.stage1_steps})")
 
             labels = y
             with torch.no_grad():
@@ -549,8 +548,8 @@ def parse_args(input_args=None):
                         help="Comma-separated Encoder layer indices for K/V extraction (1-based, e.g. 1-12)")
     parser.add_argument("--sit-layer-indices", type=str, default="10",
                         help="Comma-separated SiT layer indices for K/V injection (1-based, e.g. 1-12)")
-    parser.add_argument("--stage1-ratio", type=float, default=0.3,
-                        help="Ratio of training for Stage 1. e.g., 0.5 = first 50%")
+    parser.add_argument("--stage1-steps", type=int, default=30000,
+                        help="Number of steps for Stage 1 (e.g., 30000 for 100k total)")
     parser.add_argument("--distill-coeff", type=float, default=2.0,
                         help="Coefficient for attention distillation loss (Stage 2 only)")
     parser.add_argument("--align-mode", type=str, default="attn_mse",

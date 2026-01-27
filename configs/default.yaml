@@ -18,7 +18,7 @@ proj-kwargs-kernel-size: 1
 enc-type: dinov2-b
 enc-layer-indices: "11"     # Encoder layer for K/V extraction (1-based)
 sit-layer-indices: "4"     # SiT layer for K/V injection (1-based)
-stage1-ratio: 0.3           # Ratio of training for Stage 1
+stage1-steps: 30000          # Number of steps for Stage 1
 distill-coeff: 2.0          # Coefficient for attention distillation loss
 
 # Alignment mode: logits, attn_mse, kv_mse
