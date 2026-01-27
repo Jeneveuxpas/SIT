@@ -15,7 +15,7 @@ proj-kwargs-kernel-size: 1
 # ============================================================================
 # Encoder KV Configuration
 # ============================================================================
-enc-type: dinov2-vit-b
+enc-type: dinov2-b
 enc-layer-indices: "11"     # Encoder layer for K/V extraction (1-based)
 sit-layer-indices: "4"     # SiT layer for K/V injection (1-based)
 stage1-ratio: 0.3           # Ratio of training for Stage 1

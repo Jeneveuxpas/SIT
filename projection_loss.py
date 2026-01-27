@@ -66,6 +66,18 @@ class CosineProjectionLoss(ProjectionLoss):
         self.zscore_alpha = zscore_alpha
         self.eps = eps
 
+    def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
+        if self.spnorm_method == "none":
+            return feat
+        elif self.spnorm_method == "zscore":
+            return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "zscore_token":
+            return zscore_norm(feat, dim=-1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "layernorm":
+            return F.layer_norm(feat, normalized_shape=(feat.shape[-1],), eps=self.eps)
+        else:
+            raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
+
     def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
         self._check(zs, zs_tilde)
         # cast to float32
@@ -345,9 +357,6 @@ class MSENoisyProjectionLoss(ProjectionLoss):
         zs_norm = self._apply_spnorm(zs)
         z_noisy = alpha_t * zs_norm + sigma_t * noise_feat
         
-        # Normalize zs_tilde
-        zs_tilde_norm = self._apply_spnorm(zs_tilde)
-        
-        # Compute MSE loss
-        loss = F.mse_loss(z_noisy, zs_tilde_norm)
+        # Compute MSE loss (zs_tilde not normalized - projector learns direct mapping)
+        loss = F.mse_loss(z_noisy, zs_tilde)
         return loss

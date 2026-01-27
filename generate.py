@@ -53,27 +53,51 @@ def main(args):
     torch.cuda.set_device(device)
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
+    # Load checkpoint and extract saved args for auto-config
+    ckpt_path = args.ckpt
+    ckpt = torch.load(ckpt_path, map_location=f'cuda:{device}', weights_only=False)
+    ckpt_args = ckpt.get('args', None)
+    
+    # Auto-detect parameters from checkpoint if not explicitly provided
+    if ckpt_args is not None and rank == 0:
+        print("Auto-detecting parameters from checkpoint...")
+        auto_params = []
+        
+        # resolution: use checkpoint value if user didn't specify (default is 256)
+        if hasattr(ckpt_args, 'resolution') and args.resolution == 256:
+            args.resolution = ckpt_args.resolution
+            auto_params.append(f"resolution={args.resolution}")
+        
+        # qk_norm: use checkpoint value
+        if hasattr(ckpt_args, 'qk_norm'):
+            args.qk_norm = ckpt_args.qk_norm
+            auto_params.append(f"qk_norm={args.qk_norm}")
+        
+        # path_type: use checkpoint value if user didn't specify (default is "linear")
+        if hasattr(ckpt_args, 'path_type') and args.path_type == "linear":
+            args.path_type = ckpt_args.path_type
+            auto_params.append(f"path_type={args.path_type}")
+        
+        if auto_params:
+            print(f"  Auto-detected: {', '.join(auto_params)}")
+
     # Load model (using original SiT)
     block_kwargs = {"fused_attn": args.fused_attn, "qk_norm": args.qk_norm}
     latent_size = args.resolution // 8
-    in_channels = 4
 
-    z_dims_list = [int(elem) for elem in args.z_dims.split(',')] if args.z_dims else []
-    
+    # Note: encoder_depth and z_dims are not needed at inference time (eval_mode=True)
+    # because REPA projections are skipped in eval mode
     model = SiT_models[args.model](
         input_size=latent_size,
-        in_channels=in_channels,
+        in_channels=4,
         num_classes=args.num_classes,
         use_cfg=True,
-        z_dims=z_dims_list,
-        encoder_depth=args.encoder_depth,
         eval_mode=True,
         **block_kwargs,
     ).to(device)
     
     # Load DINOKV checkpoint with strict=False (ignores DINO-KV specific weights)
-    ckpt_path = args.ckpt
-    state_dict = torch.load(ckpt_path, map_location=f'cuda:{device}', weights_only=False)['ema']
+    state_dict = ckpt['ema']
     
     # Filter out DINO-KV specific keys
     filtered_state_dict = {}
@@ -182,11 +206,9 @@ if __name__ == "__main__":
     # Model (using original SiT names)
     parser.add_argument("--model", type=str, choices=list(SiT_models.keys()), default="SiT-B/2")
     parser.add_argument("--num-classes", type=int, default=1000)
-    parser.add_argument("--encoder-depth", type=int, default=8)
     parser.add_argument("--resolution", type=int, choices=[256, 512], default=256)
     parser.add_argument("--fused-attn", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--qk-norm", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--z-dims", type=str, default="")
 
     # Sampling
     parser.add_argument("--per-proc-batch-size", type=int, default=256)
