@@ -167,11 +167,11 @@ def main(args):
         args.enc_type, device, args.resolution, accelerator=accelerator
     )
     
-    # Create Encoder K/V extractor first to detect dimension and heads
+    # Create Encoder K/V extractor first to detect dimension and heads (only if KV distillation enabled)
     encoder_kv_extractor = None
     enc_dim = None
     enc_heads = None
-    if len(encoders) > 0:
+    if args.use_kv and len(encoders) > 0:
         encoder_kv_extractor = EncoderKVExtractor(encoders[0].model, enc_layer_indices)
         encoder_kv_extractor.eval()
         
@@ -384,11 +384,12 @@ def main(args):
             with torch.no_grad():
                 x = sample_posterior(x, latents_scale=latents_scale, latents_bias=latents_bias)
                 
-                # Extract Encoder K/V and CLS token
-                # Use encoder's built-in preprocess
-                raw_image_enc = encoders[0].preprocess(raw_image)
-                with accelerator.autocast():
-                    enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
+                # Extract Encoder K/V and CLS token (only if KV distillation is enabled)
+                enc_kv_list = None
+                if args.use_kv:
+                    raw_image_enc = encoders[0].preprocess(raw_image)
+                    with accelerator.autocast():
+                        enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
                 
                 # Extract encoder features for REPA projection loss
                 zs = []
@@ -414,8 +415,8 @@ def main(args):
             with accelerator.accumulate(model):
                 model_kwargs = dict(
                     y=labels,
-                    enc_kv_list=enc_kv_list,
-                    stage=current_stage,
+                    enc_kv_list=enc_kv_list if args.use_kv else None,
+                    stage=current_stage if args.use_kv else 2,  # Skip stage 1 if no KV
                     align_mode=args.align_mode,
                 )
                 denoising_loss, proj_loss, distill_loss, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
@@ -509,7 +510,8 @@ def main(args):
             break
 
     # Cleanup
-    encoder_kv_extractor.remove_hooks()
+    if encoder_kv_extractor is not None:
+        encoder_kv_extractor.remove_hooks()
     
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
@@ -561,7 +563,7 @@ def parse_args(input_args=None):
                         help="Hidden dimension for MLP projection (default: max(enc_dim, sit_dim))")
     parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
                         help="Kernel size for conv projection (default: 1)")
-    parser.add_argument("--kv-norm-type", type=str, default="layernorm",
+    parser.add_argument("--kv-norm-type", type=str, default="none",
                         choices=["none", "layernorm", "zscore", "zscore_token", "batchnorm"],
                         help="Normalization type for K/V: zscore=per-spatial, zscore_token=per-token")
     parser.add_argument("--kv-zscore-alpha", type=float, default=1.0, 
@@ -605,6 +607,8 @@ def parse_args(input_args=None):
     parser.add_argument("--proj-coeff", type=str, default="1.0")
     parser.add_argument("--weighting", default="uniform", type=str, help="Max gradient norm.")
     parser.add_argument("--repa-loss", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use-kv", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable KV distillation from encoder (use --no-use-kv to disable)")
     # add loss type
     parser.add_argument("--projection-loss-type", type=str, default="cosine", help="Should be a comma-separated list of projection loss types")
 

@@ -82,8 +82,9 @@ echo "Checkpoint: ${STEP}"
 echo "GPU: ${GPU}"
 echo "================================================"
 
-# 生成样本 (encoder-depth 不再需要，推理时不使用)
-torchrun --nproc_per_node=1 generate.py \
+# 生成样本 (使用随机端口避免冲突)
+MASTER_PORT=$((29500 + RANDOM % 1000))
+torchrun --nproc_per_node=1 --master_port=${MASTER_PORT} generate.py \
     --model ${MODEL} \
     --ckpt ${SAVE_PATH}/checkpoints/${STEP}.pt \
     --num-fid-samples ${NUM_FID_SAMPLES} \
