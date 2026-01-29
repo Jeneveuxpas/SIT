@@ -134,7 +134,7 @@ if [ "$SKIP_EVAL" = "false" ]; then
         MASTER_PORT=$((29500 + RANDOM % 1000))
 
         # 生成样本
-        torchrun --nproc_per_node=1 --master_port=${MASTER_PORT} generate.py \
+        torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} generate.py \
             --ckpt ${SAVE_PATH}/checkpoints/${STEP}.pt \
             --num-fid-samples ${NUM_FID_SAMPLES} \
             --per-proc-batch-size ${EVAL_BATCH_SIZE} \
