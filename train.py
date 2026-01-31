@@ -33,7 +33,7 @@ from models.encoder_adapter import EncoderKVExtractor
 from loss import SILossWithEncoderKV
 from vision_encoder import load_encoders
 
-from dataset import CustomDataset
+from dataset import HFImgLatentDataset, HFLatentDataset, ImageFolderLatentDataset
 import wandb
 from torchvision.utils import make_grid
 from utils import ALL_SPNORM_METHODS
@@ -269,8 +269,19 @@ def main(args):
         eps=args.adam_epsilon,
     )    
     
-    # Setup data (using sota CustomDataset)
-    train_dataset = CustomDataset(args.data_dir)
+    # Setup data
+    if args.repa_loss:
+        try:
+            # We can preprocess ImageNet 256/512 here, and directly load from disk
+            train_dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
+        except Exception as e:
+            print(f"Error loading HFImgLatentDataset: {e}")
+            print("Falling back to ImageFolderLatentDataset")
+            train_dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, resolution=args.resolution, split="train")
+    else:
+        train_dataset = HFLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
+    print(train_dataset)
+
     local_batch_size = int(args.batch_size // accelerator.num_processes)
     train_dataloader = DataLoader(
         train_dataset,
@@ -348,7 +359,11 @@ def main(args):
     # Labels to condition the model with:
     sample_batch_size = args.n_samples // accelerator.num_processes
     batch = next(iter(train_dataloader))
-    raw_image_sample, gt_xs, gt_labels = batch
+    if len(batch) == 3:
+        raw_image_sample, gt_xs, gt_labels = batch
+    else:
+        gt_xs, gt_labels = batch
+        raw_image_sample = None
     gt_xs = gt_xs[:sample_batch_size]
     gt_labels = gt_labels[:sample_batch_size]
     gt_xs = sample_posterior(
@@ -367,8 +382,12 @@ def main(args):
 
         model.train()
         for batch in train_dataloader:
-            raw_image, x, y = batch
-            raw_image = raw_image.to(device)
+            if len(batch) == 3:
+                raw_image, x, y = batch
+                raw_image = raw_image.to(device)
+            else:
+                x, y = batch
+                raw_image = None
             x = x.squeeze(dim=1).to(device)
             y = y.to(device)
 
@@ -386,6 +405,8 @@ def main(args):
                 # Extract Encoder K/V and CLS token (only if KV distillation is enabled)
                 enc_kv_list = None
                 if args.use_kv:
+                    if raw_image is None:
+                         raise ValueError("use_kv requires raw images, but dataset did not return them (check repa_loss arg).")
                     raw_image_enc = encoders[0].preprocess(raw_image)
                     with accelerator.autocast():
                         enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)

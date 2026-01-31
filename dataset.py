@@ -13,183 +13,123 @@ try:
 except ImportError:
     pyspng = None
 
-
-class CustomDataset(Dataset):
-    def __init__(self, data_dir):
-        PIL.Image.init()
-        supported_ext = PIL.Image.EXTENSION.keys() | {'.npy'}
-
-        self.images_dir = os.path.join(data_dir, 'imagenet_repa_images')
-        self.features_dir = os.path.join(data_dir, 'vae-sd')
-
-        # images
-        self._image_fnames = {
-            os.path.relpath(os.path.join(root, fname), start=self.images_dir)
-            for root, _dirs, files in os.walk(self.images_dir) for fname in files
-            }
-        self.image_fnames = sorted(
-            fname for fname in self._image_fnames if self._file_ext(fname) in supported_ext
-            )
-        # features
-        self._feature_fnames = {
-            os.path.relpath(os.path.join(root, fname), start=self.features_dir)
-            for root, _dirs, files in os.walk(self.features_dir) for fname in files
-            }
-        self.feature_fnames = sorted(
-            fname for fname in self._feature_fnames if self._file_ext(fname) in supported_ext
-            )
-        # labels
-        fname = 'dataset.json'
-        with open(os.path.join(self.features_dir, fname), 'rb') as f:
-            labels = json.load(f)['labels']
-        labels = dict(labels)
-        labels = [labels[fname.replace('\\', '/')] for fname in self.feature_fnames]
-        labels = np.array(labels)
-        self.labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
+from datasets import load_from_disk
+from torchvision.datasets import ImageFolder
+from torchvision import transforms
 
 
-    def _file_ext(self, fname):
-        return os.path.splitext(fname)[1].lower()
+def center_crop_arr(image_arr, image_size):
+    """
+    Center cropping implementation from ADM.
+    https://github.com/openai/guided-diffusion/blob/8fb3ad9197f16bbc40620447b2742e13458d2831/guided_diffusion/image_datasets.py#L126
+    """
+    pil_image = Image.fromarray(image_arr)
+    while min(*pil_image.size) >= 2 * image_size:
+        pil_image = pil_image.resize(
+            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
+        )
 
-    def __len__(self):
-        assert len(self.image_fnames) == len(self.feature_fnames), \
-            "Number of feature files and label files should be same"
-        return len(self.feature_fnames)
+    scale = image_size / min(*pil_image.size)
+    pil_image = pil_image.resize(
+        tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
+    )
+
+    arr = np.array(pil_image)
+    crop_y = (arr.shape[0] - image_size) // 2
+    crop_x = (arr.shape[1] - image_size) // 2
+    return arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size]
+
+
+class HFImageDataset(Dataset):
+    """HuggingFace-based image dataset for iREPA data format."""
+    def __init__(self, data_dir, split="train"):
+        self.data_dir = data_dir
+        split_str = "val" if split == "val" else ""
+        self.img_dataset = load_from_disk(os.path.join(data_dir, f"imagenet-latents-images", split_str))
 
     def __getitem__(self, idx):
-        image_fname = self.image_fnames[idx]
-        feature_fname = self.feature_fnames[idx]
-        image_ext = self._file_ext(image_fname)
-        with open(os.path.join(self.images_dir, image_fname), 'rb') as f:
-            if image_ext == '.npy':
-                image = np.load(f)
-                image = image.reshape(-1, *image.shape[-2:])
-            elif image_ext == '.png' and pyspng is not None:
-                image = pyspng.load(f.read())
-                image = image.reshape(*image.shape[:2], -1).transpose(2, 0, 1)
-            else:
-                image = np.array(PIL.Image.open(f))
-                image = image.reshape(*image.shape[:2], -1).transpose(2, 0, 1)
-
-        features = np.load(os.path.join(self.features_dir, feature_fname))
-        return torch.from_numpy(image), torch.from_numpy(features), torch.tensor(self.labels[idx])
-
-def get_feature_dir_info(root):
-    files = glob.glob(os.path.join(root, '*.npy'))
-    files_caption = glob.glob(os.path.join(root, '*_*.npy'))
-    num_data = len(files) - len(files_caption)
-    n_captions = {k: 0 for k in range(num_data)}
-    for f in files_caption:
-        name = os.path.split(f)[-1]
-        k1, k2 = os.path.splitext(name)[0].split('_')
-        n_captions[int(k1)] += 1
-    return num_data, n_captions
-
-
-class DatasetFactory(object):
-
-    def __init__(self):
-        self.train = None
-        self.test = None
-
-    def get_split(self, split, labeled=False):
-        if split == "train":
-            dataset = self.train
-        elif split == "test":
-            dataset = self.test
-        else:
-            raise ValueError
-
-        if self.has_label:
-            return dataset #if labeled else UnlabeledDataset(dataset)
-        else:
-            assert not labeled
-            return dataset
-
-    def unpreprocess(self, v):  # to B C H W and [0, 1]
-        v = 0.5 * (v + 1.)
-        v.clamp_(0., 1.)
-        return v
-
-    @property
-    def has_label(self):
-        return True
-
-    @property
-    def data_shape(self):
-        raise NotImplementedError
-
-    @property
-    def data_dim(self):
-        return int(np.prod(self.data_shape))
-
-    @property
-    def fid_stat(self):
-        return None
-
-    def sample_label(self, n_samples, device):
-        raise NotImplementedError
-
-    def label_prob(self, k):
-        raise NotImplementedError
-
-class MSCOCOFeatureDataset(Dataset):
-    # the image features are got through sample
-    def __init__(self, root):
-        self.root = root
-        self.num_data, self.n_captions = get_feature_dir_info(root)
+        img_elem = self.img_dataset[idx]
+        image, label = img_elem["image"], img_elem["label"]
+        image = np.array(image.convert("RGB")).transpose(2, 0, 1)
+        return torch.from_numpy(image), torch.tensor(label)
 
     def __len__(self):
-        return self.num_data
-
-    def __getitem__(self, index):
-        with open(os.path.join(self.root, f'{index}.png'), 'rb') as f:
-            x = np.array(PIL.Image.open(f))
-            x = x.reshape(*x.shape[:2], -1).transpose(2, 0, 1)
-
-        z = np.load(os.path.join(self.root, f'{index}.npy'))
-        k = random.randint(0, self.n_captions[index] - 1)
-        c = np.load(os.path.join(self.root, f'{index}_{k}.npy'))
-        return x, z, c
+        return len(self.img_dataset)
 
 
-class CFGDataset(Dataset):  # for classifier free guidance
-    def __init__(self, dataset, p_uncond, empty_token):
-        self.dataset = dataset
-        self.p_uncond = p_uncond
-        self.empty_token = empty_token
+class HFImgLatentDataset(Dataset):
+    """HuggingFace-based dataset with both images and precomputed latents."""
+    PRECOMPUTED = [
+        "sdvae-ft-mse-f8d4",
+    ]
+
+    def __init__(self, vae_name, data_dir, split="train"):
+        assert vae_name in self.PRECOMPUTED, f"VAE {vae_name} not found in {self.PRECOMPUTED}"
+        split_str = "val" if split == "val" else ""
+        self.img_dataset = load_from_disk(os.path.join(data_dir, "imagenet-latents-images", split_str))
+        self.latent_dataset = load_from_disk(os.path.join(data_dir, f"imagenet-latents-{vae_name}", split_str))
+        assert len(self.img_dataset) == len(self.latent_dataset), "Image and latent dataset must have the same length"
+
+    def __getitem__(self, idx):
+        img_elem = self.img_dataset[idx]
+        image, label = img_elem["image"], img_elem["label"]
+        image = np.array(image.convert("RGB")).transpose(2, 0, 1)
+        latent = self.latent_dataset[idx]["data"]
+        return torch.from_numpy(image), torch.tensor(latent), torch.tensor(label)
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.img_dataset)
 
-    def __getitem__(self, item):
-        x, z, y = self.dataset[item]
-        if random.random() < self.p_uncond:
-            y = self.empty_token
-        return x, z, y
 
-class MSCOCO256Features(DatasetFactory):  # the moments calculated by Stable Diffusion image encoder & the contexts calculated by clip
-    def __init__(self, path, cfg=True, p_uncond=0.1, mode='train'):
-        super().__init__()
-        print('Prepare dataset...')
-        if mode == 'val':
-            self.test = MSCOCOFeatureDataset(os.path.join(path, 'val'))
-            assert len(self.test) == 40504
-            self.empty_context = np.load(os.path.join(path, 'empty_context.npy'))
-        else:
-            self.train = MSCOCOFeatureDataset(os.path.join(path, 'train'))
-            assert len(self.train) == 82783
-            self.empty_context = np.load(os.path.join(path, 'empty_context.npy'))
+class ImageFolderLatentDataset(Dataset):
+    """Dataset using ImageFolder for images and HuggingFace for latents."""
+    PRECOMPUTED = [
+        "sdvae-ft-mse-f8d4",
+    ]
 
-            if cfg:  # classifier free guidance
-                assert p_uncond is not None
-                print(f'prepare the dataset for classifier free guidance with p_uncond={p_uncond}')
-                self.train = CFGDataset(self.train, p_uncond, self.empty_context)
+    def __init__(self, vae_name, data_dir, resolution=256, split="train"):
+        assert vae_name in self.PRECOMPUTED, f"VAE {vae_name} not found in {self.PRECOMPUTED}"
+        vae_split = "val" if split == "val" else ""
+        self.img_dataset = ImageFolder(os.path.join(data_dir, "imagenet", split))
+        self.transform_train = transforms.Lambda(
+            lambda img: center_crop_arr(np.array(img.convert("RGB")), resolution)
+        )
+        self.latent_dataset = load_from_disk(os.path.join(data_dir, f"imagenet-latents-{vae_name}", vae_split))
+        assert len(self.img_dataset) == len(self.latent_dataset), "Image and latent dataset must have the same length"
 
-    @property
-    def data_shape(self):
-        return 4, 32, 32
+    def __getitem__(self, idx):
+        image, label = self.img_dataset[idx]
+        image = self.transform_train(image)
+        image = image.transpose(2, 0, 1)
+        latent = self.latent_dataset[idx]["data"]
+        return torch.from_numpy(image), torch.tensor(latent), torch.tensor(label)
 
-    @property
-    def fid_stat(self):
-        return f'assets/fid_stats/fid_stats_mscoco256_val.npz'
+    def __len__(self):
+        return len(self.img_dataset)
+
+
+class HFLatentDataset(Dataset):
+    """HuggingFace-based dataset with only latents (no images)."""
+    PRECOMPUTED = [
+        "sdvae-ft-mse-f8d4",
+    ]
+
+    def __init__(self, vae_name, data_dir, split="train"):
+        split_str = "val" if split == "val" else ""
+        assert vae_name in self.PRECOMPUTED, f"VAE {vae_name} not found in {self.PRECOMPUTED}"
+        assert os.path.exists(os.path.join(data_dir, f"imagenet_{split}_labels.txt")), \
+            "imagenet_train_labels.txt not found, please download from huggingface"
+
+        self.latent_dataset = load_from_disk(os.path.join(data_dir, f"imagenet-latents-{vae_name}", split_str))
+
+        with open(os.path.join(data_dir, f"imagenet_{split}_labels.txt"), "r") as f:
+            self.labels = [int(line.strip()) for line in f.readlines()]
+
+    def __getitem__(self, idx):
+        latent = self.latent_dataset[idx]["data"]
+        label = self.labels[idx]
+        return torch.tensor(latent), torch.tensor(label)
+
+    def __len__(self):
+        return len(self.latent_dataset)
+
