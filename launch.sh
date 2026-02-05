@@ -1,10 +1,11 @@
 #!/bin/bash
+# -*- coding: utf-8 -*-
 # ============================================================================
 # iREPA 统一启动脚本 - 训练 + 评估
 # 
 # 用法: 
 #   ./launch.sh --config configs/default.yaml --exp-name my_exp
-#   ./launch.sh --config configs/default.yaml --exp-name my_exp --eval-only
+#   ./launch.sh --config configs/kv_coeff-5.0.yaml --exp-name kv_coeff-5.0 --gpu 6,7 --num-gpus 2
 # ============================================================================
 set -e
 
@@ -17,11 +18,11 @@ SKIP_EVAL="${SKIP_EVAL:-false}"
 
 # FID 评估参数
 NUM_FID_SAMPLES="${NUM_FID_SAMPLES:-50000}"
-EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-128}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-256}"
 EVAL_NUM_STEPS="${EVAL_NUM_STEPS:-250}"
-CFG_SCALE="${CFG_SCALE:-1.5}"
+CFG_SCALE="${CFG_SCALE:-1.0}"
 MODE="${MODE:-sde}"
-REF_BATCH="${REF_BATCH:-/disks/sata5/fuhan/VIRTUAL_imagenet256_labeled.npz}"
+REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -74,6 +75,7 @@ fi
 SAVE_PATH="exps/${EXP_NAME}"
 export CUDA_VISIBLE_DEVICES="${GPU}"
 
+# +
 # ============================================================================
 # 训练阶段
 # ============================================================================
@@ -88,19 +90,39 @@ if [ "$EVAL_ONLY" = "false" ]; then
     echo "================================================"
 
     # 构建训练命令
-    TRAIN_CMD="accelerate launch --num_processes ${NUM_GPUS} train.py --exp-name ${EXP_NAME}"
-    
+    MASTER_PORT=$((29500 + RANDOM % 1000))
+    TRAIN_CMD="accelerate launch --main_process_port ${MASTER_PORT} --num_processes ${NUM_GPUS} train.py --exp-name ${EXP_NAME}"
+   
     if [ -n "$CONFIG" ]; then
         TRAIN_CMD="${TRAIN_CMD} --config ${CONFIG}"
     fi
 
     # 执行训练
-    eval ${TRAIN_CMD}
+   eval ${TRAIN_CMD}
 
     echo "================================================"
     echo "训练完成！"
     echo "================================================"
 fi
+
+# ============================================================================
+# 解析模型参数 (用于评估)
+# ============================================================================
+if [ -n "$CONFIG" ]; then
+    # 从 config 中提取 model 字段
+    # 假设格式: model: SiT-XL/2-EncoderKV
+    MODEL=$(grep "^model:" $CONFIG | awk '{print $2}')
+    
+    # 去除 -EncoderKV 后缀 (如果存在)
+    MODEL=${MODEL%-EncoderKV}
+    
+    echo "从配置中检测到模型: ${MODEL}"
+else
+    # 默认模型
+    MODEL="SiT-B/2"
+    echo "使用默认模型: ${MODEL}"
+fi
+# -
 
 # ============================================================================
 # 评估阶段
@@ -130,15 +152,13 @@ if [ "$SKIP_EVAL" = "false" ]; then
         echo "评估 checkpoint: ${STEP}"
         echo "------------------------------------------------"
 
-        # 使用随机端口避免冲突
-        MASTER_PORT=$((29500 + RANDOM % 1000))
-
         # 生成样本
         torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} generate.py \
             --ckpt ${SAVE_PATH}/checkpoints/${STEP}.pt \
             --num-fid-samples ${NUM_FID_SAMPLES} \
             --per-proc-batch-size ${EVAL_BATCH_SIZE} \
             --mode ${MODE} \
+            --model ${MODEL} \
             --num-steps ${EVAL_NUM_STEPS} \
             --cfg-scale ${CFG_SCALE} \
             --sample-dir ${SAVE_PATH}/checkpoints

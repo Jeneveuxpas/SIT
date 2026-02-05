@@ -91,16 +91,16 @@ class AttentionWithEncoderKV(nn.Module):
             elif align_mode == 'attn_mse':
                 if self.fused_attn:
                     # F.scaled_dot_product_attention might return different dtypes depending on impl, cast to float
-                    attn_enc = F.scaled_dot_product_attention(q, k_enc, v_enc).float()
-                    attn_sit = F.scaled_dot_product_attention(q, k_sit, v_sit).float()
+                    attn_enc = F.scaled_dot_product_attention(q.float(), k_enc.float(), v_enc.float()).float()
+                    attn_sit = F.scaled_dot_product_attention(q.float(), k_sit.float(), v_sit.float()).float()
                 else:
-                    attn_weights_enc = (q @ k_enc.transpose(-2, -1)) * self.scale
+                    attn_weights_enc = (q.float() @ k_enc.float().transpose(-2, -1)) * self.scale
                     attn_weights_enc = attn_weights_enc.softmax(dim=-1)
-                    attn_enc = (attn_weights_enc @ v_enc).float()
+                    attn_enc = (attn_weights_enc @ v_enc.float()).float()
                     
-                    attn_weights_sit = (q @ k_sit.transpose(-2, -1)) * self.scale
+                    attn_weights_sit = (q.float() @ k_sit.float().transpose(-2, -1)) * self.scale
                     attn_weights_sit = attn_weights_sit.softmax(dim=-1)
-                    attn_sit = (attn_weights_sit @ v_sit).float()
+                    attn_sit = (attn_weights_sit @ v_sit.float()).float()
                 
                 distill_loss = F.mse_loss(attn_sit, attn_enc.detach())
 
@@ -390,7 +390,8 @@ class SiTWithEncoderKV(nn.Module):
         
         zs = []
         zs_original = []
-        accumulated_distill_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+        accumulated_distill_loss = torch.tensor(0.0, device=x.device, dtype=torch.float32)
+        
         
         # Track current index in enc_kv_list
         enc_list_idx = 0

@@ -6,7 +6,7 @@
 # ============================================================================
 model: SiT-XL/2-EncoderKV
 num-classes: 1000
-encoder-depth: 14
+encoder-depth: 10
 fused-attn: true
 qk-norm: false
 projection-layer-type: conv
@@ -19,7 +19,7 @@ enc-type: dinov2-b
 enc-layer-indices: "12"     # Encoder layer for K/V extraction (1-based)
 sit-layer-indices: "4"     # SiT layer for K/V injection (1-based)
 stage1-steps: 30000          # Number of steps for Stage 1
-distill-coeff: 4.0          # Coefficient for attention distillation loss
+distill-coeff: 3.0          # Coefficient for attention distillation loss
 
 # Alignment mode: logits, attn_mse, kv_mse
 align-mode: attn_mse
@@ -34,7 +34,7 @@ kv-zscore-alpha: 1.0
 # REPA Loss Configuration
 # ============================================================================
 repa-loss: true
-proj-coeff: "0.5"
+proj-coeff: "1.0"
 projection-loss-type: mse_v_norm    # cosine, mse, mse_v, mse_noisy
 spnorm-method: zscore           # none, zscore, zscore_token, layernorm
 zscore-alpha: 0.6
