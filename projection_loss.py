@@ -223,23 +223,26 @@ class MSEVelocityProjectionLoss(ProjectionLoss):
 
 
 @register_loss("mse_v_norm")
-class MSEVelocityProjectionLoss(ProjectionLoss):
+class MSEVelocityNormProjectionLoss(ProjectionLoss):
     """
-    MSE loss for velocity prediction in feature space.
-    
-    Computes: MSE(z_tilde, d_alpha_t * zs + d_sigma_t * noise_feat)
-    
+    MSE loss for velocity prediction in feature space with normalization.
+
+    Computes: MSE(zscore(z_tilde), d_alpha_t * zscore(zs) + d_sigma_t * noise_feat)
+
     This is analogous to v-prediction in latent space, but applied to
-    encoder features. Requires passing d_alpha_t and d_sigma_t through kwargs.
-    
+    encoder features with normalization on both sides.
+    Requires passing d_alpha_t and d_sigma_t through kwargs.
+
     Args:
         spnorm_method: "none" or "zscore" (default: "zscore")
         zscore_alpha: scaling factor for zscore normalization (default: 1.0)
-        eps: small constant for numerical stability (default: 1e-6)
+        eps: small constant for numerical stability (default: 1e-4)
+
+    Enhanced numerical stability for multi-GPU training.
     """
     KWARG_ALIASES = {"spnorm": "spnorm_method"}
-    
-    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-6, **kwargs):
+
+    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-4, **kwargs):
         self.spnorm_method = spnorm_method
         self.zscore_alpha = zscore_alpha
         self.eps = eps
@@ -259,21 +262,23 @@ class MSEVelocityProjectionLoss(ProjectionLoss):
     def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
         self._check(zs, zs_tilde)
 
-        # cast to float32
+        # Force float32 computation for numerical stability (even if model uses bf16)
         zs = zs.float()
         zs_tilde = zs_tilde.float()
-        
+
         # Get d_alpha_t and d_sigma_t from kwargs (passed from loss function)
         d_alpha_t = kwargs.get('d_alpha_t', None)
         d_sigma_t = kwargs.get('d_sigma_t', None)
-        
+
         if d_alpha_t is None or d_sigma_t is None:
-            raise ValueError("mse_v loss requires d_alpha_t and d_sigma_t in kwargs. "
+            raise ValueError("mse_v_norm loss requires d_alpha_t and d_sigma_t in kwargs. "
                              "Make sure the loss function passes these values.")
-        
+
         # Generate noise in feature space (same shape as zs)
         noise_feat = torch.randn_like(zs)
-        
+        # Clamp noise to prevent extreme values (±3σ covers 99.7% of normal distribution)
+        noise_feat = torch.clamp(noise_feat, min=-3.0, max=3.0)
+
         # Reshape d_alpha_t and d_sigma_t for broadcasting with (B, T, D)
         if isinstance(d_alpha_t, torch.Tensor):
             d_alpha_t = d_alpha_t.view(d_alpha_t.shape[0], 1, 1).float()
@@ -281,12 +286,22 @@ class MSEVelocityProjectionLoss(ProjectionLoss):
 
         # Normalize encoder features for stable target scale
         zs_norm = self._apply_spnorm(zs)
+
+        # Normalize model output zs_tilde (core of the method)
         zs_tilde_norm = self._apply_spnorm(zs_tilde)
+
         # Compute velocity target in feature space: v = d_alpha_t * zs + d_sigma_t * noise
         z_target = d_alpha_t * zs_norm + d_sigma_t * noise_feat
-        
-        # Compute MSE loss (zs_tilde not normalized - projector learns direct mapping)
+
+        # Compute MSE loss between normalized model output and target
         loss = F.mse_loss(zs_tilde_norm, z_target)
+
+        # Safety net: detect and handle abnormal loss values
+        if torch.isnan(loss) or torch.isinf(loss) or loss > 100.0:
+            # This batch has numerical issues, skip it to prevent training collapse
+            print(f"[WARNING] Detected abnormal projection loss: {loss.item():.4f}, skipping this batch")
+            loss = torch.tensor(0.0, device=zs.device, dtype=torch.float32)
+
         return loss
 # =========================================
 # MSE-Noisy: Noisy interpolation loss in feature space
