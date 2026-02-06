@@ -110,13 +110,26 @@ def load_legacy_checkpoints(state_dict, encoder_depth):
 ALL_SPNORM_METHODS = ["none", "zscore", "zscore_token", "layernorm"]
 
 
-def zscore_norm(x: torch.Tensor, dim: int = -1, alpha: float = 1.0, eps: float = 1e-6) -> torch.Tensor:
+def zscore_norm(x: torch.Tensor, dim: int = -1, alpha: float = 1.0, eps: float = 1e-5) -> torch.Tensor:
     """
-    Functional Z-score normalization: (x - mean) / std.
+    Functional Z-score normalization: (x - alpha*mean) / std.
+
+    Enhanced numerical stability:
+    1. Compute in float32 (even if input is bf16)
+    2. Clamp std to prevent division by near-zero
+    3. Clamp output to prevent bf16 overflow
     """
+    input_dtype = x.dtype
+    x = x.float()
+
     mean = x.mean(dim=dim, keepdim=True)
     std = x.std(dim=dim, keepdim=True)
-    return (x - alpha * mean) / (std + eps)
+    std = torch.clamp(std, min=eps)
+
+    result = (x - alpha * mean) / std
+    result = torch.clamp(result, min=-10.0, max=10.0)
+
+    return result.to(input_dtype)
 
 class ZScoreNorm(torch.nn.Module):
     """
@@ -129,7 +142,7 @@ class ZScoreNorm(torch.nn.Module):
         alpha: Scaling factor for mean subtraction (default 1.0)
         eps: Small constant for numerical stability
     """
-    def __init__(self, dim: int = -1, alpha: float = 1.0, eps: float = 1e-6):
+    def __init__(self, dim: int = -1, alpha: float = 1.0, eps: float = 1e-5):
         super().__init__()
         self.dim = dim
         self.alpha = alpha
