@@ -110,24 +110,39 @@ def load_legacy_checkpoints(state_dict, encoder_depth):
 ALL_SPNORM_METHODS = ["none", "zscore", "zscore_token", "layernorm"]
 
 
-def zscore_norm(x: torch.Tensor, dim: int = -1, alpha: float = 1.0, eps: float = 1e-5) -> torch.Tensor:
+def zscore_norm(x: torch.Tensor, dim: int = -1, alpha: float = 1.0, eps: float = 1e-4) -> torch.Tensor:
     """
     Functional Z-score normalization: (x - alpha*mean) / std.
 
-    Enhanced numerical stability:
-    1. Compute in float32 (even if input is bf16)
-    2. Clamp std to prevent division by near-zero
-    3. Clamp output to prevent bf16 overflow
+    Per-sample normalization: each sample is normalized independently.
+    No multi-GPU sync needed since samples are statistically independent.
+
+    Args:
+        x: Input tensor [B, T, D]
+        dim: Dimension to normalize along
+            - dim=-1 (D): per-token normalization, each token normalized independently
+            - dim=1 (T): spatial normalization, each feature normalized across tokens
+        alpha: Scaling factor for mean subtraction (default 1.0)
+        eps: Small constant for numerical stability
+
+    Returns:
+        Normalized tensor with same dtype as input
     """
+    # Improved stability: Force float32 computation
     input_dtype = x.dtype
     x = x.float()
 
+    # Compute per-sample statistics
     mean = x.mean(dim=dim, keepdim=True)
     std = x.std(dim=dim, keepdim=True)
+
+    # Critical: large eps to prevent division by near-zero std
     std = torch.clamp(std, min=eps)
 
     result = (x - alpha * mean) / std
-    result = torch.clamp(result, min=-10.0, max=10.0)
+
+    # Critical: Clamp outputs to prevent exploding values in subsequent layers
+    result = torch.clamp(result, min=-3.0, max=3.0)
 
     return result.to(input_dtype)
 
@@ -142,7 +157,7 @@ class ZScoreNorm(torch.nn.Module):
         alpha: Scaling factor for mean subtraction (default 1.0)
         eps: Small constant for numerical stability
     """
-    def __init__(self, dim: int = -1, alpha: float = 1.0, eps: float = 1e-5):
+    def __init__(self, dim: int = -1, alpha: float = 1.0, eps: float = 1e-4):
         super().__init__()
         self.dim = dim
         self.alpha = alpha

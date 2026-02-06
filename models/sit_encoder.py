@@ -82,10 +82,15 @@ class AttentionWithEncoderKV(nn.Module):
             # Stage 2: Use SiT K/V with alignment loss
             
             if align_mode == 'logits':
-                logits_enc = (q @ k_enc.transpose(-2, -1)) * self.scale
-                logits_sit = (q @ k_sit.transpose(-2, -1)) * self.scale
-                logits_enc_n = F.normalize(logits_enc.float(), dim=-1)
-                logits_sit_n = F.normalize(logits_sit.float(), dim=-1)
+                # Numerical Stability Fix: Ensure float32 for alignment calculation
+                # to prevent overflow/underflow in exponential/norm operations
+                logits_enc = (q.float() @ k_enc.float().transpose(-2, -1)) * self.scale
+                logits_sit = (q.float() @ k_sit.float().transpose(-2, -1)) * self.scale
+                
+                # Check for zero vectors before normalize to avoid NaN
+                logits_enc_n = F.normalize(logits_enc, dim=-1, eps=1e-6)
+                logits_sit_n = F.normalize(logits_sit, dim=-1, eps=1e-6)
+                
                 distill_loss = 1 - F.cosine_similarity(logits_sit_n, logits_enc_n.detach(), dim=-1).mean()
                 
             elif align_mode == 'attn_mse':

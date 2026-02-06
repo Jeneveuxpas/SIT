@@ -297,7 +297,8 @@ class MSEVelocityNormProjectionLoss(ProjectionLoss):
         loss = F.mse_loss(zs_tilde_norm, z_target)
 
         # Safety net: detect and handle abnormal loss values
-        if torch.isnan(loss) or torch.isinf(loss) or loss > 100.0:
+        # Lower threshold from 100 to 10 for earlier detection
+        if torch.isnan(loss) or torch.isinf(loss) or loss > 10.0:
             # This batch has numerical issues, skip it to prevent training collapse
             print(f"[WARNING] Detected abnormal projection loss: {loss.item():.4f}, skipping this batch")
             loss = torch.tensor(0.0, device=zs.device, dtype=torch.float32)

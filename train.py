@@ -439,12 +439,12 @@ def main(args):
                     stage=current_stage if args.use_kv else 2,  # Skip stage 1 if no KV
                     align_mode=args.align_mode,
                 )
-                denoising_loss, proj_loss, distill_loss, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
+                with accelerator.autocast():
+                    denoising_loss, proj_loss, distill_loss, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
                 denoising_loss_mean = denoising_loss.mean()
                 
                 # Total loss
                 loss = denoising_loss_mean + proj_loss + distill_loss
-                # Ensure loss is float32 for scaler
                 loss = loss.float()
                     
                 ## optimization
