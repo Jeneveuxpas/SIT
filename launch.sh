@@ -12,6 +12,7 @@ set -e
 # 默认参数
 GPU="${GPU:-0,1,2,3,4,5,6,7}"
 NUM_GPUS="${NUM_GPUS:-8}"
+RESUME_STEP="${RESUME_STEP:-0}"  # 恢复训练的步数，0表示从头开始
 EVAL_STEPS="${EVAL_STEPS:-}"  # 评估的 checkpoint steps，逗号分隔，留空则评估最新
 EVAL_ONLY="${EVAL_ONLY:-false}"
 SKIP_EVAL="${SKIP_EVAL:-false}"
@@ -59,6 +60,10 @@ while [[ $# -gt 0 ]]; do
             CFG_SCALE="$2"
             shift 2
             ;;
+        --resume-step)
+            RESUME_STEP="$2"
+            shift 2
+            ;;
         *)
             echo "未知参数: $1"
             exit 1
@@ -92,9 +97,15 @@ if [ "$EVAL_ONLY" = "false" ]; then
     # 构建训练命令
     MASTER_PORT=$((29500 + RANDOM % 1000))
     TRAIN_CMD="accelerate launch --main_process_port ${MASTER_PORT} --num_processes ${NUM_GPUS} train.py --exp-name ${EXP_NAME}"
-   
+
     if [ -n "$CONFIG" ]; then
         TRAIN_CMD="${TRAIN_CMD} --config ${CONFIG}"
+    fi
+
+    # 添加 resume-step 参数（如果不是0）
+    if [ "$RESUME_STEP" -gt 0 ]; then
+        TRAIN_CMD="${TRAIN_CMD} --resume-step ${RESUME_STEP}"
+        echo "从 step ${RESUME_STEP} 恢复训练"
     fi
 
     # 执行训练
