@@ -242,7 +242,7 @@ class MSEVelocityNormProjectionLoss(ProjectionLoss):
     """
     KWARG_ALIASES = {"spnorm": "spnorm_method"}
 
-    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-4, **kwargs):
+    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-6, **kwargs):
         self.spnorm_method = spnorm_method
         self.zscore_alpha = zscore_alpha
         self.eps = eps

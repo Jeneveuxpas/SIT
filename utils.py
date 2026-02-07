@@ -110,7 +110,7 @@ def load_legacy_checkpoints(state_dict, encoder_depth):
 ALL_SPNORM_METHODS = ["none", "zscore", "zscore_token", "layernorm"]
 
 
-def zscore_norm(x: torch.Tensor, dim: int = -1, alpha: float = 1.0, eps: float = 1e-4) -> torch.Tensor:
+def zscore_norm(x: torch.Tensor, dim: int = -1, alpha: float = 1.0, eps: float = 1e-6) -> torch.Tensor:
     """
     Functional Z-score normalization: (x - alpha*mean) / std.
 
@@ -154,7 +154,7 @@ class ZScoreNorm(torch.nn.Module):
         alpha: Scaling factor for mean subtraction (default 1.0)
         eps: Small constant for numerical stability
     """
-    def __init__(self, dim: int = -1, alpha: float = 1.0, eps: float = 1e-4):
+    def __init__(self, dim: int = -1, alpha: float = 1.0, eps: float = 1e-6):
         super().__init__()
         self.dim = dim
         self.alpha = alpha
