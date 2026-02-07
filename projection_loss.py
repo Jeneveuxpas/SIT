@@ -276,8 +276,6 @@ class MSEVelocityNormProjectionLoss(ProjectionLoss):
 
         # Generate noise in feature space (same shape as zs)
         noise_feat = torch.randn_like(zs)
-        # Clamp noise to prevent extreme values (±3σ covers 99.7% of normal distribution)
-        noise_feat = torch.clamp(noise_feat, min=-3.0, max=3.0)
 
         # Reshape d_alpha_t and d_sigma_t for broadcasting with (B, T, D)
         if isinstance(d_alpha_t, torch.Tensor):
