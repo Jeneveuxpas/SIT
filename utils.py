@@ -141,9 +141,6 @@ def zscore_norm(x: torch.Tensor, dim: int = -1, alpha: float = 1.0, eps: float =
 
     result = (x - alpha * mean) / std
 
-    # Critical: Clamp outputs to prevent exploding values in subsequent layers
-    result = torch.clamp(result, min=-3.0, max=3.0)
-
     return result.to(input_dtype)
 
 class ZScoreNorm(torch.nn.Module):
