@@ -5,7 +5,7 @@
 # 
 # 用法: 
 #   ./launch.sh --config configs/default.yaml --exp-name my_exp
-#   ./launch.sh --config configs/kv_coeff-5.0.yaml --exp-name kv_coeff-5.0 --gpu 6,7 --num-gpus 2
+#   ./launch.sh --config configs/30-100k-10.yaml --exp-name 30-100k-10 --gpu 6,7 --num-gpus 2
 # ============================================================================
 set -e
 

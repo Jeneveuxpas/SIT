@@ -136,7 +136,6 @@ def zscore_norm(x: torch.Tensor, dim: int = -1, alpha: float = 1.0, eps: float =
     mean = x.mean(dim=dim, keepdim=True)
     std = x.std(dim=dim, keepdim=True)
 
-    # Match iREPA: use (std + eps) not clamp
     result = (x - alpha * mean) / (std + eps)
 
     return result.to(input_dtype)
