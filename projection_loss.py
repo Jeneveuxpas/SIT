@@ -236,7 +236,7 @@ class MSEVelocityNormProjectionLoss(ProjectionLoss):
     Args:
         spnorm_method: "none" or "zscore" (default: "zscore")
         zscore_alpha: scaling factor for zscore normalization (default: 1.0)
-        eps: small constant for numerical stability (default: 1e-4)
+        eps: small constant for numerical stability (default: 1e-6)
 
     Enhanced numerical stability for multi-GPU training.
     """
