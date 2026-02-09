@@ -110,6 +110,34 @@ def parse_layer_indices(indices_str: str) -> list:
     return [int(x.strip()) - 1 for x in indices_str.split(',')]
 
 
+def get_distill_coeff_schedule(step, stage1_steps, total_steps, start_coeff=1.0, end_coeff=1.0):
+    """
+    Compute dynamic distillation coefficient based on linear schedule.
+    
+    Args:
+        step: Current training step
+        stage1_steps: Step count for Stage 1 (distill_coeff = 0 in Stage 1)
+        total_steps: Total training steps
+        start_coeff: Starting coefficient (at stage1_steps)
+        end_coeff: Ending coefficient (at total_steps), same as start = constant
+        
+    Returns:
+        Current distillation coefficient
+    """
+    # Stage 1: no distillation loss (using encoder KV directly)
+    if step < stage1_steps:
+        return 0.0
+    
+    # Linear interpolation from start_coeff to end_coeff
+    # If start_coeff == end_coeff, result is constant
+    stage2_steps = total_steps - stage1_steps
+    if stage2_steps <= 0:
+        return start_coeff
+    progress = min(1.0, (step - stage1_steps) / stage2_steps)
+    return start_coeff + (end_coeff - start_coeff) * progress
+
+
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -440,8 +468,18 @@ def main(args):
                     align_mode=args.align_mode,
                 )
                 
-                denoising_loss, proj_loss, distill_loss, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
+                denoising_loss, proj_loss, distill_loss_raw, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
                 denoising_loss_mean = denoising_loss.mean()
+                
+                # Calculate dynamic distillation coefficient
+                current_distill_coeff = get_distill_coeff_schedule(
+                    step=global_step,
+                    stage1_steps=args.stage1_steps,
+                    total_steps=args.max_train_steps,
+                    start_coeff=args.distill_coeff,
+                    end_coeff=args.distill_coeff_end,
+                )
+                distill_loss = distill_loss_raw * current_distill_coeff
                 
                 # Total loss
                 loss = denoising_loss_mean + proj_loss + distill_loss
@@ -517,6 +555,8 @@ def main(args):
                     "denoising_loss": denoising_loss_mean.detach().item(),
                     "proj_loss": proj_loss.detach().item() if isinstance(proj_loss, torch.Tensor) else proj_loss,
                     "distill_loss": distill_loss.detach().item() if isinstance(distill_loss, torch.Tensor) else distill_loss,
+                    "distill_loss_raw": distill_loss_raw.detach().item() if isinstance(distill_loss_raw, torch.Tensor) else distill_loss_raw,
+                    "distill_coeff": current_distill_coeff,
                     "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "stage": current_stage,
                 }
@@ -571,11 +611,13 @@ def parse_args(input_args=None):
                         help="Comma-separated SiT layer indices for K/V injection (1-based, e.g. 1-12)")
     parser.add_argument("--stage1-steps", type=int, default=30000,
                         help="Number of steps for Stage 1 (e.g., 30000 for 100k total)")
-    parser.add_argument("--distill-coeff", type=float, default=2.0,
-                        help="Coefficient for attention distillation loss (Stage 2 only)")
+    parser.add_argument("--distill-coeff", type=float, default=1.0,
+                        help="Start coefficient for distillation loss (or constant value if schedule=constant)")
+    parser.add_argument("--distill-coeff-end", type=float, default=1.0,
+                        help="End coefficient for distillation loss (same as start = constant)")
     parser.add_argument("--align-mode", type=str, default="attn_mse",
                         choices=["logits", "attn_mse", "kv_mse"],
-                        help="Alignment mode: logits, attn_mse,kv_mse")
+                        help="Alignment mode: logits, attn_mse, kv_mse")
     parser.add_argument("--kv-proj-type", type=str, default="linear",
                         choices=["linear", "mlp", "conv"],
                         help="Projection type for Encoder K/V: linear, mlp, or conv")

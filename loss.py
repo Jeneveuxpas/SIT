@@ -31,6 +31,8 @@ class SILossWithEncoderKV:
     1. Denoising loss (v-prediction)
     2. REPA projection loss (cosine, nt-xent, etc.)
     3. Attention distillation loss (from model output, Stage 2 only)
+    
+    Note: distill_coeff is now handled dynamically in train.py for schedule support.
     """
     def __init__(
             self,
@@ -43,7 +45,7 @@ class SILossWithEncoderKV:
             projection_loss_type="cosine",
             projection_loss_kwargs={},
             proj_coeff=[0.5],
-            distill_coeff=1.0,
+            distill_coeff=1.0,  # Kept for backward compatibility but not used
         ):
         self.prediction = prediction
         self.weighting = weighting
@@ -51,7 +53,7 @@ class SILossWithEncoderKV:
         self.accelerator = accelerator
         self.latents_scale = latents_scale
         self.latents_bias = latents_bias
-        self.distill_coeff = distill_coeff
+        # Note: distill_coeff no longer used here, applied dynamically in train.py
 
         # parse projection loss type and coeff
         self.projection_loss_type = [elem.strip() for elem in projection_loss_type.split(",") if elem.strip()]
@@ -167,4 +169,4 @@ class SILossWithEncoderKV:
         loss_dict = proj_loss_dict.copy()
         loss_dict["distill_loss"] = distill_loss.detach().item() if isinstance(distill_loss, torch.Tensor) else distill_loss
         
-        return denoising_loss, total_proj_loss, distill_loss * self.distill_coeff, loss_dict
+        return denoising_loss, total_proj_loss, distill_loss, loss_dict

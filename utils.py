@@ -128,14 +128,10 @@ def zscore_norm(x: torch.Tensor, dim: int = -1, alpha: float = 1.0, eps: float =
     Returns:
         Normalized tensor with same dtype as input
     """
-    # Improved stability: Force float32 computation
     input_dtype = x.dtype
     x = x.float()
-
-    # Compute per-sample statistics
     mean = x.mean(dim=dim, keepdim=True)
     std = x.std(dim=dim, keepdim=True)
-
     result = (x - alpha * mean) / (std + eps)
 
     return result.to(input_dtype)
