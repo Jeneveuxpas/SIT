@@ -165,8 +165,7 @@ class SILossWithEncoderKV:
         else:
             distill_loss = distill_loss.float()
         
-        # Aggregate loss dict
+        # Aggregate loss dict (use different key to avoid overwriting weighted distill_loss in train.py)
         loss_dict = proj_loss_dict.copy()
-        loss_dict["distill_loss"] = distill_loss.detach().item() if isinstance(distill_loss, torch.Tensor) else distill_loss
         
         return denoising_loss, total_proj_loss, distill_loss, loss_dict
