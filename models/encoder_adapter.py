@@ -38,6 +38,22 @@ class EncoderKVExtractor(nn.Module):
         # Freeze encoder
         for param in self.encoder_model.parameters():
             param.requires_grad = False
+
+    def reset_cache(self):
+        """Reset captured hook outputs before a new encoder forward."""
+        self.captured_kv = {}
+        self.captured_feat = {}
+
+    def get_captured_kv_list(self) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Collect captured (K, V) tuples in the same order as self.layer_indices.
+        """
+        kv_list = []
+        for idx in self.layer_indices:
+            if idx not in self.captured_kv:
+                raise RuntimeError(f"K/V for layer {idx} not captured")
+            kv_list.append(self.captured_kv[idx])
+        return kv_list
             
     def _get_model_blocks(self, model: nn.Module) -> List[nn.Module]:
         """Flatten model blocks into a list for consistent indexing."""
@@ -334,8 +350,7 @@ class EncoderKVExtractor(nn.Module):
                 K, V shape: (B, num_heads, num_patches, head_dim)
             cls_token: CLS token (B, enc_dim)
         """
-        self.captured_kv = {}
-        self.captured_feat = {}
+        self.reset_cache()
         
         # Forward through encoder and get CLS token
         if hasattr(self.encoder_model, "forward_features"):
@@ -367,19 +382,7 @@ class EncoderKVExtractor(nn.Module):
         
         
         # Collect K/V in order of layer_indices
-        kv_list = []
-        feat_list = []
-        for idx in self.layer_indices:
-            if idx in self.captured_kv:
-                kv_list.append(self.captured_kv[idx])
-                # Feature might be captured (if configured)
-                if idx in self.captured_feat:
-                    feat_list.append(self.captured_feat[idx])
-                else:
-                     # Fallback check
-                     pass
-            else:
-                raise RuntimeError(f"K/V for layer {idx} not captured")
+        kv_list = self.get_captured_kv_list()
         
         return kv_list, cls_token
 

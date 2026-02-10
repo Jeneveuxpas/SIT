@@ -45,7 +45,6 @@ class SILossWithEncoderKV:
             projection_loss_type="cosine",
             projection_loss_kwargs={},
             proj_coeff=[0.5],
-            distill_coeff=1.0,  # Kept for backward compatibility but not used
         ):
         self.prediction = prediction
         self.weighting = weighting
@@ -53,7 +52,6 @@ class SILossWithEncoderKV:
         self.accelerator = accelerator
         self.latents_scale = latents_scale
         self.latents_bias = latents_bias
-        # Note: distill_coeff no longer used here, applied dynamically in train.py
 
         # parse projection loss type and coeff
         self.projection_loss_type = [elem.strip() for elem in projection_loss_type.split(",") if elem.strip()]

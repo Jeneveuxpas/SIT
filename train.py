@@ -110,33 +110,29 @@ def parse_layer_indices(indices_str: str) -> list:
     return [int(x.strip()) - 1 for x in indices_str.split(',')]
 
 
-def get_distill_coeff_schedule(step, stage1_steps, total_steps, start_coeff=1.0, end_coeff=1.0):
+def get_loss_stop_multiplier(step: int, stop_step: int = None, fade_steps: int = 0) -> float:
     """
-    Compute dynamic distillation coefficient based on linear schedule.
-    
+    Compute loss multiplier for stage-wise termination.
+
     Args:
-        step: Current training step
-        stage1_steps: Step count for Stage 1 (distill_coeff = 0 in Stage 1)
-        total_steps: Total training steps
-        start_coeff: Starting coefficient (at stage1_steps)
-        end_coeff: Ending coefficient (at total_steps), same as start = constant
-        
+        step: Current global training step.
+        stop_step: Absolute step to begin turning off this loss branch.
+            None (or negative) keeps the branch always on.
+        fade_steps: If >0, use cosine fade from 1->0 after stop_step.
+            If 0, hard-stop at stop_step.
+
     Returns:
-        Current distillation coefficient
+        Scalar multiplier in [0, 1].
     """
-    # Stage 1: no distillation loss (using encoder KV directly)
-    if step < stage1_steps:
+    if stop_step is None or stop_step < 0:
+        return 1.0
+    if step < stop_step:
+        return 1.0
+    if fade_steps <= 0:
         return 0.0
-    
-    # Linear interpolation from start_coeff to end_coeff
-    # If start_coeff == end_coeff, result is constant
-    stage2_steps = total_steps - stage1_steps
-    if stage2_steps <= 0:
-        return start_coeff
-    progress = min(1.0, (step - stage1_steps) / stage2_steps)
-    return start_coeff + (end_coeff - start_coeff) * progress
 
-
+    progress = min(1.0, (step - stop_step) / max(1, fade_steps))
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
 
 #################################################################################
 #                                  Training Loop                                #
@@ -229,6 +225,7 @@ def main(args):
     
     # Create SiT with Encoder KV
     model = SiT_EncoderKV_models[args.model](
+        path_type=args.path_type,
         input_size=latent_size,
         in_channels=in_channels,
         num_classes=args.num_classes,
@@ -246,6 +243,11 @@ def main(args):
         kv_proj_kernel_size=args.kv_proj_kernel_size,
         kv_norm_type=args.kv_norm_type,
         kv_zscore_alpha=args.kv_zscore_alpha,
+        distill_temperature=args.distill_temperature,
+        kv_distill_snr_gamma=args.kv_distill_snr_gamma,
+        kv_distill_min_weight=args.kv_distill_min_weight,
+        attn_loss_weight=args.attn_loss_weight,
+        kv_loss_weight=args.kv_loss_weight,
         **block_kwargs
     )
 
@@ -277,7 +279,6 @@ def main(args):
         projection_loss_type=args.projection_loss_type,
         projection_loss_kwargs=projection_loss_kwargs,
         proj_coeff=args.proj_coeff,
-        distill_coeff=args.distill_coeff,
     )
     if accelerator.is_main_process:
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -421,10 +422,40 @@ def main(args):
 
             # Auto-stage switching (by step count)
             current_stage = 1 if global_step < args.stage1_steps else 2
+            current_align_mode = args.align_mode
+            has_align_switch = (
+                args.align_mode_late is not None
+                and args.align_switch_step is not None
+            )
+            if (
+                current_stage == 2
+                and has_align_switch
+                and global_step >= args.align_switch_step
+            ):
+                current_align_mode = args.align_mode_late
+
+            # Stage-wise termination gates
+            # REPA: controls projection loss branch
+            repa_gate = get_loss_stop_multiplier(
+                step=global_step,
+                stop_step=args.repa_stop_step,
+                fade_steps=args.repa_stop_fade_steps,
+            )
+            # KV gate only affects Stage 2 distillation; Stage 1 KV guidance stays enabled.
+            kv_gate = get_loss_stop_multiplier(
+                step=global_step,
+                stop_step=args.kv_stop_step,
+                fade_steps=args.kv_stop_fade_steps,
+            )
+            repa_active = args.repa_loss and repa_gate > 0.0
+            kv_active = args.use_kv and (current_stage == 1 or kv_gate > 0.0)
 
             # Log stage periodically
             if accelerator.is_main_process and global_step % 1000 == 0:
-                logger.info(f"Step {global_step}: stage = {current_stage} (switch at step {args.stage1_steps})")
+                logger.info(
+                    f"Step {global_step}: stage = {current_stage} (switch at step {args.stage1_steps}), "
+                    f"align_mode = {current_align_mode}, repa_gate = {repa_gate:.3f}, kv_gate = {kv_gate:.3f}"
+                )
 
             labels = y
             with torch.no_grad():
@@ -432,53 +463,92 @@ def main(args):
                 
                 # Extract Encoder K/V and CLS token (only if KV distillation is enabled)
                 enc_kv_list = None
-                if args.use_kv:
-                    if raw_image is None:
-                         raise ValueError("use_kv requires raw images, but dataset did not return them (check repa_loss arg).")
-                    raw_image_enc = encoders[0].preprocess(raw_image)
-                    with accelerator.autocast():
-                        enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
-                
                 # Extract encoder features for REPA projection loss
                 zs = []
-                if args.repa_loss:
+                
+                # Fast path: single encoder + both losses active -> one encoder forward.
+                single_encoder_joint_path = (
+                    kv_active and repa_active and len(encoders) == 1 and encoder_kv_extractor is not None
+                )
+
+                if single_encoder_joint_path:
+                    if raw_image is None:
+                        raise ValueError("active REPA/KV requires raw images, but dataset did not return them.")
+                    raw_image_enc = encoders[0].preprocess(raw_image)
                     with accelerator.autocast():
-                        for encoder in encoders:
-                            # Preprocess the image using encoder's built-in method
-                            raw_image_ = encoder.preprocess(raw_image)
+                        encoder_kv_extractor.reset_cache()
+                        features = encoders[0].forward_features(raw_image_enc)
+                        z = features['x_norm_patchtokens']
+                        zs.append(z)
+                        try:
+                            enc_kv_list = encoder_kv_extractor.get_captured_kv_list()
+                        except RuntimeError:
+                            # Fallback for encoders whose wrapper path does not trigger registered hooks.
+                            enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
+                else:
+                    if kv_active:
+                        if raw_image is None:
+                             raise ValueError("use_kv requires raw images, but dataset did not return them (check repa_loss arg).")
+                        raw_image_enc = encoders[0].preprocess(raw_image)
+                        with accelerator.autocast():
+                            enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
+                    
+                    if repa_active:
+                        with accelerator.autocast():
+                            for encoder in encoders:
+                                # Preprocess the image using encoder's built-in method
+                                raw_image_ = encoder.preprocess(raw_image)
 
-                            # Encode the features
-                            # outputs dictionary with keys: 'x_norm_patchtokens' and 'x_norm_clstoken'
-                            features = encoder.forward_features(raw_image_) 
+                                # Encode the features
+                                # outputs dictionary with keys: 'x_norm_patchtokens' and 'x_norm_clstoken'
+                                features = encoder.forward_features(raw_image_) 
 
-                            # normalize spatial features
-                            # normalize spatial features (handled in loss now)
-                            # Legacy Note: args.cls_token_weight was previously passed but ignored by SpatialNormalization.
-                            # We keep it ignored here to match original behavior.
-                            z = features['x_norm_patchtokens']
+                                # normalize spatial features
+                                # normalize spatial features (handled in loss now)
+                                # Legacy Note: args.cls_token_weight was previously passed but ignored by SpatialNormalization.
+                                # We keep it ignored here to match original behavior.
+                                z = features['x_norm_patchtokens']
 
-                            # append to list
-                            zs.append(z)
+                                # append to list
+                                zs.append(z)
 
             with accelerator.accumulate(model):
                 model_kwargs = dict(
                     y=labels,
-                    enc_kv_list=enc_kv_list if args.use_kv else None,
-                    stage=current_stage if args.use_kv else 2,  # Skip stage 1 if no KV
-                    align_mode=args.align_mode,
+                    enc_kv_list=enc_kv_list if kv_active else None,
+                    stage=current_stage if kv_active else 2,  # Skip stage 1 if KV branch is off
+                    align_mode=current_align_mode,
                 )
                 
-                denoising_loss, proj_loss, distill_loss_raw, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
+                denoising_loss, proj_loss_raw, distill_loss_raw, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
                 denoising_loss_mean = denoising_loss.mean()
+                proj_loss = proj_loss_raw * repa_gate
                 
-                # Calculate dynamic distillation coefficient
-                current_distill_coeff = get_distill_coeff_schedule(
-                    step=global_step,
-                    stage1_steps=args.stage1_steps,
-                    total_steps=args.max_train_steps,
-                    start_coeff=args.distill_coeff,
-                    end_coeff=args.distill_coeff_end,
-                )
+                # Distillation coefficient scheduling:
+                # - Stage 1: always 0
+                # - Stage 2: use early coeff, then optional smooth transition to late coeff
+                #   anchored at align-switch-step.
+                distill_coeff_early = args.distill_coeff if args.distill_coeff_early is None else args.distill_coeff_early
+                distill_coeff_late = distill_coeff_early if args.distill_coeff_late is None else args.distill_coeff_late
+                if current_stage == 2:
+                    if has_align_switch and global_step >= args.align_switch_step:
+                        if args.distill_coeff_ramp_steps > 0:
+                            progress = min(
+                                1.0,
+                                (global_step - args.align_switch_step) / max(1, args.distill_coeff_ramp_steps),
+                            )
+                            blend = 0.5 * (1.0 - math.cos(math.pi * progress))
+                            base_distill_coeff = (
+                                (1.0 - blend) * distill_coeff_early
+                                + blend * distill_coeff_late
+                            )
+                        else:
+                            base_distill_coeff = distill_coeff_late
+                    else:
+                        base_distill_coeff = distill_coeff_early
+                else:
+                    base_distill_coeff = 0.0
+                current_distill_coeff = base_distill_coeff * kv_gate
                 distill_loss = distill_loss_raw * current_distill_coeff
                 
                 # Total loss
@@ -504,59 +574,64 @@ def main(args):
             ### enter
             if accelerator.sync_gradients:
                 progress_bar.update(1)
-                global_step += 1                
-            if global_step % args.checkpointing_steps == 0 and global_step > 0:
-                if accelerator.is_main_process:
-                    original_model = safe_unwrap_model(model)
+                global_step += 1
 
-                    checkpoint = {
-                        "model": original_model.state_dict(),
-                        "ema": ema.state_dict(),
-                        "opt": optimizer.state_dict(),
-                        "args": args,
-                        "steps": global_step,
-                    }
-                    checkpoint_path = f"{checkpoint_dir}/{global_step:07d}.pt"
-                    torch.save(checkpoint, checkpoint_path)
-                    logger.info(f"Saved checkpoint to {checkpoint_path}")
+                if global_step % args.checkpointing_steps == 0 and global_step > 0:
+                    if accelerator.is_main_process:
+                        original_model = safe_unwrap_model(model)
 
-            if (global_step == 1 or (global_step % args.sampling_steps == 0 and global_step > 0)):
-                from samplers import euler_sampler
-                with torch.no_grad():
-                    samples = euler_sampler(
-                        model, 
-                        xT, 
-                        ys,
-                        num_steps=50, 
-                        cfg_scale=1.0,
-                        guidance_low=0.,
-                        guidance_high=1.,
-                        path_type=args.path_type,
-                        heun=False,
-                    ).to(torch.float32)
-                    samples = vae.decode(samples / latents_scale + latents_bias).sample
-                    gt_samples = vae.decode(gt_xs / latents_scale + latents_bias).sample
-                    samples = (samples + 1) / 2.
-                    gt_samples = (gt_samples + 1) / 2.
-                out_samples = accelerator.gather(samples.to(torch.float32))
-                gt_samples = accelerator.gather(gt_samples.to(torch.float32))
-                
-                stage_name = f"stage{current_stage}"
-                accelerator.log({
-                    f"samples_{stage_name}": wandb.Image(array2grid(out_samples)),
-                    "gt_samples": wandb.Image(array2grid(gt_samples))
-                })
-                logging.info(f"Generated samples: Stage {current_stage}")
+                        checkpoint = {
+                            "model": original_model.state_dict(),
+                            "ema": ema.state_dict(),
+                            "opt": optimizer.state_dict(),
+                            "args": args,
+                            "steps": global_step,
+                        }
+                        checkpoint_path = f"{checkpoint_dir}/{global_step:07d}.pt"
+                        torch.save(checkpoint, checkpoint_path)
+                        logger.info(f"Saved checkpoint to {checkpoint_path}")
 
-            # Include the loss and grad norms in the logging
-            if accelerator.sync_gradients:
+                if (global_step == 1 or (global_step % args.sampling_steps == 0 and global_step > 0)):
+                    from samplers import euler_sampler
+                    with torch.no_grad():
+                        samples = euler_sampler(
+                            model,
+                            xT,
+                            ys,
+                            num_steps=50,
+                            cfg_scale=1.0,
+                            guidance_low=0.,
+                            guidance_high=1.,
+                            path_type=args.path_type,
+                            heun=False,
+                        ).to(torch.float32)
+                        samples = vae.decode(samples / latents_scale + latents_bias).sample
+                        gt_samples = vae.decode(gt_xs / latents_scale + latents_bias).sample
+                        samples = (samples + 1) / 2.
+                        gt_samples = (gt_samples + 1) / 2.
+                    out_samples = accelerator.gather(samples.to(torch.float32))
+                    gt_samples = accelerator.gather(gt_samples.to(torch.float32))
+
+                    stage_name = f"stage{current_stage}"
+                    accelerator.log({
+                        f"samples_{stage_name}": wandb.Image(array2grid(out_samples)),
+                        "gt_samples": wandb.Image(array2grid(gt_samples))
+                    })
+                    if accelerator.is_main_process:
+                        logger.info(f"Generated samples: Stage {current_stage}")
+
+                # Include the loss and grad norms in the logging
                 logs = {
                     "loss": loss.detach().item(),
                     "denoising_loss": denoising_loss_mean.detach().item(),
                     "proj_loss": proj_loss.detach().item() if isinstance(proj_loss, torch.Tensor) else proj_loss,
+                    "proj_loss_raw": proj_loss_raw.detach().item() if isinstance(proj_loss_raw, torch.Tensor) else proj_loss_raw,
                     "distill_loss": distill_loss.detach().item() if isinstance(distill_loss, torch.Tensor) else distill_loss,
                     "distill_loss_raw": distill_loss_raw.detach().item() if isinstance(distill_loss_raw, torch.Tensor) else distill_loss_raw,
                     "distill_coeff": current_distill_coeff,
+                    "distill_coeff_base": base_distill_coeff,
+                    "repa_gate": repa_gate,
+                    "kv_gate": kv_gate,
                     "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "stage": current_stage,
                 }
@@ -612,12 +687,35 @@ def parse_args(input_args=None):
     parser.add_argument("--stage1-steps", type=int, default=30000,
                         help="Number of steps for Stage 1 (e.g., 30000 for 100k total)")
     parser.add_argument("--distill-coeff", type=float, default=1.0,
-                        help="Start coefficient for distillation loss (or constant value if schedule=constant)")
-    parser.add_argument("--distill-coeff-end", type=float, default=1.0,
-                        help="End coefficient for distillation loss (same as start = constant)")
+                        help="Coefficient for distillation loss (0 in Stage 1, this value in Stage 2)")
+    parser.add_argument("--distill-coeff-early", type=float, default=None,
+                        help="Stage-2 distillation coeff before align switch (default: distill-coeff)")
+    parser.add_argument("--distill-coeff-late", type=float, default=None,
+                        help="Stage-2 distillation coeff after align switch (default: distill-coeff-early)")
+    parser.add_argument("--distill-coeff-ramp-steps", type=int, default=0,
+                        help="Smooth coeff transition length from early->late after align-switch-step (0 = hard switch)")
     parser.add_argument("--align-mode", type=str, default="attn_mse",
-                        choices=["logits", "attn_mse", "kv_mse"],
-                        help="Alignment mode: logits, attn_mse, kv_mse")
+                        choices=["logits", "attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
+                        help="Alignment mode: logits, attn_mse, attn_kl, kv_mse, attn_hybrid")
+    parser.add_argument("--align-mode-late", type=str, default=None,
+                        choices=["logits", "attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
+                        help="Optional late-stage alignment mode after align-switch-step")
+    parser.add_argument("--align-switch-step", type=int, default=None,
+                        help="Absolute step to switch from align-mode to align-mode-late")
+    parser.add_argument("--distill-temperature", type=float, default=1.0,
+                        help="Temperature for attn_kl mode (<1 sharpens distributions, making alignment harder)")
+    parser.add_argument("--attn-loss-weight", type=float, default=1.0,
+                        help="Weight for attention-output loss in attn_hybrid mode")
+    parser.add_argument("--kv-loss-weight", type=float, default=1.0,
+                        help="Weight for KV loss term in attn_hybrid mode")
+    parser.add_argument("--kv-distill-snr-gamma", type=float, default=1.0,
+                        help="Power for SNR-based KV weighting (>1 focuses more on low-noise steps)")
+    parser.add_argument("--kv-distill-min-weight", type=float, default=0.0,
+                        help="Lower bound for SNR-based KV weighting")
+    parser.add_argument("--kv-stop-step", type=int, default=None,
+                        help="Absolute step to begin turning off Stage-2 KV distillation (None keeps it on)")
+    parser.add_argument("--kv-stop-fade-steps", type=int, default=0,
+                        help="Cosine fade length for KV distillation after kv-stop-step (0 = hard stop)")
     parser.add_argument("--kv-proj-type", type=str, default="linear",
                         choices=["linear", "mlp", "conv"],
                         help="Projection type for Encoder K/V: linear, mlp, or conv")
@@ -673,6 +771,10 @@ def parse_args(input_args=None):
                         help="Enable KV distillation from encoder (use --no-use-kv to disable)")
     # add loss type
     parser.add_argument("--projection-loss-type", type=str, default="cosine", help="Should be a comma-separated list of projection loss types")
+    parser.add_argument("--repa-stop-step", type=int, default=None,
+                        help="Absolute step to begin turning off REPA projection loss (None keeps it on)")
+    parser.add_argument("--repa-stop-fade-steps", type=int, default=0,
+                        help="Cosine fade length for REPA projection loss after repa-stop-step (0 = hard stop)")
 
     # whether to normalize spatial features
     parser.add_argument("--spnorm-method", type=str, default="zscore", choices=["none", "zscore", "zscore_token", "layernorm"])
@@ -707,6 +809,21 @@ def parse_args(input_args=None):
         args = parser.parse_args(input_args)
     else:
         args = parser.parse_args()
+
+    if args.kv_distill_snr_gamma <= 0:
+        parser.error("--kv-distill-snr-gamma must be > 0")
+    if not 0.0 <= args.kv_distill_min_weight <= 1.0:
+        parser.error("--kv-distill-min-weight must be in [0, 1]")
+    if args.distill_coeff_early is not None and args.distill_coeff_early < 0:
+        parser.error("--distill-coeff-early must be >= 0")
+    if args.distill_coeff_late is not None and args.distill_coeff_late < 0:
+        parser.error("--distill-coeff-late must be >= 0")
+    if args.distill_coeff_ramp_steps < 0:
+        parser.error("--distill-coeff-ramp-steps must be >= 0")
+    if args.kv_stop_fade_steps < 0:
+        parser.error("--kv-stop-fade-steps must be >= 0")
+    if args.repa_stop_fade_steps < 0:
+        parser.error("--repa-stop-fade-steps must be >= 0")
 
     return args
 
