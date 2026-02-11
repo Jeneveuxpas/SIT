@@ -23,8 +23,6 @@ distill-coeff: 6.0          # Coefficient for attention distillation loss
 
 # Alignment mode: logits, attn_mse, snr_attn_mse, attn_kl, kv_mse, attn_hybrid
 align-mode: snr_attn_mse
-align-mode-late: null
-align-switch-step: null
 
 # K/V projection: linear, mlp, conv
 kv-proj-type: linear
@@ -46,6 +44,10 @@ spnorm-method: zscore           # none, zscore, zscore_token, layernorm
 zscore-alpha: 0.6
 repa-stop-step: -1
 repa-stop-fade-steps: 0
+grad-monitor: true
+grad-monitor-interval: 5000
+grad-monitor-kv-layer: 4
+grad-monitor-repa-layer: 10
 
 # ============================================================================
 # Dataset

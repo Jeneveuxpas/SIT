@@ -134,6 +134,80 @@ def get_loss_stop_multiplier(step: int, stop_step: int = None, fade_steps: int =
     progress = min(1.0, (step - stop_step) / max(1, fade_steps))
     return 0.5 * (1.0 + math.cos(math.pi * progress))
 
+
+def get_sit_block_probe_params(model, layer_idx_1based: int):
+    """
+    Select lightweight probe parameters from a specific SiT block.
+    We use attention projection weights to keep monitoring cost low.
+    """
+    if not hasattr(model, "blocks"):
+        return []
+
+    block_idx = layer_idx_1based - 1
+    if block_idx < 0 or block_idx >= len(model.blocks):
+        return []
+
+    block = model.blocks[block_idx]
+    selected = []
+    for name, p in block.named_parameters():
+        if not p.requires_grad:
+            continue
+        if name in {"attn.qkv.weight", "attn.proj.weight"}:
+            selected.append(p)
+
+    # Fallback in case module naming differs.
+    if len(selected) == 0:
+        for name, p in block.named_parameters():
+            if p.requires_grad and name.startswith("attn."):
+                selected.append(p)
+    return selected
+
+
+def compute_grad_cosine(loss_main: torch.Tensor, loss_aux: torch.Tensor, params):
+    """
+    Compute cosine similarity between gradients of two losses
+    on a fixed probe parameter set.
+    """
+    if len(params) == 0:
+        return None
+    if not isinstance(loss_main, torch.Tensor) or not isinstance(loss_aux, torch.Tensor):
+        return None
+    if not loss_main.requires_grad or not loss_aux.requires_grad:
+        return None
+
+    grads_main = torch.autograd.grad(
+        loss_main, params, retain_graph=True, allow_unused=True
+    )
+    grads_aux = torch.autograd.grad(
+        loss_aux, params, retain_graph=True, allow_unused=True
+    )
+
+    device = params[0].device
+    dot = torch.tensor(0.0, device=device)
+    main_norm_sq = torch.tensor(0.0, device=device)
+    aux_norm_sq = torch.tensor(0.0, device=device)
+    used = 0
+
+    for g_main, g_aux in zip(grads_main, grads_aux):
+        if g_main is None or g_aux is None:
+            continue
+        gm = g_main.detach().float().reshape(-1)
+        ga = g_aux.detach().float().reshape(-1)
+        dot = dot + torch.dot(gm, ga)
+        main_norm_sq = main_norm_sq + torch.dot(gm, gm)
+        aux_norm_sq = aux_norm_sq + torch.dot(ga, ga)
+        used += 1
+
+    if used == 0:
+        return None
+    if main_norm_sq.item() <= 0 or aux_norm_sq.item() <= 0:
+        return None
+
+    main_norm = torch.sqrt(main_norm_sq)
+    aux_norm = torch.sqrt(aux_norm_sq)
+    cosine = dot / (main_norm * aux_norm + 1e-12)
+    return cosine, main_norm, aux_norm
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -367,6 +441,24 @@ def main(args):
         model, optimizer, train_dataloader
     )
 
+    # Optional gradient-direction monitoring on fixed SiT probe layers.
+    kv_probe_params = []
+    repa_probe_params = []
+    if args.grad_monitor:
+        probe_model = safe_unwrap_model(model)
+        kv_probe_params = get_sit_block_probe_params(probe_model, args.grad_monitor_kv_layer)
+        repa_probe_params = get_sit_block_probe_params(probe_model, args.grad_monitor_repa_layer)
+        if accelerator.is_main_process:
+            logger.info(
+                f"Grad monitor enabled (interval={args.grad_monitor_interval}): "
+                f"KV probe=layer{args.grad_monitor_kv_layer} ({len(kv_probe_params)} params), "
+                f"REPA probe=layer{args.grad_monitor_repa_layer} ({len(repa_probe_params)} params)"
+            )
+            if len(kv_probe_params) == 0:
+                logger.warning("Grad monitor: KV probe parameter set is empty.")
+            if len(repa_probe_params) == 0:
+                logger.warning("Grad monitor: REPA probe parameter set is empty.")
+
     if accelerator.is_main_process:
         tracker_config = vars(copy.deepcopy(args))
         accelerator.init_trackers(
@@ -411,6 +503,7 @@ def main(args):
 
         model.train()
         for batch in train_dataloader:
+            grad_monitor_logs = {}
             if len(batch) == 3:
                 raw_image, x, y = batch
                 raw_image = raw_image.to(device)
@@ -423,16 +516,6 @@ def main(args):
             # Auto-stage switching (by step count)
             current_stage = 1 if global_step < args.stage1_steps else 2
             current_align_mode = args.align_mode
-            has_align_switch = (
-                args.align_mode_late is not None
-                and args.align_switch_step is not None
-            )
-            if (
-                current_stage == 2
-                and has_align_switch
-                and global_step >= args.align_switch_step
-            ):
-                current_align_mode = args.align_mode_late
 
             # Stage-wise termination gates
             # REPA: controls projection loss branch
@@ -524,32 +607,44 @@ def main(args):
                 denoising_loss_mean = denoising_loss.mean()
                 proj_loss = proj_loss_raw * repa_gate
                 
-                # Distillation coefficient scheduling:
-                # - Stage 1: always 0
-                # - Stage 2: use early coeff, then optional smooth transition to late coeff
-                #   anchored at align-switch-step.
-                distill_coeff_early = args.distill_coeff if args.distill_coeff_early is None else args.distill_coeff_early
-                distill_coeff_late = distill_coeff_early if args.distill_coeff_late is None else args.distill_coeff_late
-                if current_stage == 2:
-                    if has_align_switch and global_step >= args.align_switch_step:
-                        if args.distill_coeff_ramp_steps > 0:
-                            progress = min(
-                                1.0,
-                                (global_step - args.align_switch_step) / max(1, args.distill_coeff_ramp_steps),
-                            )
-                            blend = 0.5 * (1.0 - math.cos(math.pi * progress))
-                            base_distill_coeff = (
-                                (1.0 - blend) * distill_coeff_early
-                                + blend * distill_coeff_late
-                            )
-                        else:
-                            base_distill_coeff = distill_coeff_late
-                    else:
-                        base_distill_coeff = distill_coeff_early
-                else:
-                    base_distill_coeff = 0.0
+                # Distillation coefficient: 0 in Stage 1, fixed coefficient in Stage 2.
+                base_distill_coeff = args.distill_coeff if current_stage == 2 else 0.0
                 current_distill_coeff = base_distill_coeff * kv_gate
                 distill_loss = distill_loss_raw * current_distill_coeff
+
+                should_monitor_grad = (
+                    args.grad_monitor
+                    and accelerator.sync_gradients
+                    and global_step > 0
+                    and (global_step % args.grad_monitor_interval == 0)
+                )
+                if should_monitor_grad:
+                    kv_grad_stats = compute_grad_cosine(
+                        denoising_loss_mean, distill_loss, kv_probe_params
+                    )
+                    if kv_grad_stats is not None:
+                        kv_cos, kv_main_norm, kv_aux_norm = kv_grad_stats
+                        grad_monitor_logs.update({
+                            f"grad_cos_main_kv_l{args.grad_monitor_kv_layer}": kv_cos.detach().item(),
+                            f"grad_norm_main_kv_l{args.grad_monitor_kv_layer}": kv_main_norm.detach().item(),
+                            f"grad_norm_kv_l{args.grad_monitor_kv_layer}": kv_aux_norm.detach().item(),
+                        })
+
+                    repa_grad_stats = compute_grad_cosine(
+                        denoising_loss_mean, proj_loss, repa_probe_params
+                    )
+                    if repa_grad_stats is not None:
+                        repa_cos, repa_main_norm, repa_aux_norm = repa_grad_stats
+                        grad_monitor_logs.update({
+                            f"grad_cos_main_repa_l{args.grad_monitor_repa_layer}": repa_cos.detach().item(),
+                            f"grad_norm_main_repa_l{args.grad_monitor_repa_layer}": repa_main_norm.detach().item(),
+                            f"grad_norm_repa_l{args.grad_monitor_repa_layer}": repa_aux_norm.detach().item(),
+                        })
+
+                    if accelerator.is_main_process and len(grad_monitor_logs) > 0:
+                        logger.info(
+                            f"Step {global_step}: grad monitor {grad_monitor_logs}"
+                        )
                 
                 # Total loss
                 loss = denoising_loss_mean + proj_loss + distill_loss
@@ -636,6 +731,7 @@ def main(args):
                     "stage": current_stage,
                 }
                 logs.update(loss_dict)
+                logs.update(grad_monitor_logs)
                 progress_bar.set_postfix(**logs)
                 accelerator.log(logs, step=global_step)
 
@@ -688,20 +784,9 @@ def parse_args(input_args=None):
                         help="Number of steps for Stage 1 (e.g., 30000 for 100k total)")
     parser.add_argument("--distill-coeff", type=float, default=1.0,
                         help="Coefficient for distillation loss (0 in Stage 1, this value in Stage 2)")
-    parser.add_argument("--distill-coeff-early", type=float, default=None,
-                        help="Stage-2 distillation coeff before align switch (default: distill-coeff)")
-    parser.add_argument("--distill-coeff-late", type=float, default=None,
-                        help="Stage-2 distillation coeff after align switch (default: distill-coeff-early)")
-    parser.add_argument("--distill-coeff-ramp-steps", type=int, default=0,
-                        help="Smooth coeff transition length from early->late after align-switch-step (0 = hard switch)")
     parser.add_argument("--align-mode", type=str, default="attn_mse",
                         choices=["logits", "attn_mse", "snr_attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
                         help="Alignment mode: logits, attn_mse, snr_attn_mse, attn_kl, kv_mse, attn_hybrid")
-    parser.add_argument("--align-mode-late", type=str, default=None,
-                        choices=["logits", "attn_mse", "snr_attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
-                        help="Optional late-stage alignment mode after align-switch-step")
-    parser.add_argument("--align-switch-step", type=int, default=None,
-                        help="Absolute step to switch from align-mode to align-mode-late")
     parser.add_argument("--distill-temperature", type=float, default=1.0,
                         help="Temperature for attn_kl mode (<1 sharpens distributions, making alignment harder)")
     parser.add_argument("--attn-loss-weight", type=float, default=1.0,
@@ -775,6 +860,14 @@ def parse_args(input_args=None):
                         help="Absolute step to begin turning off REPA projection loss (None keeps it on)")
     parser.add_argument("--repa-stop-fade-steps", type=int, default=0,
                         help="Cosine fade length for REPA projection loss after repa-stop-step (0 = hard stop)")
+    parser.add_argument("--grad-monitor", action=argparse.BooleanOptionalAction, default=False,
+                        help="Periodically monitor gradient cosine between denoising and auxiliary losses")
+    parser.add_argument("--grad-monitor-interval", type=int, default=5000,
+                        help="Gradient monitor interval in steps")
+    parser.add_argument("--grad-monitor-kv-layer", type=int, default=4,
+                        help="1-based SiT block index for KV-loss gradient probe")
+    parser.add_argument("--grad-monitor-repa-layer", type=int, default=10,
+                        help="1-based SiT block index for REPA-loss gradient probe")
 
     # whether to normalize spatial features
     parser.add_argument("--spnorm-method", type=str, default="zscore", choices=["none", "zscore", "zscore_token", "layernorm"])
@@ -814,16 +907,16 @@ def parse_args(input_args=None):
         parser.error("--kv-distill-snr-gamma must be > 0")
     if not 0.0 <= args.kv_distill_min_weight <= 1.0:
         parser.error("--kv-distill-min-weight must be in [0, 1]")
-    if args.distill_coeff_early is not None and args.distill_coeff_early < 0:
-        parser.error("--distill-coeff-early must be >= 0")
-    if args.distill_coeff_late is not None and args.distill_coeff_late < 0:
-        parser.error("--distill-coeff-late must be >= 0")
-    if args.distill_coeff_ramp_steps < 0:
-        parser.error("--distill-coeff-ramp-steps must be >= 0")
     if args.kv_stop_fade_steps < 0:
         parser.error("--kv-stop-fade-steps must be >= 0")
     if args.repa_stop_fade_steps < 0:
         parser.error("--repa-stop-fade-steps must be >= 0")
+    if args.grad_monitor_interval <= 0:
+        parser.error("--grad-monitor-interval must be > 0")
+    if args.grad_monitor_kv_layer <= 0:
+        parser.error("--grad-monitor-kv-layer must be >= 1")
+    if args.grad_monitor_repa_layer <= 0:
+        parser.error("--grad-monitor-repa-layer must be >= 1")
 
     return args
 

@@ -5,8 +5,8 @@
 # 
 # 用法: 
 #   ./launch.sh --config configs/default.yaml --exp-name my_exp
-#   ./launch.sh --config configs/early-stop.yaml --exp-name early-stop --gpu 0,1,2,3 --num-gpus 4 --resume-step 100000
-#  ./launch.sh --config configs/kv_align_switch.yaml --exp-name kv_align_switch --gpu 4,5,6,7 --num-gpus 4 --resume-step 100000
+#   ./launch.sh --config configs/snr_attn_mse_only.yaml --exp-name snr_attn_mse_only --gpu 0,1,2,3 --num-gpus 4 --resume-step 100000
+#  ./launch.sh --config configs/attn_mse_repa_early_stop.yaml --exp-name attn_mse_repa_early_stop --gpu 4,5,6,7 --num-gpus 4 --resume-step 250000
 
 # ============================================================================
 set -e

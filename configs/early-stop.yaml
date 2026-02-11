@@ -21,10 +21,8 @@ sit-layer-indices: "4"     # SiT layer for K/V injection (1-based)
 stage1-steps: 100000          # Number of steps for Stage 1
 distill-coeff: 4.0          # Coefficient for attention distillation loss
 
-# Alignment mode: logits, attn_mse, attn_kl, kv_mse, attn_hybrid
+# Alignment mode: logits, attn_mse, snr_attn_mse, attn_kl, kv_mse, attn_hybrid
 align-mode: attn_mse
-align-mode-late: null
-align-switch-step: null
 
 # K/V projection: linear, mlp, conv
 kv-proj-type: linear
