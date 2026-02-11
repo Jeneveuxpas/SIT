@@ -208,6 +208,27 @@ def compute_grad_cosine(loss_main: torch.Tensor, loss_aux: torch.Tensor, params)
     cosine = dot / (main_norm * aux_norm + 1e-12)
     return cosine, main_norm, aux_norm
 
+
+def reduce_scalar_mean(accelerator: Accelerator, value, device: torch.device):
+    """
+    Reduce a scalar metric across all processes with nan-safe mean.
+    Returns None when all processes report NaN.
+    """
+    if value is None:
+        t = torch.tensor(float("nan"), device=device, dtype=torch.float32)
+    elif isinstance(value, torch.Tensor):
+        t = value.detach().float()
+        if t.ndim > 0:
+            t = t.mean()
+    else:
+        t = torch.tensor(float(value), device=device, dtype=torch.float32)
+
+    gathered = accelerator.gather(t.view(1))
+    valid = ~torch.isnan(gathered)
+    if valid.any():
+        return gathered[valid].mean().item()
+    return None
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -444,13 +465,26 @@ def main(args):
     # Optional gradient-direction monitoring on fixed SiT probe layers.
     kv_probe_params = []
     repa_probe_params = []
+    grad_window_active = False
+    grad_window_remaining = 0
+    grad_window_start_step = None
+    grad_window_stats = {}
+    grad_window_stat_keys = [
+        f"grad_cos_main_kv_l{args.grad_monitor_kv_layer}",
+        f"grad_norm_main_kv_l{args.grad_monitor_kv_layer}",
+        f"grad_norm_kv_l{args.grad_monitor_kv_layer}",
+        f"grad_cos_main_repa_l{args.grad_monitor_repa_layer}",
+        f"grad_norm_main_repa_l{args.grad_monitor_repa_layer}",
+        f"grad_norm_repa_l{args.grad_monitor_repa_layer}",
+    ]
     if args.grad_monitor:
         probe_model = safe_unwrap_model(model)
         kv_probe_params = get_sit_block_probe_params(probe_model, args.grad_monitor_kv_layer)
         repa_probe_params = get_sit_block_probe_params(probe_model, args.grad_monitor_repa_layer)
         if accelerator.is_main_process:
             logger.info(
-                f"Grad monitor enabled (interval={args.grad_monitor_interval}): "
+                f"Grad monitor enabled (interval={args.grad_monitor_interval}, "
+                f"window_steps={args.grad_monitor_window_steps}): "
                 f"KV probe=layer{args.grad_monitor_kv_layer} ({len(kv_probe_params)} params), "
                 f"REPA probe=layer{args.grad_monitor_repa_layer} ({len(repa_probe_params)} params)"
             )
@@ -612,39 +646,85 @@ def main(args):
                 current_distill_coeff = base_distill_coeff * kv_gate
                 distill_loss = distill_loss_raw * current_distill_coeff
 
-                should_monitor_grad = (
+                should_start_grad_window = (
                     args.grad_monitor
                     and accelerator.sync_gradients
                     and global_step > 0
                     and (global_step % args.grad_monitor_interval == 0)
+                    and (not grad_window_active)
+                )
+                if should_start_grad_window:
+                    grad_window_active = True
+                    grad_window_remaining = args.grad_monitor_window_steps
+                    grad_window_start_step = global_step
+                    grad_window_stats = {
+                        key: {"sum": 0.0, "sum_sq": 0.0, "count": 0}
+                        for key in grad_window_stat_keys
+                    }
+
+                should_monitor_grad = (
+                    args.grad_monitor
+                    and accelerator.sync_gradients
+                    and grad_window_active
+                    and grad_window_remaining > 0
                 )
                 if should_monitor_grad:
                     kv_grad_stats = compute_grad_cosine(
                         denoising_loss_mean, distill_loss, kv_probe_params
                     )
-                    if kv_grad_stats is not None:
-                        kv_cos, kv_main_norm, kv_aux_norm = kv_grad_stats
-                        grad_monitor_logs.update({
-                            f"grad_cos_main_kv_l{args.grad_monitor_kv_layer}": kv_cos.detach().item(),
-                            f"grad_norm_main_kv_l{args.grad_monitor_kv_layer}": kv_main_norm.detach().item(),
-                            f"grad_norm_kv_l{args.grad_monitor_kv_layer}": kv_aux_norm.detach().item(),
-                        })
-
                     repa_grad_stats = compute_grad_cosine(
                         denoising_loss_mean, proj_loss, repa_probe_params
                     )
+
+                    step_metrics = {}
+                    if kv_grad_stats is not None:
+                        kv_cos, kv_main_norm, kv_aux_norm = kv_grad_stats
+                        step_metrics.update({
+                            f"grad_cos_main_kv_l{args.grad_monitor_kv_layer}": kv_cos,
+                            f"grad_norm_main_kv_l{args.grad_monitor_kv_layer}": kv_main_norm,
+                            f"grad_norm_kv_l{args.grad_monitor_kv_layer}": kv_aux_norm,
+                        })
                     if repa_grad_stats is not None:
                         repa_cos, repa_main_norm, repa_aux_norm = repa_grad_stats
-                        grad_monitor_logs.update({
-                            f"grad_cos_main_repa_l{args.grad_monitor_repa_layer}": repa_cos.detach().item(),
-                            f"grad_norm_main_repa_l{args.grad_monitor_repa_layer}": repa_main_norm.detach().item(),
-                            f"grad_norm_repa_l{args.grad_monitor_repa_layer}": repa_aux_norm.detach().item(),
+                        step_metrics.update({
+                            f"grad_cos_main_repa_l{args.grad_monitor_repa_layer}": repa_cos,
+                            f"grad_norm_main_repa_l{args.grad_monitor_repa_layer}": repa_main_norm,
+                            f"grad_norm_repa_l{args.grad_monitor_repa_layer}": repa_aux_norm,
                         })
 
-                    if accelerator.is_main_process and len(grad_monitor_logs) > 0:
-                        logger.info(
-                            f"Step {global_step}: grad monitor {grad_monitor_logs}"
-                        )
+                    # Aggregate metrics across all processes before window accumulation.
+                    for key in grad_window_stat_keys:
+                        value = step_metrics.get(key, None)
+                        reduced_value = reduce_scalar_mean(accelerator, value, device)
+                        if reduced_value is None:
+                            continue
+                        stat = grad_window_stats[key]
+                        stat["sum"] += reduced_value
+                        stat["sum_sq"] += reduced_value * reduced_value
+                        stat["count"] += 1
+
+                    grad_window_remaining -= 1
+                    if grad_window_remaining == 0:
+                        grad_window_active = False
+                        window_end_step = global_step
+                        grad_monitor_logs["grad_monitor_window_start"] = float(grad_window_start_step)
+                        grad_monitor_logs["grad_monitor_window_end"] = float(window_end_step)
+
+                        for key in grad_window_stat_keys:
+                            stat = grad_window_stats[key]
+                            if stat["count"] <= 0:
+                                continue
+                            mean_val = stat["sum"] / stat["count"]
+                            var_val = max(0.0, stat["sum_sq"] / stat["count"] - mean_val * mean_val)
+                            std_val = math.sqrt(var_val)
+                            grad_monitor_logs[key] = mean_val
+                            grad_monitor_logs[f"{key}_std"] = std_val
+                            grad_monitor_logs[f"{key}_n"] = float(stat["count"])
+
+                        if accelerator.is_main_process and len(grad_monitor_logs) > 0:
+                            logger.info(
+                                f"Step {window_end_step}: grad monitor window {grad_monitor_logs}"
+                            )
                 
                 # Total loss
                 loss = denoising_loss_mean + proj_loss + distill_loss
@@ -864,6 +944,8 @@ def parse_args(input_args=None):
                         help="Periodically monitor gradient cosine between denoising and auxiliary losses")
     parser.add_argument("--grad-monitor-interval", type=int, default=5000,
                         help="Gradient monitor interval in steps")
+    parser.add_argument("--grad-monitor-window-steps", type=int, default=10,
+                        help="Number of consecutive steps to aggregate for each grad monitor window")
     parser.add_argument("--grad-monitor-kv-layer", type=int, default=4,
                         help="1-based SiT block index for KV-loss gradient probe")
     parser.add_argument("--grad-monitor-repa-layer", type=int, default=10,
@@ -913,6 +995,8 @@ def parse_args(input_args=None):
         parser.error("--repa-stop-fade-steps must be >= 0")
     if args.grad_monitor_interval <= 0:
         parser.error("--grad-monitor-interval must be > 0")
+    if args.grad_monitor_window_steps <= 0:
+        parser.error("--grad-monitor-window-steps must be > 0")
     if args.grad_monitor_kv_layer <= 0:
         parser.error("--grad-monitor-kv-layer must be >= 1")
     if args.grad_monitor_repa_layer <= 0:

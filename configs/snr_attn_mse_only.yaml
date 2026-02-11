@@ -46,6 +46,7 @@ repa-stop-step: -1
 repa-stop-fade-steps: 0
 grad-monitor: true
 grad-monitor-interval: 5000
+grad-monitor-window-steps: 10
 grad-monitor-kv-layer: 4
 grad-monitor-repa-layer: 10
 
