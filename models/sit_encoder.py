@@ -158,6 +158,18 @@ class AttentionWithEncoderKV(nn.Module):
                 attn_sit = self._compute_attn_output(q, k_sit, v_sit)
                 distill_loss = F.mse_loss(attn_sit, attn_enc.detach())
 
+            elif align_mode == 'snr_attn_mse':
+                attn_enc = self._compute_attn_output(q, k_enc, v_enc)
+                attn_sit = self._compute_attn_output(q, k_sit, v_sit)
+                attn_loss_per_sample = self._per_sample_mse(attn_sit, attn_enc.detach())
+                attn_weight = self._snr_weight(
+                    time_input=time_input,
+                    path_type=path_type,
+                    dtype=attn_loss_per_sample.dtype,
+                    device=attn_loss_per_sample.device,
+                ).reshape(-1)
+                distill_loss = (attn_weight * attn_loss_per_sample).mean()
+
             elif align_mode == 'attn_kl':
                 tau = max(self.distill_temperature, 1e-3)
                 logits_enc = (q.float() @ k_enc.float().transpose(-2, -1)) * self.scale

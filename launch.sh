@@ -5,8 +5,8 @@
 # 
 # 用法: 
 #   ./launch.sh --config configs/default.yaml --exp-name my_exp
-#   ./launch.sh --config configs/SiT-L-70-200k.yaml --exp-name SiT-L-70-200k --gpu 0,1,2 --num-gpus 6 --resume-step 50000
-#  ./launch.sh --config configs/100-400k-4.0-8.0.yaml --exp-name 100-400k-4.0-8.0 --gpu 3,4,5 --num-gpus 3 --resume-step 100000
+#   ./launch.sh --config configs/early-stop.yaml --exp-name early-stop --gpu 0,1,2,3 --num-gpus 4 --resume-step 100000
+#  ./launch.sh --config configs/kv_align_switch.yaml --exp-name kv_align_switch --gpu 4,5,6,7 --num-gpus 4 --resume-step 100000
 
 # ============================================================================
 set -e

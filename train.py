@@ -695,10 +695,10 @@ def parse_args(input_args=None):
     parser.add_argument("--distill-coeff-ramp-steps", type=int, default=0,
                         help="Smooth coeff transition length from early->late after align-switch-step (0 = hard switch)")
     parser.add_argument("--align-mode", type=str, default="attn_mse",
-                        choices=["logits", "attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
-                        help="Alignment mode: logits, attn_mse, attn_kl, kv_mse, attn_hybrid")
+                        choices=["logits", "attn_mse", "snr_attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
+                        help="Alignment mode: logits, attn_mse, snr_attn_mse, attn_kl, kv_mse, attn_hybrid")
     parser.add_argument("--align-mode-late", type=str, default=None,
-                        choices=["logits", "attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
+                        choices=["logits", "attn_mse", "snr_attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
                         help="Optional late-stage alignment mode after align-switch-step")
     parser.add_argument("--align-switch-step", type=int, default=None,
                         help="Absolute step to switch from align-mode to align-mode-late")
