@@ -5,8 +5,10 @@
 # 
 # 用法: 
 #   ./launch.sh --config configs/default.yaml --exp-name my_exp
-#   ./launch.sh --config configs/no_repa_kv_coeff-8.0.yaml --exp-name no_repa_kv_coeff-8.0 --gpu 0,1 --num-gpus 2
-#  ./launch.sh --config configs/no_repa_11,12-4,8.yaml --exp-name no_repa_11,12-4,8 --gpu 2,3 --num-gpus 2 
+#   ./launch.sh --config configs/8,12-4,6.yaml --exp-name 8,12-4,6 --gpu 0,1 --num-gpus 2
+#  ./launch.sh --config configs/10,12-4,6.yaml --exp-name 10,12-4,6 --gpu 2,3 --num-gpus 2 
+#  ./launch.sh --config configs/snr_kv_mse_g1.0_30-100k.yaml --exp-name snr_kv_mse_g1.0_30-100k --gpu 4,5 --num-gpus 2
+#  ./launch.sh --config configs/snr_kv_mse_g1.5_30-100k.yaml --exp-name snr_kv_mse_g1.5_30-100k --gpu 6,7 --num-gpus 2
 
 # ============================================================================
 set -e

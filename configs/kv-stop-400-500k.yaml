@@ -29,7 +29,7 @@ kv-proj-type: linear
 kv-proj-kernel-size: 1
 kv-norm-type: none     # none, layernorm, zscore_spatial, zscore_token, batchnorm
 kv-zscore-alpha: 1.0
-kv-stop-step: -1
+kv-stop-step: 400000
 kv-stop-fade-steps: 0
 
 # ============================================================================
