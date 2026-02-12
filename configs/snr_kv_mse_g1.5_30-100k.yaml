@@ -1,0 +1,89 @@
+# SiT-XL/2 + Encoder KV Distillation
+# SNR-weighted KV MSE, short-run probe (100k total, stage1=30k)
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model: SiT-XL/2-EncoderKV
+num-classes: 1000
+encoder-depth: 10
+fused-attn: true
+qk-norm: false
+projection-layer-type: conv
+proj-kwargs-kernel-size: 1
+
+# ============================================================================
+# Encoder KV Configuration
+# ============================================================================
+enc-type: dinov2-b
+enc-layer-indices: "12"
+sit-layer-indices: "4"
+stage1-steps: 30000
+distill-coeff: 4.0
+
+# Alignment mode: logits, attn_mse, snr_attn_mse, attn_kl, kv_mse, attn_hybrid
+align-mode: kv_mse
+
+# K/V projection: linear, mlp, conv
+kv-proj-type: linear
+kv-proj-kernel-size: 1
+kv-norm-type: none
+kv-zscore-alpha: 1.0
+kv-distill-snr-gamma: 1.5
+kv-distill-min-weight: 0.3
+kv-stop-step: -1
+kv-stop-fade-steps: 0
+
+# ============================================================================
+# REPA Loss Configuration
+# ============================================================================
+# Keep repa-loss=true so dataloader returns raw_image for KV branch.
+# Hard-stop at step 0 makes REPA branch effectively disabled.
+repa-loss: true
+proj-coeff: "1.0"
+projection-loss-type: mse_v_norm
+spnorm-method: zscore
+zscore-alpha: 0.6
+repa-stop-step: -1
+repa-stop-fade-steps: 0
+
+# ============================================================================
+# Dataset
+# ============================================================================
+data-dir: /dev/shm/data
+resolution: 256
+batch-size: 256
+
+# ============================================================================
+# Training
+# ============================================================================
+epochs: 1400
+max-train-steps: 100000
+checkpointing-steps: 50000
+sampling-steps: 100000
+gradient-accumulation-steps: 1
+learning-rate: 1e-4
+adam-beta1: 0.9
+adam-beta2: 0.999
+adam-weight-decay: 0.0
+adam-epsilon: 1e-8
+max-grad-norm: 1.0
+ema-decay: 0.9999
+ema-update-freq: 1
+
+# ============================================================================
+# Precision & Performance
+# ============================================================================
+allow-tf32: true
+mixed-precision: fp16
+compile: true
+
+# ============================================================================
+# Misc
+# ============================================================================
+seed: 0
+num-workers: 12
+cfg-prob: 0.1
+path-type: linear
+prediction: v
+n-samples: 256

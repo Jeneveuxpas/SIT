@@ -5,8 +5,8 @@
 # 
 # 用法: 
 #   ./launch.sh --config configs/default.yaml --exp-name my_exp
-#   ./launch.sh --config configs/snr_attn_mse_only.yaml --exp-name snr_attn_mse_only --gpu 0,1,2,3 --num-gpus 4 --resume-step 100000
-#  ./launch.sh --config configs/attn_mse_repa_early_stop.yaml --exp-name attn_mse_repa_early_stop --gpu 4,5,6,7 --num-gpus 4 --resume-step 250000
+#   ./launch.sh --config configs/no_repa_kv_coeff-8.0.yaml --exp-name no_repa_kv_coeff-8.0 --gpu 0,1 --num-gpus 2
+#  ./launch.sh --config configs/no_repa_11,12-4,8.yaml --exp-name no_repa_11,12-4,8 --gpu 2,3 --num-gpus 2 
 
 # ============================================================================
 set -e
