@@ -3,31 +3,25 @@
 ---
 ## Abstract
 
-Diffusion Transformers train slowly because early in training, high-noise inputs often yield diffusion features with low spatial contrast; coupled with random initialization, this leads to high-entropy attention routing. Representation alignment (REPA) mitigates training challenges by aligning projections of noisy hidden states to clean encoder representations, yet recent evidence indicates that **spatial structure** rather than global semantic performance drives the gains. We propose **Attention Scaffolding**, a train-time mechanism that injects pretrained encoder **K/V** into selected attention layers, providing an explicit spatial routing prior that bypasses this routing cold start. The scaffold is then removed by switching back to the model’s own K/V and distilling the induced routing structure for stability, with no change to inference and no extra tokens.
+Diffusion Transformers train slowly because early in training, high-noise inputs often yield diffusion features with low spatial contrast; coupled with random initialization, this leads to high-entropy attention routing. Representation alignment (REPA) mitigates training challenges by aligning projections of noisy hidden states to clean encoder representations, yet recent evidence indicates that **spatial structure** rather than global semantic performance drives the gains. We propose **Attention Scaffolding**, a train-time mechanism that injects projections of pretrained encoder **K/V** into selected attention layers, providing an explicit spatial routing prior that bypasses this routing cold start. The scaffold is then removed by switching back to the model’s own K/V and distilling the induced routing structure for stability, with no change to inference and no extra tokens.
 
-**中文参考**：扩散 Transformer 训练缓慢的关键在于：去噪早期输入高噪，token 表征的空间对比度很低，导致 self-attention 路由高熵、难以稳定形成空间结构。REPA 通过将噪声隐状态对齐到编码器干净表征来加速训练，但最新证据表明带来生成收益的核心是 patch 间空间结构而非全局语义。我们提出 Attention Scaffolding：训练早期注入编码器 K/V 提供空间路由先验以绕过冷启动，随后切回自身 K/V 并蒸馏固化，推理不加 token、无额外依赖。SiT-XL/2 在 [**TODO**] 步达到 FID [**TODO**]；sFID 在 [**TODO**] 步即超越 REPA 4M 步。
+## 1 Introduction
 
-## 引言与动机
+Diffusion Transformers (DiTs) replace U-Net backbones with ViT-style self-attention on latent patches, enabling strong scaling behavior for image generation. However, training is slow because spatial organization must emerge through attention: early in optimization (and at high-noise timesteps), token features have low spatial contrast and randomly initialized projections yield nearly-uniform, high-entropy attention routing. This "routing cold start" makes it difficult to form coherent locality and intermediate representations, motivating training-time mechanisms that inject spatial priors.
 
-近期研究表明，扩散变换器（DiT/SiT）在生成质量上达到最先进水平，但训练速度极慢。REPA 通过将扩散模型的中间表示与外部视觉编码器 feature 对齐，显著加速训练——将 SiT 的训练步数从 7M 减少到 400K（加速 17.5×）[REPA]。然而，REPA 究竟在传递什么信息来加速训练？是全局语义，还是空间结构？
+A recent line of work reduces this burden by importing representation from pretrained visual models. Representation Alignment (REPA) align clean-image representations into diffusion transformer hidden states, substantially accelerating early training and improving sample quality. However, follow-up analysis by Singh et al. iREPA reveals an important nuance: what matters for generative gains is not primarily global semantic strength, but the spatial structure of patch representations — the patch-to-patch relational geometry that encodes layout and grouping. This directly points to a gap: REPA-style feature alignment constrains *what* tokens encode, but only indirectly constrains *how* information is routed across tokens.
 
-iREPA 对这一问题进行了深入分析。实验证明，衡量 patch 之间两两相似性的空间结构指标与生成 FID 的相关性显著更高（Pearson |r| > 0.852），而 ImageNet-1K 准确率的相关性仅为 0.26 [iREPA]。甚至 ImageNet 准确率仅 24.1% 的 SAM2-S 在 REPA 框架下也能优于准确率高出 60% 的编码器 [iREPA]。这一系列结果强烈暗示：加速训练的关键在于传递**空间结构**，而非全局语义。问题由此变为：**如何更有效地传递空间结构？**
+In Transformers, routing is governed by attention: self-attention matrices determine where a model moves information at each layer. For diffusion transformers, the ability to integrate spatial cues over hundreds of tokens depends not only on having good token embeddings, but also on learning stable, structured attention routing — an aspect that existing feature-level alignment methods do not directly address.
 
-现有方法对空间结构的传递仍然是间接的。REPA/iREPA 通过 feature 层面的 loss 间接引导；HASTE 增加了 attention map 蒸馏，但本质仍是在 attention 外部施加损失 [HASTE]。这些方法都依赖"损失→梯度→权重更新→注意力变化"的间接路径。训练初期，随机初始化的 Q/K/V 产生近乎均匀的注意力分布，模型需要大量迭代才能建立有意义的空间注意力模式——**冷启动是训练效率的主要瓶颈**。
+Motivated by these observations, we propose **Attention Scaffolding**, a training-time method that transfers spatial routing structure directly through attention. During early training (Stage 1), we inject a frozen pretrained encoder's Key/Value into selected self-attention layers of the diffusion transformer, directly replacing the model's own K/V while keeping Query computation intact. This provides an explicit patch-level spatial routing prior, bypassing the attention cold start. In Stage 2, we switch back to the model's own K/V and apply a lightweight MSE distillation loss on the attention outputs to preserve the induced spatial organization. The scaffold is applied only during training — the final inference graph is identical to the original DiT/SiT model with no extra tokens, no auxiliary modules, and no runtime overhead.
 
-## 关键洞察：K/V 是空间先验的直接载体
-
-在自注意力中，Key 编码"哪些位置之间应建立关联"，Value 承载"从被关注位置传递的信息"。预训练编码器处理干净图像后的 K/V 天然包含完整的空间关系先验。风格迁移文献已证实：替换自注意力的 K/V 可以在保持内容布局的同时转移局部纹理 [Style Injection]，说明 K/V 的确包含空间结构信息。
-
-
-
-基于此，我们提出 **Attention Scaffolding**（注意力脚手架）——直接将预训练编码器的 K/V 注入扩散 Transformer 的 attention 层，让模型从第一步就跳过冷启动阶段。
+A key design choice is why the scaffold must be removed: the encoder's K/V are derived from clean images, while the diffusion model's Query comes from noisy latents at varying noise levels. Prolonged reliance on this mismatched input distribution limits the model's ability to learn noise-level-dependent attention patterns. Our ablations confirm that extending Stage 1 beyond a critical duration degrades performance.
 
 ### Contributions
 
-1. 提出 attention-level 空间结构传递：直接注入 encoder K/V 作为脚手架跳过注意力冷启动，作为对 feature-level 对齐（REPA）的互补维度。
-2. 设计两阶段训练策略（Stage 1 直接注入 → Stage 2 蒸馏过渡），并结合 HASTE 提出的 early-stop 策略 [HASTE]，形成完整的训练调度方案。消融实验验证了各组件的必要性。
-3. 在 SiT-XL/2 上 400K 步达到 FID 6.71；衡量空间结构质量的 sFID 在 100K 步即达到 5.27，优于 REPA 在 4M 步的 5.73，直接验证了 attention-level 空间结构传递的有效性。
+1. **Attention-level spatial transfer for diffusion training.** We introduce Attention Scaffolding, a train-time-only mechanism that injects pretrained encoder K/V into selected self-attention layers to provide an explicit patch-level spatial routing prior, addressing the attention cold start in diffusion transformers.
+2. **Two-stage curriculum with routing distillation.** We propose a staged schedule — direct K/V injection followed by switch-back with MSE-based routing distillation — that preserves the induced attention organization and eliminates training–inference mismatch. We further adopt REPA early-stopping [HASTE] and show via ablation that K/V distillation, unlike REPA, can be safely retained throughout training.
+3. **Complementary to feature alignment, inference unchanged.** Our approach complements REPA-style feature-level alignment by directly transferring routing structure. On ImageNet 256×256, SiT-XL/2 with Attention Scaffolding reaches FID [**TODO**] at [**TODO**] steps. The spatial-structure metric sFID reaches [**TODO**] at only [**TODO**] steps, surpassing REPA's 5.73 at 4M steps.
 
 ## 相关工作
 

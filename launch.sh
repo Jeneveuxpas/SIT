@@ -5,10 +5,11 @@
 # 
 # 用法: 
 #   ./launch.sh --config configs/default.yaml --exp-name my_exp
-#   ./launch.sh --config configs/kv_coeff-10.0.yaml --exp-name kv_coeff-10.0 --gpu 3,4 --num-gpus 2
+#   ./launch.sh --config configs/kv_coeff-8.0.yaml --exp-name kv_coeff-8.0 --gpu 2,5 --num-gpus 2
 #  ./launch.sh --config configs/10,12-4,6.yaml --exp-name 10,12-4,6 --gpu 2,3 --num-gpus 2 
 #  ./launch.sh --config configs/attn_mse_repa_early_stop.yaml --exp-name attn_mse_repa_early_stop --gpu 0,1,2 --num-gpus 3 --resume-step 400000
-#  ./launch.sh --config configs/kv-stop-400-500k.yaml --exp-name kv-stop-400-500k --gpu 5,6,7 --num-gpus 3 --resume-step 400000
+#  ./launch.sh --config configs/kv-stop-300-500k.yaml --exp-name kv-stop-300-500k --gpu 0,1,2,3 --num-gpus 4 --resume-step 300000
+#  ./launch.sh --config configs/kv-stop-350-500k.yaml --exp-name kv-stop-350-500k --gpu 4,5,6,7 --num-gpus 4 --resume-step 350000
 
 # ============================================================================
 set -e
