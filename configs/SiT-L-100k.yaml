@@ -4,7 +4,7 @@
 # ============================================================================
 # Model Configuration
 # ============================================================================
-model: SiT-XL/2-EncoderKV
+model: SiT-L/2-EncoderKV
 num-classes: 1000
 encoder-depth: 10
 fused-attn: true
@@ -19,7 +19,7 @@ enc-type: dinov2-b
 enc-layer-indices: "12"     # Encoder layer for K/V extraction (1-based)
 sit-layer-indices: "4"     # SiT layer for K/V injection (1-based)
 stage1-steps: 30000          # Number of steps for Stage 1
-distill-coeff: 5.0          # Coefficient for attention distillation loss
+distill-coeff: 4.0          # Coefficient for attention distillation loss
 
 # Alignment mode: logits, attn_mse, kv_mse
 align-mode: attn_mse

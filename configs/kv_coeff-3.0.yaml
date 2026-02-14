@@ -51,7 +51,7 @@ batch-size: 256
 # ============================================================================
 epochs: 1400
 max-train-steps: 100000
-checkpointing-steps: 10000
+checkpointing-steps: 100000
 sampling-steps: 100000
 gradient-accumulation-steps: 1
 learning-rate: 1e-4
@@ -67,7 +67,7 @@ ema-update-freq: 1
 # Precision & Performance
 # ============================================================================
 allow-tf32: true
-mixed-precision: bf16
+mixed-precision: fp16
 compile: true
 
 # ============================================================================

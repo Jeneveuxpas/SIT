@@ -18,8 +18,8 @@ proj-kwargs-kernel-size: 1
 enc-type: dinov2-b
 enc-layer-indices: "12"     # Encoder layer for K/V extraction (1-based)
 sit-layer-indices: "4"     # SiT layer for K/V injection (1-based)
-stage1-steps: 30000          # Number of steps for Stage 1
-distill-coeff: 5.0          # Coefficient for attention distillation loss
+stage1-steps: 200000          # Number of steps for Stage 1
+distill-coeff: 4.0          # Coefficient for attention distillation loss
 
 # Alignment mode: logits, attn_mse, kv_mse
 align-mode: attn_mse
@@ -50,8 +50,8 @@ batch-size: 256
 # Training
 # ============================================================================
 epochs: 1400
-max-train-steps: 100000
-checkpointing-steps: 100000
+max-train-steps: 400000
+checkpointing-steps: 50000
 sampling-steps: 100000
 gradient-accumulation-steps: 1
 learning-rate: 1e-4

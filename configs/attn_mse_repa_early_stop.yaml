@@ -55,7 +55,7 @@ batch-size: 256
 # Training
 # ============================================================================
 epochs: 1400
-max-train-steps: 500000
+max-train-steps: 1000000
 checkpointing-steps: 50000
 sampling-steps: 100000
 gradient-accumulation-steps: 1
