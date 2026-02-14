@@ -58,28 +58,30 @@ def main(args):
     ckpt = torch.load(ckpt_path, map_location=f'cuda:{device}', weights_only=False)
     ckpt_args = ckpt.get('args', None)
     
-    # Auto-detect parameters from checkpoint if not explicitly provided
-    if ckpt_args is not None and rank == 0:
-        print("Auto-detecting parameters from checkpoint...")
-        auto_params = []
-        
+    # Auto-detect parameters from checkpoint if not explicitly provided.
+    # Apply on all ranks to keep distributed sampling configs consistent.
+    auto_params = []
+    if ckpt_args is not None:
+        if rank == 0:
+            print("Auto-detecting parameters from checkpoint...")
+
         # resolution: use checkpoint value if user didn't specify (default is 256)
         if hasattr(ckpt_args, 'resolution') and args.resolution == 256:
             args.resolution = ckpt_args.resolution
             auto_params.append(f"resolution={args.resolution}")
-        
+
         # qk_norm: use checkpoint value
         if hasattr(ckpt_args, 'qk_norm'):
             args.qk_norm = ckpt_args.qk_norm
             auto_params.append(f"qk_norm={args.qk_norm}")
-        
+
         # path_type: use checkpoint value if user didn't specify (default is "linear")
         if hasattr(ckpt_args, 'path_type') and args.path_type == "linear":
             args.path_type = ckpt_args.path_type
             auto_params.append(f"path_type={args.path_type}")
-        
-        if auto_params:
-            print(f"  Auto-detected: {', '.join(auto_params)}")
+
+    if rank == 0 and auto_params:
+        print(f"  Auto-detected: {', '.join(auto_params)}")
 
     # Load model (using original SiT)
     block_kwargs = {"fused_attn": args.fused_attn, "qk_norm": args.qk_norm}

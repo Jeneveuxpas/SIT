@@ -28,6 +28,9 @@ EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-256}"
 EVAL_NUM_STEPS="${EVAL_NUM_STEPS:-250}"
 CFG_SCALE="${CFG_SCALE:-1.0}"
 MODE="${MODE:-sde}"
+GLOBAL_SEED="${GLOBAL_SEED:-0}"
+GUIDANCE_LOW="${GUIDANCE_LOW:-0.0}"
+GUIDANCE_HIGH="${GUIDANCE_HIGH:-1.0}"
 REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
 
 # 解析命令行参数
@@ -79,8 +82,24 @@ while [[ $# -gt 0 ]]; do
             CFG_SCALE="$2"
             shift 2
             ;;
+        --mode)
+            MODE="$2"
+            shift 2
+            ;;
+        --seed)
+            GLOBAL_SEED="$2"
+            shift 2
+            ;;
         --num-steps)
             EVAL_NUM_STEPS="$2"
+            shift 2
+            ;;
+        --guidance-low)
+            GUIDANCE_LOW="$2"
+            shift 2
+            ;;
+        --guidance-high)
+            GUIDANCE_HIGH="$2"
             shift 2
             ;;
         *)
@@ -198,16 +217,32 @@ for STEP in "${CKPT_LIST[@]}"; do
     # 生成样本
     torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} generate.py \
         --ckpt ${CKPT_FILE} \
+        --global-seed ${GLOBAL_SEED} \
         --num-fid-samples ${NUM_FID_SAMPLES} \
         --per-proc-batch-size ${EVAL_BATCH_SIZE} \
         --mode ${MODE} \
         --model ${MODEL} \
         --num-steps ${EVAL_NUM_STEPS} \
         --cfg-scale ${CFG_SCALE} \
+        --guidance-low ${GUIDANCE_LOW} \
+        --guidance-high ${GUIDANCE_HIGH} \
         --sample-dir ${CKPT_DIR}
 
-    # 构建样本文件名
-    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_cfg${CFG_SCALE}-seed0-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
+    # 构建样本文件名（支持 guidance interval）
+    if [ "$GUIDANCE_LOW" = "0.0" ] && [ "$GUIDANCE_HIGH" = "1.0" ]; then
+        CFG_INTV=""
+    else
+        CFG_INTV="_${GUIDANCE_LOW}_${GUIDANCE_HIGH}"
+    fi
+    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_cfg${CFG_SCALE}${CFG_INTV}-seed${GLOBAL_SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
+
+    # 兼容浮点字符串格式差异（如 0 vs 0.0）
+    if [ ! -f "$SAMPLE_NPZ" ]; then
+        SAMPLE_NPZ_CANDIDATE=$(ls -t ${CKPT_DIR}/${EXP_NAME}_cfg${CFG_SCALE}*-seed${GLOBAL_SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz 2>/dev/null | head -n 1)
+        if [ -n "$SAMPLE_NPZ_CANDIDATE" ]; then
+            SAMPLE_NPZ="$SAMPLE_NPZ_CANDIDATE"
+        fi
+    fi
 
     if [ -f "$SAMPLE_NPZ" ]; then
         echo "计算 FID..."

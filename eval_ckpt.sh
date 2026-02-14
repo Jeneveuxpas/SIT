@@ -5,7 +5,7 @@
 # 
 # 用法:
 #   # 评估指定的 steps
-#   ./eval_ckpt.sh --config configs/50-400k.yaml --exp-name 50-400k --steps "0200000" --gpu 0,1,2,3 --num-gpus 4
+#   ./eval_ckpt.sh --config configs/attn_mse_repa_early_stop.yaml --exp-name attn_mse_repa_early_stop --steps "0700000" --gpu 4,5,6,7 --num-gpus 4
 #
 #   # 评估所有 checkpoints
 #   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --all
