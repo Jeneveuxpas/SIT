@@ -105,6 +105,17 @@ def safe_unwrap_model(model):
         model = model._orig_mod
     return model
 
+
+def get_current_lr(optimizer) -> float:
+    """Return current LR from the first optimizer parameter group."""
+    if hasattr(optimizer, "param_groups") and len(optimizer.param_groups) > 0:
+        return float(optimizer.param_groups[0].get("lr", 0.0))
+    # Fallback for wrapped optimizer objects.
+    inner_optimizer = getattr(optimizer, "optimizer", None)
+    if inner_optimizer is not None and hasattr(inner_optimizer, "param_groups") and len(inner_optimizer.param_groups) > 0:
+        return float(inner_optimizer.param_groups[0].get("lr", 0.0))
+    return 0.0
+
 def parse_layer_indices(indices_str: str) -> list:
     """Parse comma-separated layer indices string to list of ints (1-based -> 0-based)."""
     return [int(x.strip()) - 1 for x in indices_str.split(',')]
@@ -437,6 +448,17 @@ def main(args):
         ema.load_state_dict(ckpt['ema'])
         optimizer.load_state_dict(ckpt['opt'])
         global_step = ckpt['steps']
+        if args.resume_override_lr is not None:
+            for pg in optimizer.param_groups:
+                pg["lr"] = float(args.resume_override_lr)
+            if accelerator.is_main_process:
+                logger.info(
+                    f"Resumed from step {global_step} and override learning rate to {args.resume_override_lr:.6g}"
+                )
+        elif accelerator.is_main_process:
+            logger.info(
+                f"Resumed from step {global_step} with optimizer learning rate {get_current_lr(optimizer):.6g}"
+            )
 
     if args.compile:
         # Allow larger cache size for DYNAMO compilation
@@ -809,6 +831,7 @@ def main(args):
                     "kv_gate": kv_gate,
                     "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "stage": current_stage,
+                    "lr": get_current_lr(optimizer),
                 }
                 logs.update(loss_dict)
                 logs.update(grad_monitor_logs)
@@ -843,6 +866,7 @@ def parse_args(input_args=None):
     parser.add_argument("--report-to", type=str, default="wandb")
     parser.add_argument("--sampling-steps", type=int, default=10000)
     parser.add_argument("--resume-step", type=int, default=0)
+    parser.add_argument("--resume-override-lr", type=float, default=None)
     parser.add_argument("--n-samples", type=int, default=256)
 
     # model

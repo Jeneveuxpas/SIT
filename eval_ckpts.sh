@@ -5,13 +5,13 @@
 # 
 # 用法:
 #   # 评估指定的 steps
-#   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --steps "50000,100000,150000"
+#   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_500.yaml --exp-name attn_mse_repa_early_stop_500 --steps "0980000,0960000,0940000" --gpu 0,1,2,3 --num-gpus 4
 #
 #   # 评估所有 checkpoints
 #   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --all
 #
 #   # 评估某个范围内的 checkpoints
-#   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --from 50000 --to 200000
+#   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_500.yaml --exp-name attn_mse_repa_early_stop_500 --from 50000 --to 200000
 #
 #   # 评估最近 N 个 checkpoints
 #   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --last 5
