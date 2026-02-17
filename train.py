@@ -426,6 +426,11 @@ def main(args):
             min_ratio = args.min_lr / args.learning_rate
             return min_ratio + (1.0 - min_ratio) * cosine_decay
             
+        # When resuming, LambdaLR expects 'initial_lr' in param_groups if last_epoch != -1
+        # Since we are creating a fresh scheduler for an existing/loaded optimizer, we must set it manually.
+        for group in optimizer.param_groups:
+            group.setdefault('initial_lr', group['lr'])
+            
         last_epoch = args.resume_step - 1 if args.resume_step > 0 else -1
         lr_scheduler = LambdaLR(optimizer, lr_lambda=cosine_schedule_with_warmup, last_epoch=last_epoch)
     elif args.lr_scheduler == "constant":
