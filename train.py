@@ -974,7 +974,7 @@ def parse_args(input_args=None):
     parser.add_argument("--adam-beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
     parser.add_argument("--adam-weight-decay", type=float, default=0., help="Weight decay to use.")
     parser.add_argument("--adam-epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
-    parser.add_argument("--adam-epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
+
     parser.add_argument("--max-grad-norm", default=1.0, type=float, help="Max gradient norm.")
     parser.add_argument("--lr-scheduler", type=str, default="constant", choices=["constant", "cosine"], help="Learning rate scheduler.")
     parser.add_argument("--lr-warmup-steps", type=int, default=0, help="Number of warmup steps for LR scheduler.")
