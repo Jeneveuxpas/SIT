@@ -419,15 +419,10 @@ def main(args):
         model = torch.compile(model, backend="inductor", mode="default")
         # encoders = [torch.compile(encoder, backend="inductor", mode="default") for encoder in encoders]
 
-        if args.compile_optim_step:
-            @torch.compile(fullgraph=False)
-            def optim_step_fn():
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-        else:
-            def optim_step_fn():
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+        @torch.compile(fullgraph=False)
+        def optim_step_fn():
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
     else:
         def optim_step_fn():
@@ -832,12 +827,6 @@ def parse_args(input_args=None):
     parser.add_argument("--lr-decay-start-step", type=int, default=None, help="Step to start LR decay (default: after warmup).")
     parser.add_argument("--min-lr", type=float, default=0.0, help="Minimum learning rate for cosine scheduler.")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument(
-        "--compile-optim-step",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Compile optimizer.step/zero_grad path.",
-    )
     parser.add_argument("--ema-decay", type=float, default=0.9999)
     parser.add_argument("--ema-update-freq", type=int, default=1)
 
