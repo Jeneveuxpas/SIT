@@ -1,47 +1,28 @@
-# SIT: Encoder KV Distillation for Accelerated Diffusion Training
+# SIT: Encoder K/V Distillation for Accelerated Diffusion Training
 
 ## Core Idea
 
-在 SiT (flow-matching DiT) 的 attention 层中注入预训练视觉编码器（DINOv2）的 Key/Value，让模型快速获得语义感知能力，显著加速训练收敛。
+在 SiT (flow-matching DiT) 的 attention 层中引入预训练视觉编码器（DINOv2）的 K/V，给模型提供**空间路由先验（spatial routing prior）**，缓解训练初期的 routing cold start，从而加速收敛。
 
-```mermaid
-graph LR
-    subgraph 输入
-        X_clean[x_clean 图像] --> Noise[加噪 x_t = αx + σε]
-        X_clean --> DINO[DINOv2 frozen]
-    end
+## Two-Stage Training
 
-    Noise --> SiT[SiT Transformer]
-    DINO -->|K_enc, V_enc| SiT
-    
-    SiT -->|v_pred| L_denoise[Denoising Loss]
-    SiT -->|hidden states| L_repa[REPA Loss]
-    SiT -->|distill_loss| L_distill[Distillation Loss]
-```
+### Stage 1: Encoder K/V Injection (Routing Bootstrap)
 
----
-
-## 两阶段训练
-
-### Stage 1: Encoder KV 注入
-
-直接用 encoder 的 K/V 替代 SiT 自身的 K/V 做 attention：
+训练早期直接用 encoder 的 K/V 替代 SiT 自身 K/V：
 
 ```python
-# Stage 1: 用 encoder 的 KV
 if stage == 1 and k_enc is not None:
-    k = k_enc    # 来自 DINOv2(x_clean) 的 Key
-    v = v_enc    # 来自 DINOv2(x_clean) 的 Value
+    k = k_enc
+    v = v_enc
 ```
 
-因为 K_enc/V_enc 来自**干净图像**，包含完整语义信息，denoising loss 大幅降低（~0.5 vs 正常 ~0.8）。
+这一步的目的不是长期替代 SiT attention，而是让 query 在 early stage 尽快学到可用的空间路由模式。
 
-### Stage 2: Self-Attention + Distillation
+### Stage 2: Native K/V + Distillation
 
-切回 SiT 自己的 K/V，同时用 distillation loss 保持与 encoder 的语义对齐：
+切回 SiT 自身 K/V，同时用 distillation loss 维持 Stage 1 到 Stage 2 的路由连续性：
 
 ```python
-# Stage 2: 用自己的 KV + 计算对齐损失
 elif stage == 2 and k_enc is not None:
     distill_loss = compute_alignment(q, k_sit, v_sit, k_enc, v_enc)
     k = k_sit
@@ -49,16 +30,32 @@ elif stage == 2 and k_enc is not None:
 ```
 
 ```
-Step:   0        stage1_steps              total_steps
-        |  Stage 1  |      Stage 2           |
-KV:     | K_enc     |  K_sit + distill_loss  |
+Step:   0        stage1_steps                 total_steps
+        |  Stage 1  |        Stage 2            |
+KV:     | K_enc     |   K_sit + distill_loss    |
 ```
 
----
+## Objective
 
-## 损失函数
+总体目标：
 
-$$\mathcal{L} = \mathcal{L}_{\text{denoise}} + \lambda_{\text{proj}} \cdot \mathcal{L}_{\text{REPA}} + \lambda_{\text{distill}} \cdot \mathcal{L}_{\text{distill}}$$
+$$
+\mathcal{L}
+=
+\mathcal{L}_{\text{denoise}}
++
+\lambda_{\text{repa}} \cdot g_{\text{repa}}(n)\cdot \mathcal{L}_{\text{REPA}}
++
+\lambda_{\text{distill}} \cdot g_{\text{kv}}(n)\cdot \mathcal{L}_{\text{distill}}
+$$
+
+其中：
+- $g_{\text{repa}}(n)$ 由 `repa-stop-step` / `repa-stop-fade-steps` 控制。
+- $g_{\text{kv}}(n)$ 由 `kv-stop-step` / `kv-stop-fade-steps` 控制（仅 Stage 2 蒸馏分支）。
+
+与代码一致：`repa_gate` 和 `kv_gate` 分别乘在 `proj_loss` 与 `distill_loss` 上。
+
+## Loss Components
 
 ### 1. Denoising Loss
 
@@ -66,168 +63,98 @@ $$\mathcal{L} = \mathcal{L}_{\text{denoise}} + \lambda_{\text{proj}} \cdot \math
 
 ### 2. REPA Projection Loss
 
-对齐 SiT 中间层 hidden states 与 DINOv2 patch features，直接改善特征质量。
+对齐 SiT 中间层 hidden states 与 encoder patch features，提升中层表征质量。
 
-### 3. Distillation Loss（核心贡献）
+### 3. Distillation Loss (Attention-Level)
 
-提供多种对齐模式。
+主配置使用 `attn_mse`：
 
-#### `attn_mse` — Attention Output 对齐
-
-$$\mathcal{L}_{\text{attn\_mse}} = \text{MSE}\Big(\text{SDPA}(Q, K_{\text{sit}}, V_{\text{sit}}),\ \text{SDPA}(Q, K_{\text{enc}}, V_{\text{enc}})\Big)$$
+$$
+\mathcal{L}_{\text{attn\_mse}}
+=
+\text{MSE}\left(\text{SDPA}(Q,K_{\text{sit}},V_{\text{sit}}),\ \text{SDPA}(Q,K_{\text{enc}},V_{\text{enc}})\right)
+$$
 
 ```python
 attn_enc = SDPA(Q, K_enc, V_enc)
 attn_sit = SDPA(Q, K_sit, V_sit)
-L = MSE(attn_sit, attn_enc.detach())
+L_distill = MSE(attn_sit, attn_enc.detach())
 ```
 
-- ✅ 简单高效，早期快速收敛
-- ❌ ~100k 步后收敛到 ~0.008，无法提供持续信号
+## Encoder K/V Extraction and Projection
 
-#### `attn_hybrid` — SNR-Gated Hybrid 对齐 ⭐ 推荐
+### Extraction via Forward Hooks
 
-$$\mathcal{L}_{\text{hybrid}} = \lambda_{\text{attn}} \cdot \mathcal{L}_{\text{attn\_mse}} + \lambda_{\text{kv}} \cdot w(t) \cdot \Big[\text{MSE}(K_{\text{sit}}, K_{\text{enc}}) + \text{MSE}(V_{\text{sit}}, V_{\text{enc}})\Big]$$
-
-```python
-# Attention output 对齐（容易，提供快启动信号）
-attn_loss = MSE(attn_sit, attn_enc)
-
-# SNR 加权 KV 直接对齐（更难，持续提供信号）
-kv_loss = w(t) × [MSE(K_sit, K_enc) + MSE(V_sit, V_enc)]
-
-# 组合
-L = λ_attn × attn_loss + λ_kv × kv_loss
-```
-
-**SNR 权重**的动机：K_enc 来自干净图像，K_sit 来自噪声 x_t。高噪声时 x_t 信息不足，K_sit **物理上无法匹配** K_enc → 用 SNR 权重自动降低这些 timestep 的约束。
-
-$$w(t) = \left(\frac{\text{SNR}(t)}{\text{SNR}(t) + 1}\right)^{\gamma}, \quad \text{SNR}(t) = \frac{\alpha_t^2}{\sigma_t^2}$$
-
-```python
-def _snr_weight(self, time_input, path_type):
-    t = time_input.float()
-    alpha_t = 1 - t          # signal coefficient
-    sigma_t = t              # noise coefficient
-    snr = alpha_t ** 2 / (sigma_t ** 2 + 1e-6)
-    weight = (snr / (snr + 1.0)) ** gamma
-    return clamp(weight, min=min_weight, max=1.0)
-```
-
-| 噪声 t | SNR | weight (γ=1) | weight (γ=2) |
-|---|---|---|---|
-| 0.0 (干净) | ∞ | 1.00 | 1.00 |
-| 0.3 | 5.4 | 0.84 | 0.71 |
-| 0.5 | 1.0 | 0.50 | 0.25 |
-| 0.8 | 0.06 | 0.06 | 0.003 |
-| 1.0 (纯噪声) | 0 | 0.00 | 0.00 |
-
-#### `attn_kl` — Attention 分布 KL 散度
-
-$$\mathcal{L}_{\text{attn\_kl}} = \tau^2 \cdot D_{\text{KL}}\Big(\text{softmax}(\frac{QK_{\text{sit}}^T}{\tau}) \| \text{softmax}(\frac{QK_{\text{enc}}^T}{\tau})\Big)$$
-
-```python
-target = softmax(Q·K_enc^T / τ).detach()
-log_probs = log_softmax(Q·K_sit^T / τ)
-L = τ² × KL(log_probs, target)
-```
-
-- τ < 1 锐化分布，对齐更难收敛
-- **不约束 V**，适合作为辅助目标
-
----
-
-## Encoder KV 提取与投影
-
-### 提取：Forward Hook
-
-用 hook 从 frozen DINOv2 指定层截获 K/V，无需修改 encoder 代码：
+从 frozen encoder 指定层截取 K/V，无需改 encoder 主体：
 
 ```python
 class EncoderKVExtractor:
     def forward(self, x_clean):
-        _ = self.encoder(x_clean)       # 触发 hooks
-        return self.collected_kv_list   # [(K_l, V_l), ...]
+        _ = self.encoder(x_clean)      # trigger hooks
+        return self.collected_kv_list  # [(K_l, V_l), ...]
 ```
 
-### 投影：维度对齐
+### Projection for Dim/Head Alignment
 
-Encoder (DINOv2-B: dim=768, heads=12) 与 SiT-XL (dim=1152, heads=16) 维度不同，需要投影：
+DINOv2-B 与 SiT-XL 维度和 heads 不同，需要投影到 SiT attention space：
 
 ```python
 class EncoderKVProjection(nn.Module):
     def forward(self, k_enc, v_enc, stage):
-        k_proj = self.k_proj(k_enc)  # → (B, sit_heads, N, head_dim)
+        k_proj = self.k_proj(k_enc)
         v_proj = self.v_proj(v_enc)
         if stage == 2:
-            k_proj = k_proj.detach()  # Stage 2: 不更新投影层
+            k_proj = k_proj.detach()
             v_proj = v_proj.detach()
         return k_proj, v_proj
 ```
 
-> **关键设计**：Stage 2 中 `detach()` 投影层，确保 distillation 梯度只更新 SiT 的 QKV，不改变投影映射。
+关键设计：Stage 2 对投影输出 `detach`，distill 梯度只更新 SiT attention 分支，不再改投影映射。
 
----
-
-## 完整训练循环
+## Training Loop (Implementation-Aligned)
 
 ```python
 for step in training:
-    # 1. 自动阶段切换
     stage = 1 if step < stage1_steps else 2
-    distill_coeff = distill_coeff if stage == 2 else 0.0
 
-    # 2. 可选后期 align mode 切换
-    if stage == 2 and step >= align_switch_step:
-        align_mode = align_mode_late
+    repa_gate = stop_multiplier(step, repa_stop_step, repa_stop_fade_steps)
+    kv_gate = stop_multiplier(step, kv_stop_step, kv_stop_fade_steps)
 
-    # 3. Encoder KV 提取（frozen，无梯度）
+    repa_active = repa_loss and repa_gate > 0
+    kv_active = use_kv and (stage == 1 or kv_gate > 0)
+
     with torch.no_grad():
-        enc_kv_list = encoder_extractor(x_clean)
+        if repa_active or kv_active:
+            enc_kv_list, zs = encoder_forward_once_if_possible(...)
 
-    # 4. 模型前向
-    v_pred, zs, distill_loss = model(
-        x_t, t, y,
-        enc_kv_list=enc_kv_list,
-        stage=stage,
-        align_mode=align_mode,
-    )
+    denoise_loss, proj_loss_raw, distill_loss_raw = forward_and_compute_losses(...)
+    proj_loss = repa_gate * proj_loss_raw
+    distill_loss = (distill_coeff if stage == 2 else 0.0) * kv_gate * distill_loss_raw
 
-    # 5. 总损失
-    loss = denoising_loss + proj_coeff × repa_loss + distill_coeff × distill_loss
+    loss = denoise_loss + proj_loss + distill_loss
 ```
 
----
+工程优化（代码已实现）：
+- 单 encoder 且 `repa` + `kv` 同时激活时，走联合路径，只做一次 encoder forward。
+- 当两个辅助分支都关闭时，跳过 encoder forward，节省训练开销。
 
-## 实验结果
+## Results (Current Snapshot)
 
-| Model | Steps | FID ↓ | sFID ↓ | IS ↑ | Precision | Recall |
-|---|---|---|---|---|---|---|
-| SiT-XL/2 | 7M | 8.30 | 6.32 | 131.7 | 0.68 | 0.67 |
-| +REPA | 4M | 5.90 | 5.73 | 157.8 | 0.70 | 0.69 |
-| **+Ours** | **100k** | 12.00 | **5.27** | 94.8 | 0.69 | 0.61 |
-| **+Ours** | **200k** | 8.47 | **5.01** | 117.8 | 0.70 | 0.63 |
-| **+Ours** | **400k** | 7.08 | **5.25** | 132.1 | 0.70 | 0.65 |
+| SiT-XL | FID  | sFID | IS     | pr    | Rc    |
+| ------ | ---- | ---- | ------ | ----- | ----- |
+| 400k   | 6.71 | 5.31 | 137.54 | 0.712 | 0.655 |
+| 500k   | 6.57 | 5.38 | 140.30 | 0.706 | 0.663 |
+| 650k   | 6.22 | 5.29 | 146.13 | 0.707 | 0.668 |
+| 740k   | 5.70 | 5.18 | 149.59 | 0.711 | 0.670 |
+| 860k   | 5.85 | 5.23 | 150.24 | 0.708 | 0.675 |
+| 1M     | 7.00 | 5.59 | 140.73 | 0.692 | 0.674 |
 
-- **sFID**：100k 步即超越 REPA 4M 和 SiT 7M
-- **FID**：400k 步超越 SiT 7M，训练效率提升 **17.5×**
+结论写法建议：
+- 前期加速成立：在远少于 baseline 7M 的训练步数下获得更优 FID。
+- REPA early-stop 通常稳定有效；KV 分支后期是否保留应按质量-算力边际收益选择。
 
----
+## Notes for Paper Framing
 
-## 推荐训练配置
-
-```bash
-python train.py \
-    --model SiT-XL/2-EncoderKV \
-    --encoder-type dinov2-b \
-    --enc-layer-indices "11" \
-    --sit-layer-indices "10" \
-    --stage1-steps 100000 \
-    --distill-coeff 4.0 \
-    --align-mode attn_hybrid \
-    --kv-distill-snr-gamma 2.0 \
-    --kv-distill-min-weight 0.05 \
-    --attn-loss-weight 1.0 \
-    --kv-loss-weight 0.5 \
-    --max-train-steps 400000
-```
+- 方法定位：operator-level routing prior（K/V injection）+ stage-wise release。
+- 不夸大：避免“两个辅助损失必须全程同时开启”这类绝对表述。
+- 负结果管理：SNR 加权、多层 K/V、复杂 MLP 投影若未稳定增益，可放附录而非主方法。

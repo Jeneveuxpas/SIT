@@ -5,7 +5,7 @@
 # 
 # 用法:
 #   # 评估指定的 steps
-#   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_500.yaml --exp-name attn_mse_repa_early_stop_500 --steps "0980000,0960000,0940000" --gpu 0,1,2,3 --num-gpus 4
+#   ./eval_ckpts.sh --config configs/SiT-XL.yaml --exp-name SiT-XL --steps "0200000,0380000,0390000,0400000,0410000,0420000,0450000,0480000,0490000,0500000" --gpu 0,1,2,3 --num-gpus 4
 #
 #   # 评估所有 checkpoints
 #   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --all
@@ -32,6 +32,8 @@ GLOBAL_SEED="${GLOBAL_SEED:-0}"
 GUIDANCE_LOW="${GUIDANCE_LOW:-0.0}"
 GUIDANCE_HIGH="${GUIDANCE_HIGH:-1.0}"
 REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
+# Whether to remove stale sample folder/npz for each checkpoint before re-generation.
+CLEAN_SAMPLES="${CLEAN_SAMPLES:-true}"
 
 # 解析命令行参数
 EVAL_ALL="false"
@@ -214,6 +216,25 @@ for STEP in "${CKPT_LIST[@]}"; do
     echo "[${STEP}] 开始评估..."
     echo "------------------------------------------------"
 
+    # 构建样本文件名前缀（与 generate.py 保持一致）
+    if [ "$GUIDANCE_LOW" = "0.0" ] && [ "$GUIDANCE_HIGH" = "1.0" ]; then
+        CFG_INTV=""
+    else
+        CFG_INTV="_${GUIDANCE_LOW}_${GUIDANCE_HIGH}"
+    fi
+    SAMPLE_PREFIX="${EXP_NAME}_cfg${CFG_SCALE}${CFG_INTV}-seed${GLOBAL_SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}"
+    SAMPLE_DIR="${CKPT_DIR}/${SAMPLE_PREFIX}"
+    SAMPLE_NPZ="${SAMPLE_DIR}.npz"
+
+    # 可选：清理同名旧样本，避免复用历史文件导致评估污染
+    if [ "$CLEAN_SAMPLES" = "true" ]; then
+        if [ -d "$SAMPLE_DIR" ] || [ -f "$SAMPLE_NPZ" ]; then
+            echo "[${STEP}] 清理旧样本: ${SAMPLE_DIR} / ${SAMPLE_NPZ}"
+            rm -rf "$SAMPLE_DIR"
+            rm -f "$SAMPLE_NPZ"
+        fi
+    fi
+
     # 生成样本
     torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} generate.py \
         --ckpt ${CKPT_FILE} \
@@ -228,14 +249,6 @@ for STEP in "${CKPT_LIST[@]}"; do
         --guidance-high ${GUIDANCE_HIGH} \
         --sample-dir ${CKPT_DIR}
 
-    # 构建样本文件名（支持 guidance interval）
-    if [ "$GUIDANCE_LOW" = "0.0" ] && [ "$GUIDANCE_HIGH" = "1.0" ]; then
-        CFG_INTV=""
-    else
-        CFG_INTV="_${GUIDANCE_LOW}_${GUIDANCE_HIGH}"
-    fi
-    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_cfg${CFG_SCALE}${CFG_INTV}-seed${GLOBAL_SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
-
     # 兼容浮点字符串格式差异（如 0 vs 0.0）
     if [ ! -f "$SAMPLE_NPZ" ]; then
         SAMPLE_NPZ_CANDIDATE=$(ls -t ${CKPT_DIR}/${EXP_NAME}_cfg${CFG_SCALE}*-seed${GLOBAL_SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz 2>/dev/null | head -n 1)
@@ -245,6 +258,7 @@ for STEP in "${CKPT_LIST[@]}"; do
     fi
 
     if [ -f "$SAMPLE_NPZ" ]; then
+        echo "[${STEP}] 使用样本文件: ${SAMPLE_NPZ}"
         echo "计算 FID..."
         python evaluations/evaluator.py \
             --ref_batch ${REF_BATCH} \

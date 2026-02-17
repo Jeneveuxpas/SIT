@@ -402,7 +402,33 @@ def main(args):
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
-    )    
+    )
+
+    # Setup scheduler
+    lr_scheduler = None
+    if args.lr_scheduler == "cosine":
+        from torch.optim.lr_scheduler import LambdaLR
+        def cosine_schedule_with_warmup(step):
+            if step < args.lr_warmup_steps:
+                return float(step) / float(max(1, args.lr_warmup_steps))
+            
+            decay_start = args.lr_decay_start_step if args.lr_decay_start_step is not None else args.lr_warmup_steps
+            if step < decay_start:
+                return 1.0
+                
+            progress = float(step - decay_start) / float(max(1, args.max_train_steps - decay_start))
+            
+            # Calculate cosine decay multiplier (starts at 1.0, ends at 0.0)
+            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+            
+            # Scale range from [min_lr, base_lr] instead of [0, base_lr]
+            # Multiplier = min_ratio + (1 - min_ratio) * cosine_decay
+            min_ratio = args.min_lr / args.learning_rate
+            return min_ratio + (1.0 - min_ratio) * cosine_decay
+            
+        lr_scheduler = LambdaLR(optimizer, lr_lambda=cosine_schedule_with_warmup)
+    elif args.lr_scheduler == "constant":
+        pass  # Default behavior
     
     # Setup data
     if args.repa_loss:
@@ -448,6 +474,11 @@ def main(args):
         ema.load_state_dict(ckpt['ema'])
         optimizer.load_state_dict(ckpt['opt'])
         global_step = ckpt['steps']
+        
+        # Load scheduler state if available
+        if lr_scheduler is not None and 'scheduler' in ckpt:
+            lr_scheduler.load_state_dict(ckpt['scheduler'])
+            
         if args.resume_override_lr is not None:
             for pg in optimizer.param_groups:
                 pg["lr"] = float(args.resume_override_lr)
@@ -483,6 +514,8 @@ def main(args):
     model, optimizer, train_dataloader = accelerator.prepare(
         model, optimizer, train_dataloader
     )
+    if lr_scheduler is not None:
+        lr_scheduler = accelerator.prepare(lr_scheduler)
 
     # Optional gradient-direction monitoring on fixed SiT probe layers.
     kv_probe_params = []
@@ -772,6 +805,9 @@ def main(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+                
+                if lr_scheduler is not None:
+                    lr_scheduler.step()
 
                 if global_step % args.checkpointing_steps == 0 and global_step > 0:
                     if accelerator.is_main_process:
@@ -781,6 +817,7 @@ def main(args):
                             "model": original_model.state_dict(),
                             "ema": ema.state_dict(),
                             "opt": optimizer.state_dict(),
+                            "scheduler": lr_scheduler.state_dict() if lr_scheduler is not None else None,
                             "args": args,
                             "steps": global_step,
                         }
@@ -937,7 +974,12 @@ def parse_args(input_args=None):
     parser.add_argument("--adam-beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
     parser.add_argument("--adam-weight-decay", type=float, default=0., help="Weight decay to use.")
     parser.add_argument("--adam-epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
+    parser.add_argument("--adam-epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
     parser.add_argument("--max-grad-norm", default=1.0, type=float, help="Max gradient norm.")
+    parser.add_argument("--lr-scheduler", type=str, default="constant", choices=["constant", "cosine"], help="Learning rate scheduler.")
+    parser.add_argument("--lr-warmup-steps", type=int, default=0, help="Number of warmup steps for LR scheduler.")
+    parser.add_argument("--lr-decay-start-step", type=int, default=None, help="Step to start LR decay (default: after warmup).")
+    parser.add_argument("--min-lr", type=float, default=0.0, help="Minimum learning rate for cosine scheduler.")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ema-decay", type=float, default=0.9999)
     parser.add_argument("--ema-update-freq", type=int, default=1)

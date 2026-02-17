@@ -29,8 +29,8 @@ kv-proj-type: linear
 kv-proj-kernel-size: 1
 kv-norm-type: none     # none, layernorm, zscore_spatial, zscore_token, batchnorm
 kv-zscore-alpha: 1.0
-kv-stop-step: 400000
-kv-stop-fade-steps: 50000
+kv-stop-step: 500000
+kv-stop-fade-steps: 0
 
 # ============================================================================
 # REPA Loss Configuration
@@ -55,7 +55,7 @@ batch-size: 256
 # Training
 # ============================================================================
 epochs: 1400
-max-train-steps: 1000000
+max-train-steps: 800000
 checkpointing-steps: 10000
 sampling-steps: 100000
 gradient-accumulation-steps: 1
@@ -86,8 +86,6 @@ prediction: v
 n-samples: 256
 
 # ============================================================================
-# LR Scheduler
+# Resume
 # ============================================================================
-lr-scheduler: cosine 
-lr-decay-start-step: 400000
-min-lr: 1e-5
+resume-override-lr: 3e-5

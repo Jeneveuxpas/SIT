@@ -8,8 +8,8 @@
 #   ./launch.sh --config configs/kv_coeff-8.0.yaml --exp-name kv_coeff-8.0 --gpu 2,5 --num-gpus 2
 #  ./launch.sh --config configs/10,12-4,6.yaml --exp-name 10,12-4,6 --gpu 2,3 --num-gpus 2 
 #  ./launch.sh --config configs/kv_coeff-3.0_mlp_hd2304_ln_50-200k.yaml --exp-name kv_coeff-3.0_mlp_hd2304_ln_50-200k --gpu 4,5,6,7 --num-gpus 4
-#  ./launch.sh --config configs/attn_mse_repa_early_stop_500-700k.yaml --exp-name attn_mse_repa_early_stop_500-700k --gpu 0,1,2,3 --num-gpus 4 --resume-step 500000
-#  ./launch.sh --config configs/kv_coeff-4.0-repa-coeff-0.5.yaml --exp-name kv_coeff-4.0-repa-coeff-0.5 --gpu 4,5 --num-gpus 2 
+#  ./launch.sh --config configs/attn_mse_repa_fade_stop_500_lr_3e-5.yaml --exp-name attn_mse_repa_fade_stop_500_lr_3e-5 --gpu 0,1,2,3 --num-gpus 4 --resume-step 500000
+#  ./launch.sh --config configs/SiT-XL.yaml --exp-name SiT-XL --gpu 4,5,6,7 --num-gpus 4
 
 # ============================================================================
 set -e
