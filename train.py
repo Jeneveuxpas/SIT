@@ -106,6 +106,16 @@ def safe_unwrap_model(model):
     return model
 
 
+def get_inner_optimizer(optimizer):
+    """Return underlying torch optimizer (supports accelerate wrappers)."""
+    return getattr(optimizer, "optimizer", optimizer)
+
+
+def get_inner_scheduler(lr_scheduler):
+    """Return underlying torch scheduler (supports accelerate wrappers)."""
+    return getattr(lr_scheduler, "scheduler", lr_scheduler)
+
+
 def get_current_lr(optimizer) -> float:
     """Return current LR from the first optimizer parameter group."""
     if hasattr(optimizer, "param_groups") and len(optimizer.param_groups) > 0:
@@ -115,6 +125,21 @@ def get_current_lr(optimizer) -> float:
     if inner_optimizer is not None and hasattr(inner_optimizer, "param_groups") and len(inner_optimizer.param_groups) > 0:
         return float(inner_optimizer.param_groups[0].get("lr", 0.0))
     return 0.0
+
+
+def set_current_lr(optimizer, lr: float):
+    """Set LR for all optimizer parameter groups."""
+    inner_optimizer = get_inner_optimizer(optimizer)
+    if hasattr(inner_optimizer, "param_groups"):
+        for pg in inner_optimizer.param_groups:
+            pg["lr"] = float(lr)
+
+
+def set_scheduler_base_lrs(lr_scheduler, base_lr: float):
+    """Set scheduler base_lrs so future scheduler.step() keeps the overridden LR scale."""
+    inner_scheduler = get_inner_scheduler(lr_scheduler)
+    if hasattr(inner_scheduler, "base_lrs"):
+        inner_scheduler.base_lrs = [float(base_lr) for _ in inner_scheduler.base_lrs]
 
 def parse_layer_indices(indices_str: str) -> list:
     """Parse comma-separated layer indices string to list of ints (1-based -> 0-based)."""
@@ -425,14 +450,13 @@ def main(args):
             # Multiplier = min_ratio + (1 - min_ratio) * cosine_decay
             min_ratio = args.min_lr / args.learning_rate
             return min_ratio + (1.0 - min_ratio) * cosine_decay
-            
-        # When resuming, LambdaLR expects 'initial_lr' in param_groups if last_epoch != -1
-        # Since we are creating a fresh scheduler for an existing/loaded optimizer, we must set it manually.
+
+        # Keep last_epoch=-1 at construction. Resume alignment is handled after checkpoint load.
+        # Set initial_lr to ensure LambdaLR can compute base learning rate correctly
         for group in optimizer.param_groups:
             group.setdefault('initial_lr', group['lr'])
-            
-        last_epoch = args.resume_step - 1 if args.resume_step > 0 else -1
-        lr_scheduler = LambdaLR(optimizer, lr_lambda=cosine_schedule_with_warmup, last_epoch=last_epoch)
+
+        lr_scheduler = LambdaLR(optimizer, lr_lambda=cosine_schedule_with_warmup)
     elif args.lr_scheduler == "constant":
         pass  # Default behavior
     
@@ -469,11 +493,21 @@ def main(args):
     # resume:
     global_step = 0
     scheduler_state_loaded = False
+    scheduler_state = None  # Store scheduler state to load after prepare
+    resume_override_lr = float(args.resume_override_lr) if args.resume_override_lr is not None else None
     grad_norm = 0.0  # Initialize grad_norm to avoid undefined variable error
     if args.resume_step > 0:
-        ckpt_name = str(args.resume_step).zfill(7) +'.pt'
+        ckpt_name = str(args.resume_step).zfill(7) + '.pt'
+        ckpt_path = f'{checkpoint_dir}/{ckpt_name}'
+
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(
+                f"Resume checkpoint not found: {ckpt_path}. "
+                f"Please check --resume-step={args.resume_step} is correct."
+            )
+
         ckpt = torch.load(
-            f'{checkpoint_dir}/{ckpt_name}',
+            ckpt_path,
             map_location='cpu',
             weights_only=False,
         )
@@ -481,26 +515,12 @@ def main(args):
         ema.load_state_dict(ckpt['ema'])
         optimizer.load_state_dict(ckpt['opt'])
         global_step = ckpt['steps']
-        
-        # Load scheduler state if available and valid.
+
+        # Store scheduler state to load after accelerator.prepare()
         if lr_scheduler is not None:
             scheduler_state = ckpt.get("scheduler", None)
-            if scheduler_state is not None:
-                try:
-                    lr_scheduler.load_state_dict(scheduler_state)
-                    scheduler_state_loaded = True
-                except Exception as e:
-                    if accelerator.is_main_process:
-                        logger.warning(f"Failed to load scheduler state from checkpoint: {e}")
-            
-        if args.resume_override_lr is not None:
-            for pg in optimizer.param_groups:
-                pg["lr"] = float(args.resume_override_lr)
-            if accelerator.is_main_process:
-                logger.info(
-                    f"Resumed from step {global_step} and override learning rate to {args.resume_override_lr:.6g}"
-                )
-        elif accelerator.is_main_process:
+
+        if accelerator.is_main_process:
             logger.info(
                 f"Resumed from step {global_step} with optimizer learning rate {get_current_lr(optimizer):.6g}"
             )
@@ -530,15 +550,113 @@ def main(args):
     )
     if lr_scheduler is not None:
         lr_scheduler = accelerator.prepare(lr_scheduler)
+
+        # Load scheduler state after prepare (if available from checkpoint)
+        if args.resume_step > 0 and scheduler_state is not None:
+            try:
+                lr_scheduler.load_state_dict(scheduler_state)
+                scheduler_state_loaded = True
+                inner_scheduler = get_inner_scheduler(lr_scheduler)
+
+                # Verify loaded scheduler state matches global_step
+                expected_last_epoch = global_step - 1
+                if inner_scheduler.last_epoch != expected_last_epoch:
+                    if accelerator.is_main_process:
+                        logger.warning(
+                            f"Scheduler last_epoch mismatch: loaded={inner_scheduler.last_epoch}, "
+                            f"expected={expected_last_epoch} (global_step={global_step}). "
+                            f"Using loaded value."
+                        )
+
+                if accelerator.is_main_process:
+                    logger.info(
+                        f"Loaded scheduler state from checkpoint. "
+                        f"Scheduler last_epoch = {inner_scheduler.last_epoch}, "
+                        f"Current lr = {get_current_lr(optimizer):.6g}"
+                    )
+            except Exception as e:
+                if accelerator.is_main_process:
+                    logger.warning(f"Failed to load scheduler state from checkpoint: {e}")
+
         # If resumed from a checkpoint without scheduler state (e.g., resumed from constant LR
         # and switched to cosine), align scheduler to the current global step.
         if args.resume_step > 0 and not scheduler_state_loaded:
-            lr_scheduler.step(global_step)
+            # Training loop steps scheduler BEFORE incrementing global_step.
+            # After N completed updates: scheduler.last_epoch=N-1, global_step=N.
+            # We need to set scheduler to last_epoch = global_step - 1.
+            scheduler_epoch = global_step - 1
+            if scheduler_epoch >= 0:
+                try:
+                    # Use wrapper scheduler first to preserve accelerate multi-GPU semantics.
+                    lr_scheduler.step(scheduler_epoch)
+                except TypeError:
+                    # Fallback for older wrappers that do not accept epoch argument.
+                    inner_scheduler = get_inner_scheduler(lr_scheduler)
+                    inner_scheduler.step(epoch=scheduler_epoch)
+                    if accelerator.is_main_process:
+                        logger.warning(
+                            "Scheduler wrapper does not accept epoch argument; "
+                            "used inner scheduler for resume alignment fallback."
+                        )
             if accelerator.is_main_process:
                 logger.info(
-                    f"Scheduler state missing in checkpoint; fast-forwarded scheduler to step {global_step}. "
+                    f"Scheduler state missing in checkpoint; fast-forwarded scheduler to epoch {max(0, scheduler_epoch)}. "
                     f"Current lr = {get_current_lr(optimizer):.6g}"
                 )
+
+    if args.resume_step > 0 and resume_override_lr is not None:
+        if lr_scheduler is not None:
+            inner_scheduler = get_inner_scheduler(lr_scheduler)
+            inner_optimizer = get_inner_optimizer(optimizer)
+            old_base_lrs = list(getattr(inner_scheduler, "base_lrs", []))
+            old_current_lrs = [
+                float(pg.get("lr", 0.0)) for pg in inner_optimizer.param_groups
+            ]
+
+            # Update scheduler base_lrs to new value
+            set_scheduler_base_lrs(lr_scheduler, resume_override_lr)
+            if args.lr_scheduler == "cosine":
+                # Update args.learning_rate for min_ratio calculation in lambda
+                # Note: This affects future scheduler behavior through the lambda closure
+                args.learning_rate = resume_override_lr
+
+            # Recompute current LR based on new base_lr and current scheduler position
+            current_epoch = getattr(inner_scheduler, "last_epoch", -1)
+            if current_epoch >= 0:
+                try:
+                    # Recompute current LR under the new base LR with scheduler wrapper semantics.
+                    lr_scheduler.step(current_epoch)
+                except TypeError:
+                    # Fallback for older wrappers that do not accept epoch argument.
+                    # Preserve current schedule ratio when overriding base LR.
+                    if len(old_base_lrs) == len(old_current_lrs) and len(old_base_lrs) > 0:
+                        for pg, current_lr, old_base_lr in zip(
+                            inner_optimizer.param_groups, old_current_lrs, old_base_lrs
+                        ):
+                            if abs(float(old_base_lr)) > 0:
+                                pg["lr"] = float(current_lr) * float(resume_override_lr) / float(old_base_lr)
+                            else:
+                                pg["lr"] = float(resume_override_lr)
+                    else:
+                        # Fallback if scheduler base_lrs shape is unexpected.
+                        set_current_lr(optimizer, resume_override_lr)
+                    if accelerator.is_main_process:
+                        logger.warning(
+                            "Scheduler wrapper does not accept epoch argument during LR override; "
+                            "used ratio-scaling fallback."
+                        )
+            else:
+                # Scheduler hasn't stepped yet, just set base lr
+                set_current_lr(optimizer, resume_override_lr)
+        else:
+            # No scheduler, just set the optimizer lr
+            set_current_lr(optimizer, resume_override_lr)
+
+        if accelerator.is_main_process:
+            logger.info(
+                f"Override learning rate to {resume_override_lr:.6g}. "
+                f"Actual current lr = {get_current_lr(optimizer):.6g}"
+            )
 
     # Optional gradient-direction monitoring on fixed SiT probe layers.
     kv_probe_params = []
@@ -610,7 +728,7 @@ def main(args):
     # No longer need separate processors - encoders handle their own preprocessing
 
     # define spatial normalization class object
-    
+
     for epoch in range(args.epochs):
 
         model.train()
@@ -826,11 +944,13 @@ def main(args):
             
             ### enter
             if accelerator.sync_gradients:
-                progress_bar.update(1)
-                global_step += 1
-                
+                # Step scheduler BEFORE incrementing global_step
+                # After N completed updates: scheduler.last_epoch = N - 1.
                 if lr_scheduler is not None:
                     lr_scheduler.step()
+
+                progress_bar.update(1)
+                global_step += 1
 
                 if global_step % args.checkpointing_steps == 0 and global_step > 0:
                     if accelerator.is_main_process:
@@ -902,13 +1022,30 @@ def main(args):
         if global_step >= args.max_train_steps:
             break
 
+    # Save final checkpoint if training completed
+    if accelerator.is_main_process and global_step >= args.max_train_steps:
+        # Check if final checkpoint was already saved
+        if global_step % args.checkpointing_steps != 0:
+            original_model = safe_unwrap_model(model)
+            checkpoint = {
+                "model": original_model.state_dict(),
+                "ema": ema.state_dict(),
+                "opt": optimizer.state_dict(),
+                "scheduler": lr_scheduler.state_dict() if lr_scheduler is not None else None,
+                "args": args,
+                "steps": global_step,
+            }
+            checkpoint_path = f"{checkpoint_dir}/{global_step:07d}.pt"
+            torch.save(checkpoint, checkpoint_path)
+            logger.info(f"Saved final checkpoint to {checkpoint_path}")
+
     # Cleanup
     if encoder_kv_extractor is not None:
         encoder_kv_extractor.remove_hooks()
-    
+
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
-    
+
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         logger.info("Done!")
