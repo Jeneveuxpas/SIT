@@ -151,100 +151,6 @@ def get_loss_stop_multiplier(step: int, stop_step: int = None, fade_steps: int =
     return 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
-def get_sit_block_probe_params(model, layer_idx_1based: int):
-    """
-    Select lightweight probe parameters from a specific SiT block.
-    We use attention projection weights to keep monitoring cost low.
-    """
-    if not hasattr(model, "blocks"):
-        return []
-
-    block_idx = layer_idx_1based - 1
-    if block_idx < 0 or block_idx >= len(model.blocks):
-        return []
-
-    block = model.blocks[block_idx]
-    selected = []
-    for name, p in block.named_parameters():
-        if not p.requires_grad:
-            continue
-        if name in {"attn.qkv.weight", "attn.proj.weight"}:
-            selected.append(p)
-
-    # Fallback in case module naming differs.
-    if len(selected) == 0:
-        for name, p in block.named_parameters():
-            if p.requires_grad and name.startswith("attn."):
-                selected.append(p)
-    return selected
-
-
-def compute_grad_cosine(loss_main: torch.Tensor, loss_aux: torch.Tensor, params):
-    """
-    Compute cosine similarity between gradients of two losses
-    on a fixed probe parameter set.
-    """
-    if len(params) == 0:
-        return None
-    if not isinstance(loss_main, torch.Tensor) or not isinstance(loss_aux, torch.Tensor):
-        return None
-    if not loss_main.requires_grad or not loss_aux.requires_grad:
-        return None
-
-    grads_main = torch.autograd.grad(
-        loss_main, params, retain_graph=True, allow_unused=True
-    )
-    grads_aux = torch.autograd.grad(
-        loss_aux, params, retain_graph=True, allow_unused=True
-    )
-
-    device = params[0].device
-    dot = torch.tensor(0.0, device=device)
-    main_norm_sq = torch.tensor(0.0, device=device)
-    aux_norm_sq = torch.tensor(0.0, device=device)
-    used = 0
-
-    for g_main, g_aux in zip(grads_main, grads_aux):
-        if g_main is None or g_aux is None:
-            continue
-        gm = g_main.detach().float().reshape(-1)
-        ga = g_aux.detach().float().reshape(-1)
-        dot = dot + torch.dot(gm, ga)
-        main_norm_sq = main_norm_sq + torch.dot(gm, gm)
-        aux_norm_sq = aux_norm_sq + torch.dot(ga, ga)
-        used += 1
-
-    if used == 0:
-        return None
-    if main_norm_sq.item() <= 0 or aux_norm_sq.item() <= 0:
-        return None
-
-    main_norm = torch.sqrt(main_norm_sq)
-    aux_norm = torch.sqrt(aux_norm_sq)
-    cosine = dot / (main_norm * aux_norm + 1e-12)
-    return cosine, main_norm, aux_norm
-
-
-def reduce_scalar_mean(accelerator: Accelerator, value, device: torch.device):
-    """
-    Reduce a scalar metric across all processes with nan-safe mean.
-    Returns None when all processes report NaN.
-    """
-    if value is None:
-        t = torch.tensor(float("nan"), device=device, dtype=torch.float32)
-    elif isinstance(value, torch.Tensor):
-        t = value.detach().float()
-        if t.ndim > 0:
-            t = t.mean()
-    else:
-        t = torch.tensor(float(value), device=device, dtype=torch.float32)
-
-    gathered = accelerator.gather(t.view(1))
-    valid = ~torch.isnan(gathered)
-    if valid.any():
-        return gathered[valid].mean().item()
-    return None
-
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -513,10 +419,15 @@ def main(args):
         model = torch.compile(model, backend="inductor", mode="default")
         # encoders = [torch.compile(encoder, backend="inductor", mode="default") for encoder in encoders]
 
-        @torch.compile(fullgraph=False)
-        def optim_step_fn():
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+        if args.compile_optim_step:
+            @torch.compile(fullgraph=False)
+            def optim_step_fn():
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+        else:
+            def optim_step_fn():
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
     else:
         def optim_step_fn():
@@ -538,8 +449,8 @@ def main(args):
                 inner_scheduler = get_inner_scheduler(lr_scheduler)
 
                 # Verify loaded scheduler state matches global_step
-                # After N updates: global_step=N, last_epoch=N-1 (scheduler.step() is after global_step+=1)
-                expected_last_epoch = global_step - 1
+                # With scheduler.step() after global_step+=1: global_step=N => last_epoch=N
+                expected_last_epoch = global_step
                 if inner_scheduler.last_epoch != expected_last_epoch:
                     if accelerator.is_main_process:
                         logger.warning(
@@ -562,10 +473,10 @@ def main(args):
         # and switched to cosine), align scheduler to the current global step.
         if args.resume_step > 0 and not scheduler_state_loaded:
             # Training loop steps scheduler AFTER incrementing global_step.
-            # After N updates: global_step=N, last_epoch=N-1
-            # We need to set scheduler to last_epoch = global_step - 1
-            scheduler_epoch = global_step - 1
-            if scheduler_epoch >= 0:
+            # After N completed updates: global_step=N, scheduler.last_epoch=N.
+            # We need to set scheduler to last_epoch = global_step.
+            scheduler_epoch = global_step
+            if scheduler_epoch > 0:
                 try:
                     # Use wrapper scheduler first to preserve accelerate multi-GPU semantics.
                     lr_scheduler.step(scheduler_epoch)
@@ -583,37 +494,6 @@ def main(args):
                     f"Scheduler state missing in checkpoint; fast-forwarded scheduler to epoch {scheduler_epoch}. "
                     f"Current lr = {get_current_lr(optimizer):.6g}"
                 )
-
-    # Optional gradient-direction monitoring on fixed SiT probe layers.
-    kv_probe_params = []
-    repa_probe_params = []
-    grad_window_active = False
-    grad_window_remaining = 0
-    grad_window_start_step = None
-    grad_window_stats = {}
-    grad_window_stat_keys = [
-        f"grad_cos_main_kv_l{args.grad_monitor_kv_layer}",
-        f"grad_norm_main_kv_l{args.grad_monitor_kv_layer}",
-        f"grad_norm_kv_l{args.grad_monitor_kv_layer}",
-        f"grad_cos_main_repa_l{args.grad_monitor_repa_layer}",
-        f"grad_norm_main_repa_l{args.grad_monitor_repa_layer}",
-        f"grad_norm_repa_l{args.grad_monitor_repa_layer}",
-    ]
-    if args.grad_monitor:
-        probe_model = safe_unwrap_model(model)
-        kv_probe_params = get_sit_block_probe_params(probe_model, args.grad_monitor_kv_layer)
-        repa_probe_params = get_sit_block_probe_params(probe_model, args.grad_monitor_repa_layer)
-        if accelerator.is_main_process:
-            logger.info(
-                f"Grad monitor enabled (interval={args.grad_monitor_interval}, "
-                f"window_steps={args.grad_monitor_window_steps}): "
-                f"KV probe=layer{args.grad_monitor_kv_layer} ({len(kv_probe_params)} params), "
-                f"REPA probe=layer{args.grad_monitor_repa_layer} ({len(repa_probe_params)} params)"
-            )
-            if len(kv_probe_params) == 0:
-                logger.warning("Grad monitor: KV probe parameter set is empty.")
-            if len(repa_probe_params) == 0:
-                logger.warning("Grad monitor: REPA probe parameter set is empty.")
 
     if accelerator.is_main_process:
         tracker_config = vars(copy.deepcopy(args))
@@ -658,7 +538,6 @@ def main(args):
     for epoch in range(args.epochs):
         model.train()
         for batch in train_dataloader:
-            grad_monitor_logs = {}
             if len(batch) == 3:
                 raw_image, x, y = batch
                 raw_image = raw_image.to(device)
@@ -759,86 +638,6 @@ def main(args):
                 current_distill_coeff = base_distill_coeff * kv_gate
                 distill_loss = distill_loss_raw * current_distill_coeff
 
-                should_start_grad_window = (
-                    args.grad_monitor
-                    and accelerator.sync_gradients
-                    and global_step > 0
-                    and (global_step % args.grad_monitor_interval == 0)
-                    and (not grad_window_active)
-                )
-                if should_start_grad_window:
-                    grad_window_active = True
-                    grad_window_remaining = args.grad_monitor_window_steps
-                    grad_window_start_step = global_step
-                    grad_window_stats = {
-                        key: {"sum": 0.0, "sum_sq": 0.0, "count": 0}
-                        for key in grad_window_stat_keys
-                    }
-
-                should_monitor_grad = (
-                    args.grad_monitor
-                    and accelerator.sync_gradients
-                    and grad_window_active
-                    and grad_window_remaining > 0
-                )
-                if should_monitor_grad:
-                    kv_grad_stats = compute_grad_cosine(
-                        denoising_loss_mean, distill_loss, kv_probe_params
-                    )
-                    repa_grad_stats = compute_grad_cosine(
-                        denoising_loss_mean, proj_loss, repa_probe_params
-                    )
-
-                    step_metrics = {}
-                    if kv_grad_stats is not None:
-                        kv_cos, kv_main_norm, kv_aux_norm = kv_grad_stats
-                        step_metrics.update({
-                            f"grad_cos_main_kv_l{args.grad_monitor_kv_layer}": kv_cos,
-                            f"grad_norm_main_kv_l{args.grad_monitor_kv_layer}": kv_main_norm,
-                            f"grad_norm_kv_l{args.grad_monitor_kv_layer}": kv_aux_norm,
-                        })
-                    if repa_grad_stats is not None:
-                        repa_cos, repa_main_norm, repa_aux_norm = repa_grad_stats
-                        step_metrics.update({
-                            f"grad_cos_main_repa_l{args.grad_monitor_repa_layer}": repa_cos,
-                            f"grad_norm_main_repa_l{args.grad_monitor_repa_layer}": repa_main_norm,
-                            f"grad_norm_repa_l{args.grad_monitor_repa_layer}": repa_aux_norm,
-                        })
-
-                    # Aggregate metrics across all processes before window accumulation.
-                    for key in grad_window_stat_keys:
-                        value = step_metrics.get(key, None)
-                        reduced_value = reduce_scalar_mean(accelerator, value, device)
-                        if reduced_value is None:
-                            continue
-                        stat = grad_window_stats[key]
-                        stat["sum"] += reduced_value
-                        stat["sum_sq"] += reduced_value * reduced_value
-                        stat["count"] += 1
-
-                    grad_window_remaining -= 1
-                    if grad_window_remaining == 0:
-                        grad_window_active = False
-                        window_end_step = global_step
-                        grad_monitor_logs["grad_monitor_window_start"] = float(grad_window_start_step)
-                        grad_monitor_logs["grad_monitor_window_end"] = float(window_end_step)
-
-                        for key in grad_window_stat_keys:
-                            stat = grad_window_stats[key]
-                            if stat["count"] <= 0:
-                                continue
-                            mean_val = stat["sum"] / stat["count"]
-                            var_val = max(0.0, stat["sum_sq"] / stat["count"] - mean_val * mean_val)
-                            std_val = math.sqrt(var_val)
-                            grad_monitor_logs[key] = mean_val
-                            grad_monitor_logs[f"{key}_std"] = std_val
-                            grad_monitor_logs[f"{key}_n"] = float(stat["count"])
-
-                        if accelerator.is_main_process and len(grad_monitor_logs) > 0:
-                            logger.info(
-                                f"Step {window_end_step}: grad monitor window {grad_monitor_logs}"
-                            )
-                
                 # Total loss
                 loss = denoising_loss_mean + proj_loss + distill_loss
                 loss = loss.float()
@@ -865,73 +664,72 @@ def main(args):
                 global_step += 1
                 if lr_scheduler is not None:
                     lr_scheduler.step()
-            if global_step % args.checkpointing_steps == 0 and global_step > 0:
-                if accelerator.is_main_process:
-                    original_model = safe_unwrap_model(model)
+                if global_step % args.checkpointing_steps == 0 and global_step > 0:
+                    if accelerator.is_main_process:
+                        original_model = safe_unwrap_model(model)
 
-                    checkpoint = {
-                        "model": original_model.state_dict(),
-                        "ema": ema.state_dict(),
-                        "opt": optimizer.state_dict(),
-                        "scheduler": lr_scheduler.state_dict() if lr_scheduler is not None else None,
-                        "args": args,
-                        "steps": global_step,
-                    }
-                    checkpoint_path = f"{checkpoint_dir}/{global_step:07d}.pt"
-                    torch.save(checkpoint, checkpoint_path)
-                    logger.info(f"Saved checkpoint to {checkpoint_path}")
+                        checkpoint = {
+                            "model": original_model.state_dict(),
+                            "ema": ema.state_dict(),
+                            "opt": optimizer.state_dict(),
+                            "scheduler": lr_scheduler.state_dict() if lr_scheduler is not None else None,
+                            "args": args,
+                            "steps": global_step,
+                        }
+                        checkpoint_path = f"{checkpoint_dir}/{global_step:07d}.pt"
+                        torch.save(checkpoint, checkpoint_path)
+                        logger.info(f"Saved checkpoint to {checkpoint_path}")
 
-            if (global_step == 1 or (global_step % args.sampling_steps == 0 and global_step > 0)):
-                from samplers import euler_sampler
-                with torch.no_grad():
-                    samples = euler_sampler(
-                        model,
-                        xT,
-                        ys,
-                        num_steps=50,
-                        cfg_scale=1.0,
-                        guidance_low=0.,
-                        guidance_high=1.,
-                        path_type=args.path_type,
-                        heun=False,
-                    ).to(torch.float32)
-                    samples = vae.decode(samples / latents_scale + latents_bias).sample
-                    gt_samples = vae.decode(gt_xs / latents_scale + latents_bias).sample
-                    samples = (samples + 1) / 2.
-                    gt_samples = (gt_samples + 1) / 2.
-                out_samples = accelerator.gather(samples.to(torch.float32))
-                gt_samples = accelerator.gather(gt_samples.to(torch.float32))
+                if (global_step == 1 or (global_step % args.sampling_steps == 0 and global_step > 0)):
+                    from samplers import euler_sampler
+                    with torch.no_grad():
+                        samples = euler_sampler(
+                            model,
+                            xT,
+                            ys,
+                            num_steps=50,
+                            cfg_scale=1.0,
+                            guidance_low=0.,
+                            guidance_high=1.,
+                            path_type=args.path_type,
+                            heun=False,
+                        ).to(torch.float32)
+                        samples = vae.decode(samples / latents_scale + latents_bias).sample
+                        gt_samples = vae.decode(gt_xs / latents_scale + latents_bias).sample
+                        samples = (samples + 1) / 2.
+                        gt_samples = (gt_samples + 1) / 2.
+                    out_samples = accelerator.gather(samples.to(torch.float32))
+                    gt_samples = accelerator.gather(gt_samples.to(torch.float32))
 
-                stage_name = f"stage{current_stage}"
-                accelerator.log({
-                    f"samples_{stage_name}": wandb.Image(array2grid(out_samples)),
-                    "gt_samples": wandb.Image(array2grid(gt_samples))
-                })
-                if accelerator.is_main_process:
-                    logger.info(f"Generated samples: Stage {current_stage}")
+                    stage_name = f"stage{current_stage}"
+                    accelerator.log({
+                        f"samples_{stage_name}": wandb.Image(array2grid(out_samples)),
+                        "gt_samples": wandb.Image(array2grid(gt_samples))
+                    })
+                    if accelerator.is_main_process:
+                        logger.info(f"Generated samples: Stage {current_stage}")
 
-            # Include the loss and grad norms in the logging
-            logs = {
-                "loss": loss.detach().item(),
-                "denoising_loss": denoising_loss_mean.detach().item(),
-                "proj_loss": proj_loss.detach().item() if isinstance(proj_loss, torch.Tensor) else proj_loss,
-                # "proj_loss_raw": proj_loss_raw.detach().item() if isinstance(proj_loss_raw, torch.Tensor) else proj_loss_raw,
-                "distill_loss": distill_loss.detach().item() if isinstance(distill_loss, torch.Tensor) else distill_loss,
-                # "distill_loss_raw": distill_loss_raw.detach().item() if isinstance(distill_loss_raw, torch.Tensor) else distill_loss_raw,
-                # "distill_coeff": current_distill_coeff,
-                # "distill_coeff_base": base_distill_coeff,
-                "repa_gate": repa_gate,
-                "kv_gate": kv_gate,
-                "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                "lr": get_current_lr(optimizer),
-            }
-            logs.update(loss_dict)
-            logs.update(grad_monitor_logs)
-            progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
+                # Include the loss and grad norms in the logging.
+                logs = {
+                    "loss": loss.detach().item(),
+                    "denoising_loss": denoising_loss_mean.detach().item(),
+                    "proj_loss": proj_loss.detach().item() if isinstance(proj_loss, torch.Tensor) else proj_loss,
+                    # "proj_loss_raw": proj_loss_raw.detach().item() if isinstance(proj_loss_raw, torch.Tensor) else proj_loss_raw,
+                    "distill_loss": distill_loss.detach().item() if isinstance(distill_loss, torch.Tensor) else distill_loss,
+                    # "distill_loss_raw": distill_loss_raw.detach().item() if isinstance(distill_loss_raw, torch.Tensor) else distill_loss_raw,
+                    # "distill_coeff": current_distill_coeff,
+                    # "distill_coeff_base": base_distill_coeff,
+                    "repa_gate": repa_gate,
+                    "kv_gate": kv_gate,
+                    "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                    "lr": get_current_lr(optimizer),
+                }
+                logs.update(loss_dict)
+                progress_bar.set_postfix(**logs)
+                accelerator.log(logs, step=global_step)
 
-            if global_step >= args.max_train_steps:
-                break
+                if global_step >= args.max_train_steps:
+                    break
         if global_step >= args.max_train_steps:
             break
 
@@ -957,7 +755,6 @@ def parse_args(input_args=None):
     parser.add_argument("--report-to", type=str, default="wandb")
     parser.add_argument("--sampling-steps", type=int, default=10000)
     parser.add_argument("--resume-step", type=int, default=0)
-    parser.add_argument("--resume-override-lr", type=float, default=None)
     parser.add_argument("--n-samples", type=int, default=256)
 
     # model
@@ -1035,6 +832,12 @@ def parse_args(input_args=None):
     parser.add_argument("--lr-decay-start-step", type=int, default=None, help="Step to start LR decay (default: after warmup).")
     parser.add_argument("--min-lr", type=float, default=0.0, help="Minimum learning rate for cosine scheduler.")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--compile-optim-step",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compile optimizer.step/zero_grad path.",
+    )
     parser.add_argument("--ema-decay", type=float, default=0.9999)
     parser.add_argument("--ema-update-freq", type=int, default=1)
 
@@ -1060,16 +863,6 @@ def parse_args(input_args=None):
                         help="Absolute step to begin turning off REPA projection loss (None keeps it on)")
     parser.add_argument("--repa-stop-fade-steps", type=int, default=0,
                         help="Cosine fade length for REPA projection loss after repa-stop-step (0 = hard stop)")
-    parser.add_argument("--grad-monitor", action=argparse.BooleanOptionalAction, default=False,
-                        help="Periodically monitor gradient cosine between denoising and auxiliary losses")
-    parser.add_argument("--grad-monitor-interval", type=int, default=5000,
-                        help="Gradient monitor interval in steps")
-    parser.add_argument("--grad-monitor-window-steps", type=int, default=10,
-                        help="Number of consecutive steps to aggregate for each grad monitor window")
-    parser.add_argument("--grad-monitor-kv-layer", type=int, default=4,
-                        help="1-based SiT block index for KV-loss gradient probe")
-    parser.add_argument("--grad-monitor-repa-layer", type=int, default=10,
-                        help="1-based SiT block index for REPA-loss gradient probe")
 
     # whether to normalize spatial features
     parser.add_argument("--spnorm-method", type=str, default="zscore", choices=["none", "zscore", "zscore_token", "layernorm"])
@@ -1113,14 +906,6 @@ def parse_args(input_args=None):
         parser.error("--kv-stop-fade-steps must be >= 0")
     if args.repa_stop_fade_steps < 0:
         parser.error("--repa-stop-fade-steps must be >= 0")
-    if args.grad_monitor_interval <= 0:
-        parser.error("--grad-monitor-interval must be > 0")
-    if args.grad_monitor_window_steps <= 0:
-        parser.error("--grad-monitor-window-steps must be > 0")
-    if args.grad_monitor_kv_layer <= 0:
-        parser.error("--grad-monitor-kv-layer must be >= 1")
-    if args.grad_monitor_repa_layer <= 0:
-        parser.error("--grad-monitor-repa-layer must be >= 1")
 
     return args
 
