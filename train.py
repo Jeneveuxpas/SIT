@@ -462,6 +462,7 @@ def main(args):
     
     # resume:
     global_step = 0
+    scheduler_state_loaded = False
     grad_norm = 0.0  # Initialize grad_norm to avoid undefined variable error
     if args.resume_step > 0:
         ckpt_name = str(args.resume_step).zfill(7) +'.pt'
@@ -475,9 +476,16 @@ def main(args):
         optimizer.load_state_dict(ckpt['opt'])
         global_step = ckpt['steps']
         
-        # Load scheduler state if available
-        if lr_scheduler is not None and 'scheduler' in ckpt:
-            lr_scheduler.load_state_dict(ckpt['scheduler'])
+        # Load scheduler state if available and valid.
+        if lr_scheduler is not None:
+            scheduler_state = ckpt.get("scheduler", None)
+            if scheduler_state is not None:
+                try:
+                    lr_scheduler.load_state_dict(scheduler_state)
+                    scheduler_state_loaded = True
+                except Exception as e:
+                    if accelerator.is_main_process:
+                        logger.warning(f"Failed to load scheduler state from checkpoint: {e}")
             
         if args.resume_override_lr is not None:
             for pg in optimizer.param_groups:
@@ -516,6 +524,15 @@ def main(args):
     )
     if lr_scheduler is not None:
         lr_scheduler = accelerator.prepare(lr_scheduler)
+        # If resumed from a checkpoint without scheduler state (e.g., resumed from constant LR
+        # and switched to cosine), align scheduler to the current global step.
+        if args.resume_step > 0 and not scheduler_state_loaded:
+            lr_scheduler.step(global_step)
+            if accelerator.is_main_process:
+                logger.info(
+                    f"Scheduler state missing in checkpoint; fast-forwarded scheduler to step {global_step}. "
+                    f"Current lr = {get_current_lr(optimizer):.6g}"
+                )
 
     # Optional gradient-direction monitoring on fixed SiT probe layers.
     kv_probe_params = []
