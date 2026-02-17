@@ -84,6 +84,7 @@ fi
 
 SAVE_PATH="exps/${EXP_NAME}"
 export CUDA_VISIBLE_DEVICES="${GPU}"
+MASTER_PORT=$((29500 + RANDOM % 1000))
 
 # +
 # ============================================================================
@@ -100,7 +101,6 @@ if [ "$EVAL_ONLY" = "false" ]; then
     echo "================================================"
 
     # 构建训练命令
-    MASTER_PORT=$((29500 + RANDOM % 1000))
     TRAIN_CMD="accelerate launch --main_process_port ${MASTER_PORT} --num_processes ${NUM_GPUS} train.py --exp-name ${EXP_NAME}"
 
     if [ -n "$CONFIG" ]; then
