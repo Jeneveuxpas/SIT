@@ -6,6 +6,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import List, Tuple, Optional, Dict
 from utils import ZScoreNorm
 
@@ -57,6 +58,10 @@ class EncoderKVExtractor(nn.Module):
             
     def _get_model_blocks(self, model: nn.Module) -> List[nn.Module]:
         """Flatten model blocks into a list for consistent indexing."""
+        # 0. CLIP UpdatedVisionTransformer wrapper
+        if hasattr(model, "model") and hasattr(model.model, "transformer") and hasattr(model.model.transformer, "resblocks"):
+            return list(model.model.transformer.resblocks)
+
         # 1. Timm / TorchHub DINOv2
         if hasattr(model, "blocks"):
             return list(model.blocks)
@@ -99,8 +104,11 @@ class EncoderKVExtractor(nn.Module):
             # Identify attention module and Hook type
             # print(f"Inspecting block {idx} of type {type(block)}")
             
+            # Case E: CLIP -> block.attn is nn.MultiheadAttention with in_proj_weight
+            if hasattr(block, "attn") and isinstance(block.attn, nn.MultiheadAttention):
+                self._register_clip_mha_hook(block.attn, idx)
             # Case C: SAM2 Hiera -> has 'qkv' and 'query_stride' (specific to Hiera/SAM2)
-            if hasattr(block, "attn") and hasattr(block.attn, "qkv") and hasattr(block.attn, "query_stride"):
+            elif hasattr(block, "attn") and hasattr(block.attn, "qkv") and hasattr(block.attn, "query_stride"):
                 # print("Selected: SAM2 (qkv) hook")
                 self._register_hf_sam2_qkv_hook(block.attn, idx)
             # Case A: Timm DINOv2 -> block.attn.qkv
@@ -127,8 +135,11 @@ class EncoderKVExtractor(nn.Module):
             
         block = self.blocks[idx]
         
+        # CLIP nn.MultiheadAttention
+        if hasattr(block, "attn") and isinstance(block.attn, nn.MultiheadAttention):
+            return block.attn.embed_dim
         # SAM2 Hiera
-        if hasattr(block, "attn") and hasattr(block.attn, "dim"):
+        elif hasattr(block, "attn") and hasattr(block.attn, "dim"):
             return block.attn.dim
         # Timm DINOv2
         elif hasattr(block, "attn") and hasattr(block.attn, "qkv"):
@@ -151,8 +162,11 @@ class EncoderKVExtractor(nn.Module):
             
         block = self.blocks[idx]
         
+        # CLIP nn.MultiheadAttention
+        if hasattr(block, "attn") and isinstance(block.attn, nn.MultiheadAttention):
+            return block.attn.num_heads
         # SAM2 Hiera
-        if hasattr(block, "attn") and hasattr(block.attn, "num_attention_heads"):
+        elif hasattr(block, "attn") and hasattr(block.attn, "num_attention_heads"):
             return block.attn.num_attention_heads
         elif hasattr(block, "attn") and hasattr(block.attn, "num_heads"):
             return block.attn.num_heads
@@ -169,6 +183,41 @@ class EncoderKVExtractor(nn.Module):
         # Fallback
         return 0
                 
+    def _register_clip_mha_hook(self, attn_module, layer_idx):
+        """Hook for CLIP nn.MultiheadAttention with fused in_proj_weight."""
+        def hook_fn(module, input, output):
+            # CLIP attention input: (query, key, value) all same tensor, shape (L, B, D)
+            x = input[0]  # (L, B, D) — sequence-first format
+            L, B, D = x.shape
+
+            # Compute K, V from in_proj_weight [3*D, D] and in_proj_bias [3*D]
+            w = module.in_proj_weight
+            b = module.in_proj_bias
+            # Split into Q, K, V projections
+            w_k, w_v = w[D:2*D], w[2*D:3*D]
+            b_k, b_v = b[D:2*D], b[2*D:3*D]
+
+            k = F.linear(x, w_k, b_k)  # (L, B, D)
+            v = F.linear(x, w_v, b_v)  # (L, B, D)
+
+            num_heads = module.num_heads
+            head_dim = D // num_heads
+
+            # Reshape: (L, B, D) -> (B, L, num_heads, head_dim) -> (B, num_heads, L, head_dim)
+            k = k.permute(1, 0, 2).reshape(B, L, num_heads, head_dim).transpose(1, 2)
+            v = v.permute(1, 0, 2).reshape(B, L, num_heads, head_dim).transpose(1, 2)
+
+            # Remove CLS token (first token)
+            k = k[:, :, 1:, :]
+            v = v[:, :, 1:, :]
+
+            self.captured_kv[layer_idx] = (k.detach(), v.detach())
+            # Store feature in (B, L, D) format
+            self.captured_feat[layer_idx] = x.permute(1, 0, 2).detach()
+
+        hook = attn_module.register_forward_hook(hook_fn)
+        self._hooks.append(hook)
+
     def _register_timm_hook(self, attn_module, layer_idx):
         def hook_fn(module, input, output):
             # DINOv2 Attention: input is (x,) after norm
