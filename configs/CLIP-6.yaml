@@ -15,7 +15,7 @@ proj-kwargs-kernel-size: 1
 # ============================================================================
 # Encoder KV Configuration
 # ============================================================================
-enc-type: dinov2-b
+enc-type: clip-B
 enc-layer-indices: "6"     # Encoder layer for K/V extraction (1-based)
 sit-layer-indices: "4"     # SiT layer for K/V injection (1-based)
 stage1-steps: 30000          # Number of steps for Stage 1
