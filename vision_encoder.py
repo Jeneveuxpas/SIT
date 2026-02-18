@@ -350,23 +350,40 @@ class CLIPEncoder(VisionEncoder):
         import clip
         from models.clip_vit import UpdatedVisionTransformer
         import timm
-        
-        encoder_ = clip.load(f"ViT-{self.model_config}/14", device='cpu')[0].visual
+
+        # model_config format: "B" (defaults to /16 for B, /14 for L)
+        # or "B16", "B32", "L14", "L14@336px" to specify patch size explicitly
+        cfg = self.model_config
+        # Map config to CLIP model name
+        clip_model_map = {
+            'B': 'ViT-B/16',
+            'B16': 'ViT-B/16',
+            'B32': 'ViT-B/32',
+            'L': 'ViT-L/14',
+            'L14': 'ViT-L/14',
+        }
+        clip_model_name = clip_model_map.get(cfg, f"ViT-{cfg}")
+
+        # Extract patch size from model name
+        self.patch_size = int(clip_model_name.split('/')[-1].split('@')[0])
+
+        encoder_ = clip.load(clip_model_name, device='cpu')[0].visual
         self.model = UpdatedVisionTransformer(encoder_).to(self.device)
 
-        patch_resolution = 16 * (self.resolution // 256)
+        patch_resolution = self.resolution // self.patch_size
         self.model.model.positional_embedding.data = timm.layers.pos_embed.resample_abs_pos_embed(
             self.model.model.positional_embedding.data.unsqueeze(0), [patch_resolution, patch_resolution],
         ).squeeze(0)
         self._embed_dim = self.model.model.transformer.width
         self.model.eval()
-        
+
     def preprocess(self, x: torch.Tensor) -> torch.Tensor:
         # Normalize to [0, 1]
         x = x / 255.
-        # Interpolate for CLIP
+        # Interpolate for CLIP: scale based on patch size
         resolution = x.shape[-1]
-        x = torch.nn.functional.interpolate(x, 224 * (resolution // 256), mode='bicubic')
+        target_size = self.patch_size * (resolution // self.patch_size)
+        x = torch.nn.functional.interpolate(x, target_size, mode='bicubic')
         # Apply CLIP normalization
         x = Normalize(CLIP_DEFAULT_MEAN, CLIP_DEFAULT_STD)(x)
         return x
