@@ -394,16 +394,13 @@ def main(args):
     )    
     
     # Setup data
-    if args.repa_loss:
-        try:
-            # We can preprocess ImageNet 256/512 here, and directly load from disk
-            train_dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
-        except Exception as e:
-            print(f"Error loading HFImgLatentDataset: {e}")
-            print("Falling back to ImageFolderLatentDataset")
-            train_dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, resolution=args.resolution, split="train")
-    else:
-        train_dataset = HFLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
+    try:
+        # We can preprocess ImageNet 256/512 here, and directly load from disk
+        train_dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
+    except Exception as e:
+        print(f"Error loading HFImgLatentDataset: {e}")
+        print("Falling back to ImageFolderLatentDataset")
+        train_dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, resolution=args.resolution, split="train")
     print(train_dataset)
 
     local_batch_size = int(args.batch_size // accelerator.num_processes)
