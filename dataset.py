@@ -117,13 +117,24 @@ class HFLatentDataset(Dataset):
     def __init__(self, vae_name, data_dir, split="train"):
         split_str = "val" if split == "val" else ""
         assert vae_name in self.PRECOMPUTED, f"VAE {vae_name} not found in {self.PRECOMPUTED}"
-        assert os.path.exists(os.path.join(data_dir, f"imagenet_{split}_labels.txt")), \
-            "imagenet_train_labels.txt not found, please download from huggingface"
 
         self.latent_dataset = load_from_disk(os.path.join(data_dir, f"imagenet-latents-{vae_name}", split_str))
 
-        with open(os.path.join(data_dir, f"imagenet_{split}_labels.txt"), "r") as f:
-            self.labels = [int(line.strip()) for line in f.readlines()]
+        labels_path = os.path.join(data_dir, f"imagenet_{split}_labels.txt")
+        if os.path.exists(labels_path):
+            with open(labels_path, "r") as f:
+                self.labels = [int(line.strip()) for line in f.readlines()]
+        else:
+            # Fallback: extract labels from imagenet-latents-images dataset
+            print(f"{labels_path} not found, extracting labels from imagenet-latents-images...")
+            img_dataset = load_from_disk(os.path.join(data_dir, "imagenet-latents-images", split_str))
+            self.labels = [item["label"] for item in img_dataset]
+            # Cache for next time
+            with open(labels_path, "w") as f:
+                for label in self.labels:
+                    f.write(f"{label}\n")
+            print(f"Saved {len(self.labels)} labels to {labels_path}")
+            del img_dataset
 
     def __getitem__(self, idx):
         latent = self.latent_dataset[idx]["data"]
