@@ -928,7 +928,7 @@ def parse_args(input_args=None):
     parser.add_argument("--path-type", type=str, default="linear", choices=["linear", "cosine"])
     parser.add_argument("--prediction", type=str, default="v", choices=["v"]) # currently we only support v-prediction
     parser.add_argument("--cfg-prob", type=float, default=0.1)
-    parser.add_argument("--enc-type", type=str, default='dinov2-vit-b')
+    parser.add_argument("--enc-type", type=str, default='dinov2-b')
     parser.add_argument("--proj-coeff", type=str, default="1.0")
     parser.add_argument("--weighting", default="uniform", type=str, help="Max gradient norm.")
     parser.add_argument("--repa-loss", action=argparse.BooleanOptionalAction, default=True)
