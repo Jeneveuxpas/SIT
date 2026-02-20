@@ -5,8 +5,15 @@
 # 
 # 用法:
 #   # 评估指定的 steps
-#   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --steps "50000,100000,150000"
+#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "0800000,0850000,0900000,0950000,1000000,1050000" --gpu 0,1,2,3 --num-gpus 4
 #
+#   # 使用 guidance interval
+#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.65
+#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.7
+#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.8
+#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.65 --cfg-scale 1.65
+#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.65 --cfg-scale 1.7
+#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.65 --cfg-scale 1.8
 #   # 评估所有 checkpoints
 #   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --all
 #
@@ -27,6 +34,8 @@ NUM_FID_SAMPLES="${NUM_FID_SAMPLES:-50000}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-256}"
 EVAL_NUM_STEPS="${EVAL_NUM_STEPS:-250}"
 CFG_SCALE="${CFG_SCALE:-1.0}"
+GUIDANCE_LOW="${GUIDANCE_LOW:-0.0}"
+GUIDANCE_HIGH="${GUIDANCE_HIGH:-1.0}"
 MODE="${MODE:-sde}"
 REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
 
@@ -81,6 +90,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --num-steps)
             EVAL_NUM_STEPS="$2"
+            shift 2
+            ;;
+        --guidance-low)
+            GUIDANCE_LOW="$2"
+            shift 2
+            ;;
+        --guidance-high)
+            GUIDANCE_HIGH="$2"
             shift 2
             ;;
         *)
@@ -157,6 +174,7 @@ echo "================================================"
 echo "批量评估 Checkpoints"
 echo "实验名: ${EXP_NAME}"
 echo "GPU: ${GPU} (${NUM_GPUS} GPUs)"
+echo "Guidance interval: [${GUIDANCE_LOW}, ${GUIDANCE_HIGH}]"
 echo "待评估 checkpoints: ${CKPT_LIST[*]}"
 echo "总计: ${#CKPT_LIST[@]} 个"
 echo "================================================"
@@ -204,10 +222,17 @@ for STEP in "${CKPT_LIST[@]}"; do
         --model ${MODEL} \
         --num-steps ${EVAL_NUM_STEPS} \
         --cfg-scale ${CFG_SCALE} \
+        --guidance-low ${GUIDANCE_LOW} \
+        --guidance-high ${GUIDANCE_HIGH} \
         --sample-dir ${CKPT_DIR}
 
-    # 构建样本文件名
-    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_cfg${CFG_SCALE}-seed0-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
+    # 构建样本文件名（与 generate.py 中的 cfg_intv 逻辑一致）
+    if [ "${GUIDANCE_LOW}" = "0.0" ] && [ "${GUIDANCE_HIGH}" = "1.0" ]; then
+        CFG_INTV=""
+    else
+        CFG_INTV="_${GUIDANCE_LOW}_${GUIDANCE_HIGH}"
+    fi
+    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_cfg${CFG_SCALE}${CFG_INTV}-seed0-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
 
     if [ -f "$SAMPLE_NPZ" ]; then
         echo "计算 FID..."
