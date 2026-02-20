@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # iREPA 统一启动脚本 - 训练 + 评估
-# 
+#
 # 用法: 
 #   ./launch.sh --config configs/default.yaml --exp-name my_exp
 #   ./launch.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --gpu 0,1,2,3 --num-gpus 4
@@ -114,7 +114,7 @@ if [ "$EVAL_ONLY" = "false" ]; then
     fi
 
     # 执行训练
-   eval ${TRAIN_CMD}
+    eval ${TRAIN_CMD}
 
     echo "================================================"
     echo "训练完成！"
