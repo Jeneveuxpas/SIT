@@ -250,72 +250,96 @@ def plot_grid(
     query_labels,
     grid_size,
     save_path,
-    cmap="inferno",
+    cmap="viridis",
 ):
     """
-    Draw an N_queries × (1 + N_methods) grid.
+    Draw an N_queries × (1 + N_methods) grid in paper style.
 
-    Column 0: original image with query marker.
-    Columns 1..N_methods: attention heatmaps for each method.
+    Column 0: original image with red ★ query marker.
+    Columns 1..N_methods: pure attention heatmaps (no image overlay)
+                          with red ★ showing the query position.
+    A shared colorbar is placed on the right.
     """
     method_labels = list(attn_dict.keys())
     n_queries = len(query_indices)
     n_methods = len(method_labels)
     n_cols = 1 + n_methods  # first column is the original image
 
-    fig, axes = plt.subplots(
-        n_queries, n_cols,
-        figsize=(3.2 * n_cols, 3.2 * n_queries),
-        squeeze=False,
+    fig = plt.figure(figsize=(3.0 * n_cols + 0.6, 3.0 * n_queries))
+
+    # Use GridSpec: main grid + thin column for colorbar
+    gs = gridspec.GridSpec(
+        n_queries, n_cols + 1,
+        width_ratios=[1] * n_cols + [0.05],
+        wspace=0.08, hspace=0.12,
     )
 
     img_w, img_h = original_img.size  # PIL: (W, H)
+    all_ims = []  # collect heatmap artists for shared colorbar
 
     for row, (q_idx, q_label) in enumerate(zip(query_indices, query_labels)):
-        # --- Column 0: original image + query marker -----------------------
-        ax = axes[row, 0]
-        ax.imshow(original_img)
-
-        # Map token index to pixel coords
+        # Compute query pixel coords (same for all columns)
         qy_pix = (q_idx // grid_size + 0.5) * (img_h / grid_size)
         qx_pix = (q_idx %  grid_size + 0.5) * (img_w / grid_size)
-        ax.scatter(
-            [qx_pix], [qy_pix],
-            color="red", marker="x", s=120, linewidths=2.5, zorder=5,
+        # Query coords in grid_size space (for heatmap columns)
+        qy_grid = q_idx // grid_size + 0.5
+        qx_grid = q_idx %  grid_size + 0.5
+
+        # --- Column 0: original image + query marker -----------------------
+        ax = fig.add_subplot(gs[row, 0])
+        ax.imshow(original_img)
+        ax.plot(
+            qx_pix, qy_pix,
+            marker="*", color="red", markersize=14,
+            markeredgecolor="darkred", markeredgewidth=0.8,
         )
-        ax.set_ylabel(q_label, fontsize=13, fontweight="bold")
+        ax.set_ylabel(q_label, fontsize=12, fontweight="bold")
         ax.set_xticks([])
         ax.set_yticks([])
         if row == 0:
-            ax.set_title("Input", fontsize=13, fontweight="bold")
+            ax.set_title("Input", fontsize=12, fontweight="bold")
 
-        # --- Columns 1+: attention heatmaps --------------------------------
+        # --- Columns 1+: pure attention heatmaps --------------------------
         for col, label in enumerate(method_labels, start=1):
-            ax = axes[row, col]
+            ax = fig.add_subplot(gs[row, col])
             attn_matrix = attn_dict[label][row]  # (1, heads, N, N)
 
-            # Average over heads → (N,)
+            # Average over heads
             attn_map = attn_matrix[0].mean(dim=0).numpy()  # (N, N)
             query_attn = attn_map[q_idx]                    # (N,)
+
+            # Normalize to [0, 1] for consistent colorbar
+            vmin, vmax = query_attn.min(), query_attn.max()
+            if vmax > vmin:
+                query_attn = (query_attn - vmin) / (vmax - vmin)
+
             heatmap_2d = query_attn.reshape(grid_size, grid_size)
 
-            # Upsample to image resolution
-            heatmap_t = torch.tensor(heatmap_2d).unsqueeze(0).unsqueeze(0).float()
-            heatmap_up = F.interpolate(
-                heatmap_t,
-                size=(img_h, img_w),  # (H, W)
-                mode="bicubic",
-                align_corners=False,
-            ).squeeze().numpy()
+            # Show as pure heatmap (no image overlay)
+            im = ax.imshow(
+                heatmap_2d,
+                cmap=cmap, vmin=0, vmax=1,
+                interpolation="nearest",
+                aspect="equal",
+            )
+            all_ims.append(im)
 
-            ax.imshow(original_img)
-            ax.imshow(heatmap_up, alpha=0.55, cmap=cmap)
+            # Red ★ on the query position
+            ax.plot(
+                qx_grid, qy_grid,
+                marker="*", color="red", markersize=10,
+                markeredgecolor="darkred", markeredgewidth=0.6,
+            )
             ax.set_xticks([])
             ax.set_yticks([])
             if row == 0:
-                ax.set_title(label, fontsize=13, fontweight="bold")
+                ax.set_title(label, fontsize=12, fontweight="bold")
 
-    plt.tight_layout(pad=0.5)
+    # Shared colorbar on the right
+    cbar_ax = fig.add_subplot(gs[:, -1])
+    cbar = fig.colorbar(all_ims[0], cax=cbar_ax)
+    cbar.set_label("Attention Weight", fontsize=10)
+
     plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.05)
     plt.close()
     print(f"Saved attention grid → {save_path}")
@@ -366,7 +390,7 @@ def main():
     parser.add_argument("--resolution", type=int, default=256,
                         choices=[256, 512],
                         help="Image resolution")
-    parser.add_argument("--cmap", type=str, default="inferno",
+    parser.add_argument("--cmap", type=str, default="viridis",
                         help="Matplotlib colormap")
     parser.add_argument("--out", type=str, default="attention_grid.pdf",
                         help="Output file path")
