@@ -8,16 +8,15 @@ time every method uses its own learned K/V).
 
 Usage example (2 queries × 3 methods):
     python visualize_attention.py \
-        --image dog.png \
-        --ckpts "Vanilla:exps/vanilla/checkpoints/0100000.pt" \
-                "REPA:exps/repa/checkpoints/0100000.pt" \
-                "Scaffolding:exps/scaffolding/checkpoints/0100000.pt" \
-        --model SiT-XL/2 \
-        --layer 14 \
-        --queries center 0 \
-        --timestep 0.5 \
-        --resolution 256 \
-        --out attention_grid.pdf
+    --image images/dog.jpg \
+    --ckpts "/workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt" \
+            "/workspace/SIT/exps/kv_coeff-4.0/checkpoints/0100000.pt" \
+    --model SiT-XL/2 \
+    --layer 4 \
+    --queries center top-left \
+    --timestep 0.5 \
+    --out attention_grid.pdf
+
 """
 
 import os
@@ -323,13 +322,21 @@ def plot_grid(
 # ========================== CLI ============================================
 
 def parse_ckpt_arg(s):
-    """Parse 'Label:path' into (label, path)."""
-    if ":" not in s:
-        raise argparse.ArgumentTypeError(
-            f"Expected 'Label:path', got '{s}'"
-        )
-    label, path = s.split(":", 1)
-    return label.strip(), path.strip()
+    """Parse 'Label:path' or plain 'path' into (label, path).
+    If no label is given, infer from the parent experiment directory name.
+    """
+    if ":" in s and not s.startswith("/"):
+        label, path = s.split(":", 1)
+        return label.strip(), path.strip()
+    # No label — auto-extract from path, e.g. ".../exps/vanilla_sit/checkpoints/0100000.pt" → "vanilla_sit"
+    path = s.strip()
+    parts = path.replace("\\", "/").split("/")
+    # Try to find the directory right before "checkpoints"
+    for i, p in enumerate(parts):
+        if p == "checkpoints" and i > 0:
+            return parts[i - 1], path
+    # Fallback: use filename without extension
+    return os.path.splitext(os.path.basename(path))[0], path
 
 
 def main():
