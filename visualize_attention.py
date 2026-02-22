@@ -197,10 +197,12 @@ def extract_attention_map(model, latent, timestep, class_label, layer_idx):
         captured.append(attn.detach().cpu())
 
         x_out = attn @ v
-        x_out = x_out.transpose(1, 2).reshape(B, N, attn_module.attn_dim)
-        x_out = attn_module.norm(x_out)
+        x_out = x_out.transpose(1, 2).reshape(B, N, C)
+        if hasattr(attn_module, 'norm'):
+            x_out = attn_module.norm(x_out)
         x_out = attn_module.proj(x_out)
-        x_out = attn_module.proj_drop(x_out)
+        if hasattr(attn_module, 'proj_drop'):
+            x_out = attn_module.proj_drop(x_out)
         return x_out
 
     attn_module.forward = _patched_forward
