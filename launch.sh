@@ -5,11 +5,12 @@
 # 
 # 用法: 
 #   ./launch.sh --config configs/default.yaml --exp-name my_exp
-#   ./launch.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --gpu 0,1,2,3 --num-gpus 4 --resume 0445000
+#   ./launch.sh --config configs/SIT-XL-50-350.yaml --exp-name SIT-XL-50-350 --gpu 0,1,2,3 --num-gpus 4 --resume-step 0400000
+# ./launch.sh --config configs/SIT-XL-150.yaml --exp-name SIT-XL-150 --gpu 2,3 --num-gpus 2 --resume-step 0150000
 #  ./launch.sh --config configs/10,12-4,6.yaml --exp-name 10,12-4,6 --gpu 2,3 --num-gpus 2 
 #  ./launch.sh --config configs/attn_mse_repa_early_stop.yaml --exp-name attn_mse_repa_early_stop --gpu 0,1,2 --num-gpus 3 --resume-step 400000
 #  ./launch.sh --config configs/kv-stop-300-500k.yaml --exp-name kv-stop-300-500k --gpu 0,1,2,3 --num-gpus 4 --resume-step 300000
-#  ./launch.sh --config configs/SIT-XL-50.yaml --exp-name SIT-XL-50 --gpu 0,1,2,3 --num-gpus 4
+#  ./launch.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0500000
 
 # ============================================================================
 set -e
