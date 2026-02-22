@@ -8,13 +8,13 @@ time every method uses its own learned K/V).
 
 Usage example (2 queries × 3 methods):
     python visualize_attention.py \
-    --image images/dog.jpg \
+    --image images/woman.jpg \
     --ckpts "/workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt" \
             "/workspace/SIT/exps/kv_coeff-4.0/checkpoints/0100000.pt" \
     --model SiT-XL/2 \
     --layer 4 \
-    --queries center top-left \
-    --timestep 0.5 \
+    --queries 6,6 \
+    --timestep 0.4 \
     --out attention_grid.pdf
 
 """
@@ -160,15 +160,21 @@ def load_sit_model(ckpt_path, model_name, device, resolution=256):
     return model
 
 
-# ========================== Attention extraction ===========================
+# ========================== Attention / feature extraction =================
 
-def extract_attention_map(model, latent, timestep, class_label, layer_idx):
+def extract_from_layer(model, latent, timestep, class_label, layer_idx,
+                       viz_mode="feature_sim"):
     """
-    Run a forward pass through the vanilla SiT model and intercept the
-    attention weight matrix at the specified transformer block.
+    Run a forward pass and intercept the target transformer block.
+
+    Args:
+        viz_mode:
+          - "attn_weights": capture softmax(Q @ K^T) → (1, heads, N, N)
+          - "feature_sim":  capture attention output features → (1, N, C)
 
     Returns:
-        attn_weights: Tensor of shape (1, num_heads, N, N)
+        If attn_weights: Tensor (1, heads, N, N)
+        If feature_sim:  Tensor (1, N, C)  — post-attention features
     """
     device = latent.device
     t = torch.tensor([timestep], device=device, dtype=torch.float32)
@@ -177,12 +183,10 @@ def extract_attention_map(model, latent, timestep, class_label, layer_idx):
     target_block = model.blocks[layer_idx]
     attn_module = target_block.attn  # timm Attention
 
-    # Save original forward
     original_forward = attn_module.forward
     captured = []
 
     def _patched_forward(x_in, attn_mask=None):
-        """Re-implement timm Attention.forward to capture the weight matrix."""
         B, N, C = x_in.shape
         qkv = attn_module.qkv(x_in).reshape(
             B, N, 3, attn_module.num_heads, attn_module.head_dim
@@ -190,14 +194,18 @@ def extract_attention_map(model, latent, timestep, class_label, layer_idx):
         q, k, v = qkv.unbind(0)
         q, k = attn_module.q_norm(q), attn_module.k_norm(k)
 
-        # Manual (non-fused) attention so we can capture the matrix
         q = q * attn_module.scale
         attn = q @ k.transpose(-2, -1)          # (B, heads, N, N)
         attn = attn.softmax(dim=-1)
-        captured.append(attn.detach().cpu())
 
-        x_out = attn @ v
+        x_out = attn @ v                         # (B, heads, N, head_dim)
         x_out = x_out.transpose(1, 2).reshape(B, N, C)
+
+        if viz_mode == "attn_weights":
+            captured.append(attn.detach().cpu())
+        else:  # feature_sim
+            captured.append(x_out.detach().cpu())
+
         if hasattr(attn_module, 'norm'):
             x_out = attn_module.norm(x_out)
         x_out = attn_module.proj(x_out)
@@ -213,8 +221,8 @@ def extract_attention_map(model, latent, timestep, class_label, layer_idx):
         attn_module.forward = original_forward
 
     if not captured:
-        raise RuntimeError("Failed to capture attention weights – check layer_idx.")
-    return captured[0]  # (1, heads, N, N)
+        raise RuntimeError("Failed to capture – check layer_idx.")
+    return captured[0]
 
 
 # ========================== Query position helpers =========================
@@ -253,11 +261,12 @@ def resolve_query(query_str, grid_size):
 
 def plot_grid(
     original_img,
-    attn_dict,           # {method_label: [attn_for_q0, attn_for_q1, ...]}
+    attn_dict,           # {method_label: [data_for_q0, data_for_q1, ...]}
     query_indices,
     query_labels,
     grid_size,
     save_path,
+    viz_mode="feature_sim",
     cmap="viridis",
 ):
     """
@@ -312,18 +321,28 @@ def plot_grid(
             ax = fig.add_subplot(gs[row, col])
             attn_matrix = attn_dict[label][row]  # (1, heads, N, N)
 
-            # Average over heads
-            attn_map = attn_matrix[0].mean(dim=0).numpy()  # (N, N)
-            query_attn = attn_map[q_idx]                    # (N,)
+            data = attn_dict[label][row]
 
-            # Normalize to [0, 1] for consistent colorbar
+            if viz_mode == "attn_weights":
+                # data: (1, heads, N, N) → average over heads
+                attn_map = data[0].mean(dim=0).numpy()  # (N, N)
+                query_attn = attn_map[q_idx]             # (N,)
+            else:
+                # data: (1, N, C) → cosine similarity
+                features = data[0]                       # (N, C)
+                query_feat = features[q_idx]              # (C,)
+                # Cosine similarity between query and all tokens
+                query_attn = F.cosine_similarity(
+                    query_feat.unsqueeze(0), features, dim=-1
+                ).numpy()                                # (N,)
+
+            # Normalize to [0, 1]
             vmin, vmax = query_attn.min(), query_attn.max()
             if vmax > vmin:
                 query_attn = (query_attn - vmin) / (vmax - vmin)
 
             heatmap_2d = query_attn.reshape(grid_size, grid_size)
 
-            # Show as pure heatmap (no image overlay)
             im = ax.imshow(
                 heatmap_2d,
                 cmap=cmap, vmin=0, vmax=1,
@@ -346,7 +365,8 @@ def plot_grid(
     # Shared colorbar on the right
     cbar_ax = fig.add_subplot(gs[:, -1])
     cbar = fig.colorbar(all_ims[0], cax=cbar_ax)
-    cbar.set_label("Attention Weight", fontsize=10)
+    cbar_label = "Cosine Similarity" if viz_mode == "feature_sim" else "Attention Weight"
+    cbar.set_label(cbar_label, fontsize=10)
 
     plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.05)
     plt.close()
@@ -387,6 +407,10 @@ def main():
                         help="SiT architecture name")
     parser.add_argument("--layer", type=int, default=14,
                         help="Transformer block index to visualize (0-based)")
+    parser.add_argument("--viz-mode", type=str, default="feature_sim",
+                        choices=["attn_weights", "feature_sim"],
+                        help="attn_weights: raw Q@K attention; "
+                             "feature_sim: cosine similarity of attention output")
     parser.add_argument("--queries", type=str, nargs="+",
                         default=["center", "top-left"],
                         help='Query positions: "center", "top-left", '
@@ -443,14 +467,13 @@ def main():
         print(f"\nLoading [{label}] from {ckpt_path} ...")
         model = load_sit_model(ckpt_path, args.model, device, args.resolution)
 
-        attn_list = []
-        for q_idx in query_indices:
-            attn_matrix = extract_attention_map(
-                model, latent, args.timestep, args.class_label, args.layer,
-            )
-            attn_list.append(attn_matrix)
-
-        attn_dict[label] = attn_list
+        # Only need one forward pass per model (result is same for all queries)
+        data = extract_from_layer(
+            model, latent, args.timestep, args.class_label, args.layer,
+            viz_mode=args.viz_mode,
+        )
+        # Replicate for each query (same data, different query index used in plotting)
+        attn_dict[label] = [data] * len(query_indices)
 
         # Free model memory before loading the next one
         del model
@@ -461,7 +484,8 @@ def main():
     plot_grid(
         original_img, attn_dict,
         query_indices, query_labels,
-        grid_size, args.out, cmap=args.cmap,
+        grid_size, args.out,
+        viz_mode=args.viz_mode, cmap=args.cmap,
     )
 
 
