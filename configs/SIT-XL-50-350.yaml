@@ -40,7 +40,7 @@ proj-coeff: "1.0"
 projection-loss-type: mse_v_norm    # cosine, mse, mse_v, mse_noisy
 spnorm-method: zscore           # none, zscore, zscore_token, layernorm
 zscore-alpha: 0.6
-repa-stop-step: 250000
+repa-stop-step: 350000
 repa-stop-fade-steps: 0
 
 
