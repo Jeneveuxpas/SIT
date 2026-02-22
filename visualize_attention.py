@@ -227,7 +227,8 @@ def resolve_query(query_str, grid_size):
       - "center"          → token at the grid center
       - "top-left"        → token near top-left corner
       - "bottom-right"    → token near bottom-right corner
-      - an integer string → used directly (clamped to valid range)
+      - "row,col"         → grid coordinate, e.g. "8,8" or "4,12"
+      - an integer string → flat token index (clamped to valid range)
     """
     total = grid_size * grid_size
     if query_str == "center":
@@ -236,6 +237,13 @@ def resolve_query(query_str, grid_size):
         return (grid_size // 4) * grid_size + (grid_size // 4)
     elif query_str == "bottom-right":
         return (3 * grid_size // 4) * grid_size + (3 * grid_size // 4)
+    elif "," in query_str:
+        # Grid coordinate format: "row,col"
+        parts = query_str.split(",")
+        r, c = int(parts[0]), int(parts[1])
+        r = min(max(r, 0), grid_size - 1)
+        c = min(max(c, 0), grid_size - 1)
+        return r * grid_size + c
     else:
         idx = int(query_str)
         return min(max(idx, 0), total - 1)
