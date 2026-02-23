@@ -158,6 +158,16 @@ class AttentionWithEncoderKV(nn.Module):
                 attn_sit = self._compute_attn_output(q, k_sit, v_sit)
                 distill_loss = F.mse_loss(attn_sit, attn_enc.detach())
 
+            elif align_mode == 'attn_cosine':
+                attn_enc = self._compute_attn_output(q, k_enc, v_enc)
+                attn_sit = self._compute_attn_output(q, k_sit, v_sit)
+                # (B, heads, N, head_dim) -> flatten last two dims for cosine
+                distill_loss = 1 - F.cosine_similarity(
+                    attn_sit.reshape(attn_sit.shape[0], attn_sit.shape[1], -1),
+                    attn_enc.detach().reshape(attn_enc.shape[0], attn_enc.shape[1], -1),
+                    dim=-1
+                ).mean()
+
             elif align_mode == 'snr_attn_mse':
                 attn_enc = self._compute_attn_output(q, k_enc, v_enc)
                 attn_sit = self._compute_attn_output(q, k_sit, v_sit)

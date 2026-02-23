@@ -517,8 +517,6 @@ class EncoderKVProjection(nn.Module):
         if kv_proj_type == "linear":
             self.proj_k = nn.Linear(enc_dim, sit_dim, bias=False)
             self.proj_v = nn.Linear(enc_dim, sit_dim, bias=False)
-            nn.init.normal_(self.proj_k.weight, std=0.02)
-            nn.init.normal_(self.proj_v.weight, std=0.02)
             
         elif kv_proj_type == "mlp":
             hidden_dim = kv_proj_hidden_dim or max(enc_dim, sit_dim)
