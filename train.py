@@ -862,8 +862,8 @@ def parse_args(input_args=None):
     parser.add_argument("--distill-coeff", type=float, default=1.0,
                         help="Coefficient for distillation loss (0 in Stage 1, this value in Stage 2)")
     parser.add_argument("--align-mode", type=str, default="attn_mse",
-                        choices=["logits", "attn_mse", "snr_attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
-                        help="Alignment mode: logits, attn_mse, snr_attn_mse, attn_kl, kv_mse, attn_hybrid")
+                        choices=["logits", "attn_mse", "attn_cosine", "snr_attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
+                        help="Alignment mode: logits, attn_mse, attn_cosine, snr_attn_mse, attn_kl, kv_mse, attn_hybrid")
     parser.add_argument("--distill-temperature", type=float, default=1.0,
                         help="Temperature for attn_kl mode (<1 sharpens distributions, making alignment harder)")
     parser.add_argument("--attn-loss-weight", type=float, default=1.0,
