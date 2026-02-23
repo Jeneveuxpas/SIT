@@ -161,11 +161,9 @@ class AttentionWithEncoderKV(nn.Module):
             elif align_mode == 'attn_cosine':
                 attn_enc = self._compute_attn_output(q, k_enc, v_enc)
                 attn_sit = self._compute_attn_output(q, k_sit, v_sit)
-                # (B, heads, N, head_dim) -> flatten last two dims for cosine
+                # Per-token cosine: (B, heads, N, head_dim) along head_dim dim
                 distill_loss = 1 - F.cosine_similarity(
-                    attn_sit.reshape(attn_sit.shape[0], attn_sit.shape[1], -1),
-                    attn_enc.detach().reshape(attn_enc.shape[0], attn_enc.shape[1], -1),
-                    dim=-1
+                    attn_sit, attn_enc.detach(), dim=-1
                 ).mean()
 
             elif align_mode == 'snr_attn_mse':
