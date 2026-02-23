@@ -543,10 +543,7 @@ class SiTWithEncoderKV(nn.Module):
             
             if (i + 1) == self.encoder_depth and not self.eval_mode:
                 for projector in self.projectors:
-                    if self.projection_layer_type in ["mlp", "linear"]:
-                        z = projector(x.reshape(-1, D)).reshape(N, T, -1)
-                    else:
-                        z = projector(x)
+                    z = projector(x)
                     zs.append(z)
                     zs_original.append(x.clone())
         
