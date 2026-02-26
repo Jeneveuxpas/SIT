@@ -529,7 +529,10 @@ def main(args):
     # No longer need separate processors - encoders handle their own preprocessing
 
     # define spatial normalization class object
-    
+
+    # Ablation: track whether stage-transition re-init has been done
+    _stage_reinit_done = False
+
     for epoch in range(args.epochs):
 
         model.train()
@@ -547,6 +550,36 @@ def main(args):
             # Auto-stage switching (by step count)
             current_stage = 1 if global_step < args.stage1_steps else 2
             current_align_mode = args.align_mode
+
+            # ── Ablation: re-initialize SiT body at Stage 1→2 transition ──
+            if (current_stage == 2 and not _stage_reinit_done
+                    and getattr(args, 'reinit_sit', False)):
+                _stage_reinit_done = True
+                if accelerator.is_main_process:
+                    logger.info(f"[Ablation] Stage 1→2 transition at step {global_step}: "
+                                "re-initializing SiT body (keeping KV projections)")
+                # Unwrap model for direct parameter access
+                raw_model = safe_unwrap_model(model)
+                # Save kv_proj state dicts before re-init
+                kv_proj_states = {}
+                for i, block in enumerate(raw_model.blocks):
+                    if hasattr(block, 'kv_proj'):
+                        kv_proj_states[i] = {k: v.clone() for k, v in block.kv_proj.state_dict().items()}
+                # Re-initialize the entire model
+                raw_model.initialize_weights()
+                # Restore kv_proj weights
+                for i, block in enumerate(raw_model.blocks):
+                    if i in kv_proj_states and hasattr(block, 'kv_proj'):
+                        block.kv_proj.load_state_dict(kv_proj_states[i])
+                # Reset EMA to match re-initialized model
+                update_ema(ema, raw_model, decay=0)
+                # Reset optimizer state (stale momentum from pre-reinit params)
+                optimizer.zero_grad(set_to_none=True)
+                for state in optimizer.state.values():
+                    state.clear()
+                if accelerator.is_main_process:
+                    logger.info(f"[Ablation] SiT body re-initialized; preserved kv_proj in "
+                                f"{len(kv_proj_states)} blocks; optimizer state & EMA reset")
 
             # Stage-wise termination gates
             # REPA: controls projection loss branch
@@ -953,6 +986,14 @@ def parse_args(input_args=None):
     parser.add_argument("--cls-token-weight", type=float, default=0.2)
     parser.add_argument("--zscore-alpha", type=float, default=0.6)
     parser.add_argument("--zscore-proj-skip-std", action=argparse.BooleanOptionalAction, default=False)
+
+    # Ablation: selective re-initialization after checkpoint loading
+    parser.add_argument("--reinit-sit", action=argparse.BooleanOptionalAction, default=False,
+                        help="Re-initialize SiT body after loading checkpoint (keep KV projections). "
+                             "Use with --resume-step to test Stage 1's contribution to SiT.")
+    parser.add_argument("--reinit-kv-proj", action=argparse.BooleanOptionalAction, default=False,
+                        help="Re-initialize KV projection after loading checkpoint (keep SiT body). "
+                             "Use with --resume-step to test Stage 1's contribution to KV projection.")
 
     # config file (YAML)
     parser.add_argument("--config", type=str, default=None,
