@@ -338,6 +338,7 @@ def main(args):
         kv_proj_kernel_size=args.kv_proj_kernel_size,
         kv_norm_type=args.kv_norm_type,
         kv_zscore_alpha=args.kv_zscore_alpha,
+        kv_replace_mode=args.kv_replace_mode,
         distill_temperature=args.distill_temperature,
         kv_distill_snr_gamma=args.kv_distill_snr_gamma,
         kv_distill_min_weight=args.kv_distill_min_weight,
@@ -377,7 +378,7 @@ def main(args):
     )
     if accelerator.is_main_process:
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
-        logger.info(f"Encoder KV: {len(enc_layer_indices)} layer pairs")
+        logger.info(f"Encoder KV: {len(enc_layer_indices)} layer pairs, replace_mode={args.kv_replace_mode}")
         logger.info(f"Encoder layers: {enc_layer_indices} -> SiT layers: {sit_layer_indices}")
     
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
@@ -923,6 +924,10 @@ def parse_args(input_args=None):
                         help="Normalization type for K/V: zscore=per-spatial, zscore_token=per-token")
     parser.add_argument("--kv-zscore-alpha", type=float, default=1.0, 
                         help="Alpha for z-score normalization: (x - alpha * mean) / std")
+    parser.add_argument("--kv-replace-mode", type=str, default="kv",
+                        choices=["kv", "k", "v", "qkv", "q"],
+                        help="Which attention components to replace from encoder in Stage 1: "
+                             "kv (default), k-only, v-only, qkv (all), q-only")
     # enc-dim and enc-heads are now auto-detected from encoder
     # dataset
     parser.add_argument("--data-dir", type=str, default="../data")
