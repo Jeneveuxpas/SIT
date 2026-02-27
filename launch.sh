@@ -115,7 +115,7 @@ if [ "$EVAL_ONLY" = "false" ]; then
     fi
 
     # 执行训练
-    eval ${TRAIN_CMD}
+#     eval ${TRAIN_CMD}
 
     echo "================================================"
     echo "训练完成！"
