@@ -346,8 +346,19 @@ class EncoderKVExtractor(nn.Module):
             # Recompute qkv
             qkv = module.qkv(x)
             
-            num_heads = module.num_attention_heads
-            head_dim = C // num_heads
+            # Get num_heads (attribute name varies across HF versions)
+            if hasattr(module, 'num_attention_heads'):
+                num_heads = module.num_attention_heads
+            elif hasattr(module, 'num_heads'):
+                num_heads = module.num_heads
+            else:
+                raise RuntimeError(f"Cannot find num_heads in {type(module)}")
+            
+            # Derive head_dim from QKV output, NOT input C.
+            # Hiera stage-transition blocks have qkv: Linear(dim_in, dim_out*3)
+            # where dim_out != dim_in (e.g. 384 -> 768*3=2304)
+            dim_out = qkv.shape[-1] // 3
+            head_dim = dim_out // num_heads
             
             qkv = qkv.reshape(B, N, 3, num_heads, head_dim)
             qkv = qkv.permute(2, 0, 3, 1, 4) # [3, B, heads, N, head_dim]
