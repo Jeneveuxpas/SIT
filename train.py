@@ -928,9 +928,9 @@ def parse_args(input_args=None):
     parser.add_argument("--kv-zscore-alpha", type=float, default=1.0, 
                         help="Alpha for z-score normalization: (x - alpha * mean) / std")
     parser.add_argument("--kv-replace-mode", type=str, default="kv",
-                        choices=["kv", "k", "v", "qkv", "q"],
+                        choices=["kv", "k", "v", "qkv", "qk", "q"],
                         help="Which attention components to replace from encoder in Stage 1: "
-                             "kv (default), k-only, v-only, qkv (all), q-only")
+                             "kv (default), k-only, v-only, qkv (all), qk, q-only")
     # enc-dim and enc-heads are now auto-detected from encoder
     # dataset
     parser.add_argument("--data-dir", type=str, default="../data")
