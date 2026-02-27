@@ -313,7 +313,13 @@ class EncoderKVExtractor(nn.Module):
         self._hooks.append(hook)
 
     def _register_hf_sam2_qkv_hook(self, attn_module, layer_idx):
-        """Hook for SAM2 Hiera Attention with Fused QKV"""
+        """Hook for SAM2 Hiera Attention with Fused QKV.
+        
+        Handles:
+        - Windowed attention (B expanded by num_windows)
+        - Stage-transition blocks (dim_in != dim_out in qkv linear)
+        - Spatial interpolation to target token count
+        """
         def hook_fn(module, args, kwargs, output):
             # Handle input
             if len(args) > 0:
@@ -368,12 +374,82 @@ class EncoderKVExtractor(nn.Module):
             qkv = qkv.permute(2, 0, 3, 1, 4) # [3, B, heads, N, head_dim]
             q, k, v = qkv.unbind(0)
             
+            # Un-window if windowed attention is used
+            # (B will be B_orig * num_windows when windowed)
+            B_orig = getattr(self, '_batch_size', None)
+            if B_orig is not None and B > B_orig:
+                q = self._unwindow_tensor(q, B_orig)
+                k = self._unwindow_tensor(k, B_orig)
+                v = self._unwindow_tensor(v, B_orig)
+            
+            # Spatially interpolate to target token count if needed
+            target = getattr(self, '_target_num_patches', None)
+            if target is not None and q.shape[2] != target:
+                q = self._interpolate_tokens(q, target)
+                k = self._interpolate_tokens(k, target)
+                v = self._interpolate_tokens(v, target)
+            
             self.captured_kv[layer_idx] = (q.detach(), k.detach(), v.detach())
             self.captured_feat[layer_idx] = x.detach()
 
         hook = attn_module.register_forward_hook(hook_fn, with_kwargs=True)
         self._hooks.append(hook)
-            
+    
+    @staticmethod
+    def _unwindow_tensor(tensor: torch.Tensor, B_orig: int) -> torch.Tensor:
+        """
+        Un-window: (B_orig*nH*nW, heads, ws*ws, head_dim) -> (B_orig, heads, Hp*Wp, head_dim)
+        Reconstructs the full padded spatial grid from windowed attention output.
+        """
+        B_win, heads, N_win, head_dim = tensor.shape
+        ws = int(N_win ** 0.5)
+        
+        num_windows = B_win // B_orig
+        # Assume square window grid
+        nH = nW = int(num_windows ** 0.5)
+        if nH * nW != num_windows:
+            # Non-square: try to factor
+            for i in range(int(num_windows ** 0.5), 0, -1):
+                if num_windows % i == 0:
+                    nH, nW = i, num_windows // i
+                    break
+        
+        # (B_orig*nH*nW, heads, ws, ws, head_dim)
+        tensor = tensor.reshape(B_orig, nH, nW, heads, ws, ws, head_dim)
+        # -> (B_orig, heads, nH, ws, nW, ws, head_dim)
+        tensor = tensor.permute(0, 3, 1, 4, 2, 5, 6)
+        # -> (B_orig, heads, Hp, Wp, head_dim)
+        Hp, Wp = nH * ws, nW * ws
+        tensor = tensor.reshape(B_orig, heads, Hp, Wp, head_dim)
+        # -> (B_orig, heads, Hp*Wp, head_dim)
+        tensor = tensor.reshape(B_orig, heads, Hp * Wp, head_dim)
+        return tensor
+    
+    @staticmethod
+    def _interpolate_tokens(tensor: torch.Tensor, target_tokens: int) -> torch.Tensor:
+        """
+        Spatially interpolate tokens: (B, heads, N, head_dim) -> (B, heads, target_tokens, head_dim)
+        Assumes square spatial layout.
+        """
+        B, heads, N, head_dim = tensor.shape
+        H = W = int(N ** 0.5)
+        tH = tW = int(target_tokens ** 0.5)
+        
+        if H * W != N or tH * tW != target_tokens:
+            # Non-square, skip interpolation
+            return tensor
+        
+        if H == tH and W == tW:
+            return tensor
+        
+        # (B, heads, H, W, head_dim) -> (B*heads, head_dim, H, W)
+        tensor = tensor.reshape(B, heads, H, W, head_dim)
+        tensor = tensor.reshape(B * heads, H, W, head_dim).permute(0, 3, 1, 2)
+        # Interpolate
+        tensor = F.interpolate(tensor.float(), size=(tH, tW), mode='bilinear', align_corners=False)
+        # -> (B, heads, tH, tW, head_dim) -> (B, heads, target_tokens, head_dim)
+        tensor = tensor.permute(0, 2, 3, 1).reshape(B, heads, target_tokens, head_dim)
+        return tensor
 
     
     def remove_hooks(self):
@@ -396,6 +472,7 @@ class EncoderKVExtractor(nn.Module):
             cls_token: CLS token (B, enc_dim)
         """
         self.reset_cache()
+        self._batch_size = x.shape[0]  # Store for un-windowing in hooks
         
         # Forward through encoder and get CLS token
         if hasattr(self.encoder_model, "forward_features"):
