@@ -107,13 +107,18 @@ class EncoderKVExtractor(nn.Module):
             # Case E: CLIP -> block.attn is nn.MultiheadAttention with in_proj_weight
             if hasattr(block, "attn") and isinstance(block.attn, nn.MultiheadAttention):
                 self._register_clip_mha_hook(block.attn, idx)
-            # Case C: SAM2 Hiera -> has 'qkv' and 'query_stride' (specific to Hiera/SAM2)
-            elif hasattr(block, "attn") and hasattr(block.attn, "qkv") and hasattr(block.attn, "query_stride"):
-                # print("Selected: SAM2 (qkv) hook")
+            # Case C: SAM2 Hiera -> has 'qkv' AND is a Hiera/SAM2 block
+            # Check query_stride (transition blocks) OR class name (all Hiera blocks)
+            elif hasattr(block, "attn") and hasattr(block.attn, "qkv") and (
+                hasattr(block.attn, "query_stride") or
+                "hiera" in type(block).__name__.lower() or
+                "sam2" in type(block).__name__.lower() or
+                "hiera" in type(block.attn).__name__.lower() or
+                "sam2" in type(block.attn).__name__.lower()
+            ):
                 self._register_hf_sam2_qkv_hook(block.attn, idx)
             # Case A: Timm DINOv2 -> block.attn.qkv
             elif hasattr(block, "attn") and hasattr(block.attn, "qkv"):
-                # print("Selected: Timm hook")
                 self._register_timm_hook(block.attn, idx)
             # Case B: HF DINOv2/ViT -> block.attention.attention.query/key/value
             elif hasattr(block, "attention") and hasattr(block.attention, "attention"):
