@@ -129,7 +129,7 @@ class EncoderKVExtractor(nn.Module):
                 raise NotImplementedError(f"Could not find supported attention block in {type(block)}")
     
     def get_layer_dim(self, idx: int) -> int:
-        """Get the embedding dimension of the specified layer."""
+        """Get the embedding dimension of the specified layer's K/V output."""
         if idx >= len(self.blocks):
             return 0
             
@@ -138,19 +138,23 @@ class EncoderKVExtractor(nn.Module):
         # CLIP nn.MultiheadAttention
         if hasattr(block, "attn") and isinstance(block.attn, nn.MultiheadAttention):
             return block.attn.embed_dim
-        # SAM2 Hiera
-        elif hasattr(block, "attn") and hasattr(block.attn, "dim"):
-            return block.attn.dim
+        # SAM2 Hiera with fused QKV — use OUTPUT dim (qkv.out_features // 3)
+        # because stage-transition blocks have qkv: Linear(dim_in, dim_out*3)
+        elif hasattr(block, "attn") and hasattr(block.attn, "qkv") and hasattr(block.attn, "query_stride"):
+            return block.attn.qkv.out_features // 3
         # Timm DINOv2
         elif hasattr(block, "attn") and hasattr(block.attn, "qkv"):
              if hasattr(block.attn, "dim"):
                  return block.attn.dim
-             elif hasattr(block.attn, "qkv") and hasattr(block.attn.qkv, "in_features"):
+             elif hasattr(block.attn.qkv, "in_features"):
                  return block.attn.qkv.in_features
         # HF ViT/DINOv2
         elif hasattr(block, "attention") and hasattr(block.attention, "attention"):
              # BERT/ViT style: attention.attention.key.in_features
              return block.attention.attention.key.in_features
+        # SAM2 Hiera with separate projections
+        elif hasattr(block, "attn") and hasattr(block.attn, "q_proj"):
+            return block.attn.q_proj.out_features
              
         # Fallback: try to find linear layers in attention
         return 0
