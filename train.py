@@ -627,6 +627,7 @@ def main(args):
                     raw_image_enc = encoders[0].preprocess(raw_image)
                     with accelerator.autocast():
                         encoder_kv_extractor.reset_cache()
+                        encoder_kv_extractor._batch_size = raw_image_enc.shape[0]  # For SAM2 un-windowing
                         features = encoders[0].forward_features(raw_image_enc)
                         z = features['x_norm_patchtokens']
                         zs.append(z)
