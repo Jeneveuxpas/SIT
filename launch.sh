@@ -5,12 +5,13 @@
 #
 # 用法: 
 #   ./launch.sh --config configs/default.yaml --exp-name my_exp
-#   ./launch.sh --config configs/SIT-XL-50-350.yaml --exp-name SIT-XL-50-350 --gpu 0,1,2,3 --num-gpus 4 --resume-step 0400000
+#   ./launch.sh --config configs/SIT-XL-50-350-350.yaml --exp-name SIT-XL-50-350-350 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0500000
 # ./launch.sh --config configs/SIT-XL-150.yaml --exp-name SIT-XL-150 --gpu 2,3 --num-gpus 2 --resume-step 0150000
-#  ./launch.sh --config configs/10,12-4,6.yaml --exp-name 10,12-4,6 --gpu 2,3 --num-gpus 2 
-#  ./launch.sh --config configs/attn_mse_repa_early_stop.yaml --exp-name attn_mse_repa_early_stop --gpu 0,1,2 --num-gpus 3 --resume-step 400000
+#  ./launch.sh --config configs/sam2-s-16.yaml --exp-name sam2-s-16 --gpu 2 --num-gpus 1
+ 
+#  ./launch.sh --config configs/Q_init.yaml --exp-name Q_init --gpu 0 --num-gpus 1 --resume-step 0030000 --reinit-sit
 #  ./launch.sh --config configs/kv-stop-300-500k.yaml --exp-name kv-stop-300-500k --gpu 0,1,2,3 --num-gpus 4 --resume-step 300000
-#  ./launch.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0500000
+#  ./launch.sh --config configs/attn_mse_repa_early_stop_600.yaml --exp-name attn_mse_repa_early_stop_600 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0600000
 
 # ============================================================================
 set -e
@@ -22,6 +23,8 @@ RESUME_STEP="${RESUME_STEP:-0}"  # 恢复训练的步数，0表示从头开始
 EVAL_STEPS="${EVAL_STEPS:-}"  # 评估的 checkpoint steps，逗号分隔，留空则评估最新
 EVAL_ONLY="${EVAL_ONLY:-false}"
 SKIP_EVAL="${SKIP_EVAL:-false}"
+REINIT_SIT="${REINIT_SIT:-false}"
+REINIT_KV_PROJ="${REINIT_KV_PROJ:-false}"
 
 # FID 评估参数
 NUM_FID_SAMPLES="${NUM_FID_SAMPLES:-50000}"
@@ -70,6 +73,14 @@ while [[ $# -gt 0 ]]; do
             RESUME_STEP="$2"
             shift 2
             ;;
+        --reinit-sit)
+            REINIT_SIT="true"
+            shift
+            ;;
+        --reinit-kv-proj)
+            REINIT_KV_PROJ="true"
+            shift
+            ;;
         *)
             echo "未知参数: $1"
             exit 1
@@ -112,6 +123,16 @@ if [ "$EVAL_ONLY" = "false" ]; then
     if [ "$RESUME_STEP" -gt 0 ]; then
         TRAIN_CMD="${TRAIN_CMD} --resume-step ${RESUME_STEP}"
         echo "从 step ${RESUME_STEP} 恢复训练"
+    fi
+
+    # 添加 ablation 参数
+    if [ "$REINIT_SIT" = "true" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --reinit-sit"
+        echo "[Ablation] 进入 Stage 2 时重新初始化 SiT body"
+    fi
+    if [ "$REINIT_KV_PROJ" = "true" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --reinit-kv-proj"
+        echo "[Ablation] 进入 Stage 2 时重新初始化 KV projection"
     fi
 
     # 执行训练
