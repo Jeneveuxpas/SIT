@@ -293,6 +293,8 @@ def main(args):
     if args.use_kv and len(encoders) > 0:
         encoder_kv_extractor = EncoderKVExtractor(encoders[0].model, enc_layer_indices)
         encoder_kv_extractor.eval()
+        # Set target token count for spatial interpolation (SAM2 windowed attention etc.)
+        encoder_kv_extractor._target_num_patches = (latent_size // 2) ** 2  # SiT patches: (32/2)^2 = 256
         
         # Auto-detect enc_dim and enc_heads from the encoder layer
         if len(enc_layer_indices) > 0:
