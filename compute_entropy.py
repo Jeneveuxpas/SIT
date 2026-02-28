@@ -30,13 +30,13 @@ Key improvements over v1
 - Proper ImageNet latent loading matching train.py pipeline
 
 Usage
+"SiT-XL/2:/workspace/SIT/exps/vanilla_sit/checkpoints" \
+              "SiT-XL/2+iREPA:/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints" \
 -----
 # Full comparison across checkpoints, real data
 CUDA_VISIBLE_DEVICES=7 python compute_entropy.py \
-    --methods "SiT-XL/2:/workspace/SIT/exps/vanilla_sit/checkpoints" \
-              "SiT-XL/2+iREPA:/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints" \
-              "SiT-XL/2+Ours:/workspace/SIT/exps/conv_3_kv_2.0/checkpoints" \
-    --stage1-steps 100000 \
+    --methods "SiT-XL/2+Ours:/workspace/SIT/exps/conv_3_kv_2.0/checkpoints" \
+    --stage1-steps 30000 \
     --stage1-methods "SiT-XL/2+Ours" \
     --enc-type dinov2-b \
     --sit-scaffold-layer 4 \
@@ -369,6 +369,93 @@ def compute_entropy_for_model(
         # One forward pass → all layers
         attn_dict = extract_attn_weights_all_layers(model, x_t, t, y, layer_indices)
 
+        for li in layer_indices:
+            mean_ent, head_std, _ = compute_entropy_stats(attn_dict[li])
+            acc_ent[li] += mean_ent * bs
+            acc_std[li] += head_std * bs
+
+    return {li: (acc_ent[li] / n, acc_std[li] / n) for li in layer_indices}
+
+
+def extract_attn_weights_all_layers_encoder_kv(
+    model_enc, x_latent: torch.Tensor,
+    t: torch.Tensor, y: torch.Tensor,
+    layer_indices: list[int],
+) -> dict[int, torch.Tensor]:
+    """
+    Extract attention maps for SiTWithEncoderKV in native-KV mode
+    (no encoder KV replacement). All requested layers in one forward pass.
+    """
+    captured: dict[int, torch.Tensor] = {}
+    originals = {}
+
+    for li in layer_indices:
+        attn_mod = model_enc.blocks[li].attn
+        originals[li] = attn_mod.forward
+
+        def _make_hook(attn_module, layer_id):
+            def _hook(x_in, q_enc=None, k_enc=None, v_enc=None,
+                      stage=2, align_mode="attn_mse",
+                      time_input=None, path_type="linear",
+                      kv_replace_mode="kv"):
+                B, N, C = x_in.shape
+                qkv = attn_module.qkv(x_in).reshape(
+                    B, N, 3, attn_module.num_heads, attn_module.head_dim
+                ).permute(2, 0, 3, 1, 4)
+                q_sit, k_sit, v_sit = qkv.unbind(0)
+                q_sit = attn_module.q_norm(q_sit)
+                k_sit = attn_module.k_norm(k_sit)
+
+                attn = ((q_sit * attn_module.scale) @ k_sit.transpose(-2, -1)).softmax(-1)
+                captured[layer_id] = attn.detach()
+
+                x_out = (attn @ v_sit).transpose(1, 2).reshape(B, N, C)
+                x_out = attn_module.proj(x_out)
+                return x_out, None
+            return _hook
+
+        attn_mod.forward = _make_hook(attn_mod, li)
+
+    try:
+        with torch.no_grad():
+            model_enc(x_latent, t, y)
+    finally:
+        for li in layer_indices:
+            model_enc.blocks[li].attn.forward = originals[li]
+
+    return captured
+
+
+def compute_entropy_for_model_encoder_kv(
+    model_enc,
+    layer_indices: list[int],
+    all_x: torch.Tensor,
+    all_y: torch.Tensor,
+    timestep: float,
+    path_type: str = "linear",
+    batch_size: int = 32,
+) -> dict[int, tuple[float, float]]:
+    """
+    Compute entropy for SiTWithEncoderKV checkpoints in native-KV mode.
+    """
+    device = next(model_enc.parameters()).device
+    n = all_x.shape[0]
+    n_batches = math.ceil(n / batch_size)
+    acc_ent = {li: 0.0 for li in layer_indices}
+    acc_std = {li: 0.0 for li in layer_indices}
+
+    for b in range(n_batches):
+        start = b * batch_size
+        end = min(start + batch_size, n)
+        x0 = all_x[start:end].to(device)
+        y = all_y[start:end].to(device)
+        bs = x0.shape[0]
+        t = torch.full((bs,), timestep, device=device, dtype=torch.float32)
+        x_t = make_noisy_model_input(x0, t, path_type=path_type)
+
+        attn_dict = extract_attn_weights_all_layers_encoder_kv(
+            model_enc, x_t, t, y, layer_indices
+        )
         for li in layer_indices:
             mean_ent, head_std, _ = compute_entropy_stats(attn_dict[li])
             acc_ent[li] += mean_ent * bs
@@ -1030,7 +1117,9 @@ def main():
             stage_tag = "S1(DINO-KV)" if is_stage1 else "S2(native-KV)"
             print(f"  Step {step:>7d} [{stage_tag}]: {os.path.basename(fpath)} ...")
 
-            if is_stage1:
+            # For methods trained with EncoderKV, keep the same architecture in S2
+            # and only switch measurement mode (Stage1 replace-KV vs Stage2 native-KV).
+            if is_stage1 or method_uses_stage1:
                 model = load_model_enc_kv(fpath, device, args.resolution)
             else:
                 model = load_model_from_ckpt(fpath, args.model, device,
@@ -1043,6 +1132,12 @@ def main():
                         enc_scaffold_idx, sit_scaffold_idx,
                         all_img, all_x, all_y,
                         timestep=ts, layer_indices=layer_indices,
+                        path_type=args.path_type,
+                        batch_size=args.batch_size,
+                    )
+                elif method_uses_stage1:
+                    results = compute_entropy_for_model_encoder_kv(
+                        model, layer_indices, all_x, all_y, timestep=ts,
                         path_type=args.path_type,
                         batch_size=args.batch_size,
                     )
