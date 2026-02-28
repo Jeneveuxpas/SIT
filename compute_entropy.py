@@ -32,11 +32,11 @@ Key improvements over v1
 Usage
 -----
 # Full comparison across checkpoints, real data
-python compute_entropy.py \
-    --methods "SiT-XL/2:/path/to/vanilla/ckpts" \
-              "SiT-XL/2+iREPA:/path/to/irepa/ckpts" \
-              "SiT-XL/2+Ours:/path/to/ours/ckpts" \
-    --stage1-steps 30000 \
+CUDA_VISIBLE_DEVICES=7 python compute_entropy.py \
+    --methods "SiT-XL/2:/workspace/SIT/exps/vanilla_sit/checkpoints" \
+              "SiT-XL/2+iREPA:/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints" \
+              "SiT-XL/2+Ours:/workspace/SIT/exps/conv_3_kv_2.0/checkpoints" \
+    --stage1-steps 100000 \
     --stage1-methods "SiT-XL/2+Ours" \
     --enc-type dinov2-b \
     --sit-scaffold-layer 4 \
@@ -46,7 +46,10 @@ python compute_entropy.py \
     --timesteps 0.1,0.5,0.8 \
     --n-samples 1000 \
     --data-dir /dev/shm/data/ \
+    --steps 10000,20000,30000,40000,50000,60000,70000,80000,90000,100000 \
+    --save-csv \
     --out entropy_over_training.pdf
+
 
 # Quick sanity check (random init only, random latents)
 python compute_entropy.py \
@@ -210,6 +213,31 @@ def make_random_latents(n_samples: int, device: torch.device,
     return x, y
 
 
+def make_noisy_model_input(
+    x0: torch.Tensor,
+    t: torch.Tensor,
+    path_type: str = "linear",
+) -> torch.Tensor:
+    """
+    Match training-time model input construction:
+      x_t = alpha(t) * x0 + sigma(t) * noise
+    """
+    if t.ndim == 1:
+        t = t.view(-1, 1, 1, 1)
+    noise = torch.randn_like(x0)
+
+    if path_type == "linear":
+        alpha_t = 1 - t
+        sigma_t = t
+    elif path_type == "cosine":
+        alpha_t = torch.cos(t * math.pi / 2)
+        sigma_t = torch.sin(t * math.pi / 2)
+    else:
+        raise ValueError(f"Unsupported path_type: {path_type}")
+
+    return alpha_t * x0 + sigma_t * noise
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Entropy computation  —  ALL layers in ONE forward pass
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -312,6 +340,7 @@ def compute_entropy_for_model(
     all_x: torch.Tensor,
     all_y: torch.Tensor,
     timestep: float,
+    path_type: str = "linear",
     batch_size: int = 32,
 ) -> dict[int, tuple[float, float]]:
     """
@@ -335,9 +364,10 @@ def compute_entropy_for_model(
         y = all_y[start:end].to(device)
         bs = x.shape[0]
         t = torch.full((bs,), timestep, device=device, dtype=torch.float32)
+        x_t = make_noisy_model_input(x, t, path_type=path_type)
 
         # One forward pass → all layers
-        attn_dict = extract_attn_weights_all_layers(model, x, t, y, layer_indices)
+        attn_dict = extract_attn_weights_all_layers(model, x_t, t, y, layer_indices)
 
         for li in layer_indices:
             mean_ent, head_std, _ = compute_entropy_stats(attn_dict[li])
@@ -476,6 +506,7 @@ def extract_attn_stage1(
     all_y:   torch.Tensor,# (N,) labels
     timestep: float,
     layer_indices: list,
+    path_type: str = "linear",
     batch_size: int = 32,
 ) -> dict:
     """
@@ -492,14 +523,19 @@ def extract_attn_stage1(
     acc_std = {li: 0.0 for li in layer_indices}
 
     scaffold_block = model_enc.blocks[scaffold_sit_idx]
+    kv_replace_mode = getattr(model_enc, "kv_replace_mode", "kv")
+    replace_q = kv_replace_mode in ("qkv", "qk", "q")
+    replace_k = kv_replace_mode in ("kv", "k", "qkv", "qk")
+    replace_v = kv_replace_mode in ("kv", "v", "qkv")
 
     for b_start in range(0, n, batch_size):
         b_end = min(b_start + batch_size, n)
         img = all_img[b_start:b_end].to(device)   # uint8
-        x   = all_x  [b_start:b_end].to(device)
+        x0  = all_x  [b_start:b_end].to(device)
         y   = all_y  [b_start:b_end].to(device)
-        bs  = x.shape[0]
+        bs  = x0.shape[0]
         t   = torch.full((bs,), timestep, device=device, dtype=torch.float32)
+        x_t = make_noisy_model_input(x0, t, path_type=path_type)
 
         # 1. Run DINO to get raw KV from the hooked encoder layer
         img_enc = encoder.preprocess(img)
@@ -508,59 +544,72 @@ def extract_attn_stage1(
         q_raw, k_raw, v_raw = enc_extractor.captured_kv[enc_layer_idx]
 
         # 2. Project DINO KV into SiT head space via kv_proj
-        _q_proj, k_proj, v_proj = scaffold_block.kv_proj(
+        q_proj, k_proj, v_proj = scaffold_block.kv_proj(
             q_enc=q_raw, k_enc=k_raw, v_enc=v_raw, stage=1
         )
-        # k_proj, v_proj: (B, sit_heads, N_enc, sit_head_dim)
+        # q_proj / k_proj / v_proj: (B, sit_heads, N_enc, sit_head_dim)
 
         # 3. Hook all target attention modules
         captured  = {}
         originals = {}
+        # Even when scaffold layer is not measured, it still must be replaced.
+        hook_layers = sorted(set(layer_indices) | {scaffold_sit_idx})
 
-        for li in layer_indices:
-            attn_mod      = model_enc.blocks[li].attn
+        for li in hook_layers:
+            attn_mod = model_enc.blocks[li].attn
             originals[li] = attn_mod.forward
 
-            def _make_hook(layer_id, _k=None, _v=None):
+            def _make_hook(attn_module, layer_id, capture_layer, _q=None, _k=None, _v=None):
                 # AttentionWithEncoderKV.forward returns (x_out, distill_loss)
                 def _hook(x_in, q_enc=None, k_enc=None, v_enc=None,
                           stage=2, align_mode="attn_mse",
                           time_input=None, path_type="linear",
                           kv_replace_mode="kv"):
                     B, N, C = x_in.shape
-                    qkv = attn_mod.qkv(x_in).reshape(
-                        B, N, 3, attn_mod.num_heads, attn_mod.head_dim
+                    qkv = attn_module.qkv(x_in).reshape(
+                        B, N, 3, attn_module.num_heads, attn_module.head_dim
                     ).permute(2, 0, 3, 1, 4)
                     q_sit, k_sit, v_sit = qkv.unbind(0)
-                    q_sit = attn_mod.q_norm(q_sit)
-                    k_sit = attn_mod.k_norm(k_sit)
+                    q_sit = attn_module.q_norm(q_sit)
+                    k_sit = attn_module.k_norm(k_sit)
 
+                    q = _q if _q is not None else q_sit
                     k = _k if _k is not None else k_sit
                     v = _v if _v is not None else v_sit
 
-                    attn = (q_sit * attn_mod.scale @ k.transpose(-2, -1)).softmax(-1)
-                    captured[layer_id] = attn.detach()
+                    attn = ((q * attn_module.scale) @ k.transpose(-2, -1)).softmax(-1)
+                    if capture_layer:
+                        captured[layer_id] = attn.detach()
                     x_out = (attn @ v).transpose(1, 2).reshape(B, N, C)
-                    x_out = attn_mod.proj(x_out)
+                    x_out = attn_module.proj(x_out)
                     return x_out, None   # mimic (output, distill_loss)
                 return _hook
 
             is_scaffold = (li == scaffold_sit_idx)
             attn_mod.forward = _make_hook(
+                attn_mod,
                 li,
-                _k=k_proj if is_scaffold else None,
-                _v=v_proj if is_scaffold else None,
+                capture_layer=(li in layer_indices),
+                _q=q_proj if (is_scaffold and replace_q) else None,
+                _k=k_proj if (is_scaffold and replace_k) else None,
+                _v=v_proj if (is_scaffold and replace_v) else None,
             )
 
         # 4. Single forward pass – enc_kv_list=None, so block skips kv_proj internally
         try:
             with torch.no_grad():
-                model_enc(x, t, y)
+                model_enc(x_t, t, y)
         finally:
-            for li in layer_indices:
+            for li in hook_layers:
                 model_enc.blocks[li].attn.forward = originals[li]
 
         for li in layer_indices:
+            if li not in captured:
+                raise RuntimeError(
+                    f"Failed to capture attention at layer {li + 1}. "
+                    f"Measured layers={[(x + 1) for x in layer_indices]}, "
+                    f"scaffold layer={scaffold_sit_idx + 1}."
+                )
             mean_ent, head_std, _ = compute_entropy_stats(captured[li])
             acc_ent[li] += mean_ent * bs
             acc_std[li] += head_std * bs
@@ -610,11 +659,9 @@ def discover_checkpoints(path: str, max_step: int | None = None,
 
 # Publication-friendly palette
 METHOD_STYLES = {
-    "Vanilla":     {"color": "#8B8B8B", "marker": "o", "linestyle": "-"},
-    "iREPA":       {"color": "#4C9BE8", "marker": "s", "linestyle": "--"},
-    "REPA":        {"color": "#4C9BE8", "marker": "s", "linestyle": "--"},
-    "Ours":        {"color": "#E8524C", "marker": "D", "linestyle": "-"},
-    "Scaffolding": {"color": "#E8524C", "marker": "D", "linestyle": "-"},
+    "SiT-XL/2":     {"color": "#8B8B8B", "marker": "o", "linestyle": "-"},
+    "SiT-XL/2+iREPA":       {"color": "#4C9BE8", "marker": "s", "linestyle": "--"},
+    "SiT-XL/2+Ours":        {"color": "#4C9BE8", "marker": "s", "linestyle": "--"},
 }
 DEFAULT_STYLE = {"color": "#6A6A6A", "marker": "^", "linestyle": "-."}
 
@@ -837,6 +884,9 @@ def main():
                              "If not set, uses random Gaussian latents.")
     parser.add_argument("--resolution", type=int, default=256,
                         choices=[256, 512])
+    parser.add_argument("--path-type", type=str, default="linear",
+                        choices=["linear", "cosine"],
+                        help="Noise path for x_t construction: x_t=alpha(t)*x0+sigma(t)*eps")
     parser.add_argument("--out", type=str, default="entropy_over_training.pdf")
     parser.add_argument("--out-heatmap", type=str, default=None,
                         help="Output path for layer×timestep heatmap (default: auto)")
@@ -885,7 +935,7 @@ def main():
     target_steps = ([int(s) for s in args.steps.split(",")]
                     if args.steps else None)
     # Methods that use Stage-1 DINO-KV measurement (None = all methods)
-    stage1_method_set = (set(args.stage1_methods.split(","))
+    stage1_method_set = ({m.strip() for m in args.stage1_methods.split(",") if m.strip()}
                          if args.stage1_methods else None)
 
     print(f"Tokens N = {n_tokens}")
@@ -903,6 +953,8 @@ def main():
     enc_scaffold_idx = args.enc_scaffold_layer - 1   # 0-based
 
     if use_stage1:
+        if args.data_dir is None:
+            raise ValueError("Stage-1 mode requires real data: please set --data-dir.")
         print(f"\nStage-1 mode enabled: steps ≤ {args.stage1_steps} use DINO KV "
               f"(enc={args.enc_type}, enc_layer={args.enc_scaffold_layer}, "
               f"sit_layer={args.sit_scaffold_layer})")
@@ -939,6 +991,7 @@ def main():
     for ts in timesteps:
         results = compute_entropy_for_model(
             fresh, layer_indices, all_x, all_y, timestep=ts,
+            path_type=args.path_type,
             batch_size=args.batch_size,
         )
         for li, (ent, hstd) in results.items():
@@ -990,11 +1043,13 @@ def main():
                         enc_scaffold_idx, sit_scaffold_idx,
                         all_img, all_x, all_y,
                         timestep=ts, layer_indices=layer_indices,
+                        path_type=args.path_type,
                         batch_size=args.batch_size,
                     )
                 else:
                     results = compute_entropy_for_model(
                         model, layer_indices, all_x, all_y, timestep=ts,
+                        path_type=args.path_type,
                         batch_size=args.batch_size,
                     )
                 for li, (ent, hstd) in results.items():
