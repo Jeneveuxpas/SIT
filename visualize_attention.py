@@ -315,9 +315,31 @@ def plot_grid(
     n_methods = len(method_labels)
     n_cols = 1 + n_methods  # first column is the original image
 
+    # --- Pre-compute all heatmaps to find global vmin/vmax ----------------
+    all_heatmaps = {}  # (label, row) → 2D numpy array
+    for row, q_idx in enumerate(query_indices):
+        for label in method_labels:
+            data = attn_dict[label][row]
+            if viz_mode == "attn_weights":
+                attn_map = data[0].mean(dim=0).numpy()  # (N, N)
+                query_attn = attn_map[q_idx]
+            else:
+                features = data[0]
+                query_feat = features[q_idx]
+                query_attn = F.cosine_similarity(
+                    query_feat.unsqueeze(0), features, dim=-1
+                ).numpy()
+            all_heatmaps[(label, row)] = query_attn.reshape(grid_size, grid_size)
+
+    # Global vmin/vmax across ALL methods and queries (1%–99% percentile)
+    all_vals = np.concatenate([h.ravel() for h in all_heatmaps.values()])
+    global_vmin = np.percentile(all_vals, 1)
+    global_vmax = np.percentile(all_vals, 99)
+    print(f"Global color range: [{global_vmin:.4f}, {global_vmax:.4f}]")
+
+    # --- Plot -------------------------------------------------------------
     fig = plt.figure(figsize=(3.0 * n_cols + 0.6, 3.0 * n_queries))
 
-    # Use GridSpec: main grid + thin column for colorbar
     gs = gridspec.GridSpec(
         n_queries, n_cols + 1,
         width_ratios=[1] * n_cols + [0.05],
@@ -325,13 +347,11 @@ def plot_grid(
     )
 
     img_w, img_h = original_img.size  # PIL: (W, H)
-    all_ims = []  # collect heatmap artists for shared colorbar
+    all_ims = []
 
     for row, (q_idx, q_label) in enumerate(zip(query_indices, query_labels)):
-        # Compute query pixel coords (same for all columns)
         qy_pix = (q_idx // grid_size + 0.5) * (img_h / grid_size)
         qx_pix = (q_idx %  grid_size + 0.5) * (img_w / grid_size)
-        # Query coords in grid_size space (for heatmap columns)
         qy_grid = q_idx // grid_size + 0.5
         qx_grid = q_idx %  grid_size + 0.5
 
@@ -349,42 +369,18 @@ def plot_grid(
         if row == 0:
             ax.set_title("Input", fontsize=12, fontweight="bold")
 
-        # --- Columns 1+: pure attention heatmaps --------------------------
+        # --- Columns 1+: heatmaps with shared global color range ----------
         for col, label in enumerate(method_labels, start=1):
             ax = fig.add_subplot(gs[row, col])
-            data = attn_dict[label][row]
+            heatmap_2d = all_heatmaps[(label, row)]
 
-            if viz_mode == "attn_weights":
-                # data: (1, heads, N, N) → average over heads
-                attn_map = data[0].mean(dim=0).numpy()  # (N, N)
-                query_attn = attn_map[q_idx]             # (N,)
-            else:
-                # attn_output or feature_sim: (1, N, C) → cosine similarity
-                features = data[0]                       # (N, C)
-                query_feat = features[q_idx]              # (C,)
-                query_attn = F.cosine_similarity(
-                    query_feat.unsqueeze(0), features, dim=-1
-                ).numpy()                                # (N,)
-
-            heatmap_2d = query_attn.reshape(grid_size, grid_size)
-
-            # No per-plot min-max normalization — fixed mapping for fair comparison
-            if viz_mode == "attn_weights":
-                # Attention weights are non-negative, use raw values
-                im = ax.imshow(
-                    heatmap_2d, cmap=cmap,
-                    interpolation="nearest", aspect="equal",
-                )
-            else:
-                # Cosine similarity: (s+1)/2 maps [-1,1] → [0,1]
-                heatmap_2d = (heatmap_2d + 1.0) / 2.0
-                im = ax.imshow(
-                    heatmap_2d, cmap=cmap, vmin=0, vmax=1,
-                    interpolation="nearest", aspect="equal",
-                )
+            im = ax.imshow(
+                heatmap_2d, cmap=cmap,
+                vmin=global_vmin, vmax=global_vmax,
+                interpolation="nearest", aspect="equal",
+            )
             all_ims.append(im)
 
-            # Red ★ on the query position
             ax.plot(
                 qx_grid, qy_grid,
                 marker="*", color="red", markersize=10,
