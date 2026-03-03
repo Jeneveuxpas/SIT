@@ -5,16 +5,16 @@ Generates a publication-quality grid comparing attention heatmaps across
 different training methods (e.g., Vanilla / REPA / Scaffolding) and query
 positions.  All checkpoints are loaded as vanilla SiT (since at inference
 time every method uses its own learned K/V).
-
+"/workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt" \
 Usage example (2 queries × 3 methods):
-    python visualize_attention.py \
-    --image images/woman.jpg \
-    --ckpts "/workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt" \
-            "/workspace/SIT/exps/kv_coeff-4.0/checkpoints/0100000.pt" \
+    CUDA_VISIBLE_DEVICES=7 python visualize_attention.py \
+    --image images/dog1.jpg \
+    --ckpts "/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
+            "/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
     --model SiT-XL/2 \
     --layer 4 \
-    --queries 6,6 \
-    --timestep 0.4 \
+    --queries all \
+    --timestep 0.5 \
     --out attention_grid.pdf
 
 """
@@ -452,14 +452,18 @@ def main():
     grid_size = latent_h // patch_size  # e.g. 32 // 2 = 16
     total_tokens = grid_size * grid_size
 
-    query_indices = [resolve_query(q, grid_size) for q in args.queries]
+    if "all" in args.queries:
+        query_indices = list(range(total_tokens))
+    else:
+        query_indices = [resolve_query(q, grid_size) for q in args.queries]
+        
     query_labels = []
-    for q_str, q_idx in zip(args.queries, query_indices):
+    for q_idx in query_indices:
         r, c = q_idx // grid_size, q_idx % grid_size
         query_labels.append(f"Query ({r},{c})")
 
     print(f"Grid: {grid_size}×{grid_size} = {total_tokens} tokens")
-    print(f"Queries: {list(zip(args.queries, query_indices))}")
+    print(f"Number of Queries: {len(query_indices)}")
 
     # --- Load each checkpoint and extract attention -----------------------
     attn_dict = {}  # label → [attn_for_q0, attn_for_q1, ...]
