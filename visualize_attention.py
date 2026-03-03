@@ -286,7 +286,7 @@ def load_dit_checkpoint(ckpt_path: str, device: str) -> torch.nn.Module:
     加载 SiT_XL_2 checkpoint，eval_mode=True 跳过 projector 创建。
     """
     model = SiT_XL_2(eval_mode=True, qk_norm=False).to(device)
-    state = torch.load(ckpt_path, map_location=device)
+    state = torch.load(ckpt_path, map_location=device, weights_only=False)
     # 兼容 "model" / "ema" / 裸 state_dict 三种格式
     if "model" in state:
         state = state["model"]
