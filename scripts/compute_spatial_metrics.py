@@ -6,9 +6,9 @@ This script evaluates how well SiT's internal representations preserve spatial s
 by computing metrics on activations from intermediate layers at various timesteps.
 
 Usage:
-    python scripts/compute_spatial_metrics.py \
-        --checkpoint exps/my_exp/checkpoints/0100000.pt \
-        --data-dir ../data \
+    CUDA_VISIBLE_DEVICES=7 python scripts/compute_spatial_metrics.py \
+        --checkpoint /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt \
+        --data-dir dev/shm/data \
         --num-samples 256 \
         --device cuda
 """
@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from models.sit import SiT_models
 from models.sit_encoder import SiT_EncoderKV_models
 from models.autoencoder import VAE_F8D4
-from dataset import HFImgLatentDataset, HFLatentDataset, ImageFolderLatentDataset
+from dataset import HFImgLatentDataset, ImageFolderLatentDataset
 
 
 #################################################################################
@@ -414,10 +414,14 @@ def main():
     # Data
     parser.add_argument('--data-dir', type=str, default='../data',
                         help='Path to data directory')
+    parser.add_argument('--resolution', type=int, choices=[256, 512], default=256,
+                        help='Image resolution for ImageFolder fallback dataset')
     parser.add_argument('--num-samples', type=int, default=256,
                         help='Number of samples to evaluate')
     parser.add_argument('--batch-size', type=int, default=64,
                         help='Batch size for data loading')
+    parser.add_argument('--num-workers', type=int, default=12,
+                        help='Number of DataLoader workers')
     
     # Evaluation settings
     parser.add_argument('--timesteps', type=str, default='0.1,0.5,0.9',
@@ -449,18 +453,21 @@ def main():
     
     # Load dataset
     try:
-        dataset = HFLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
-    except Exception:
+        dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
+    except Exception as e:
+        print(f"Error loading HFImgLatentDataset: {e}")
         print("Falling back to ImageFolderLatentDataset")
         dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, 
-                                            resolution=256, split="train")
+                                            resolution=args.resolution, split="train")
+    print(dataset)
     
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=args.num_workers,
         pin_memory=True,
+        drop_last=True,
     )
     
     print(f"\nEvaluating model: {model_name}")
