@@ -123,6 +123,7 @@ def get_dit_attention(
     timestep: float = 0.05,      # 低噪声，spatial 结构最清晰
     class_label: int = 0,
     block_idx: int = 8,          # 中间偏前的 block
+    anchor: int = -1,            # anchor patch 索引，-1 表示中心点
     device: str = "cuda",
 ) -> np.ndarray:
     """
@@ -166,9 +167,9 @@ def get_dit_attention(
     attn = attn[0]                 # (num_heads, N, N)
 
     # DiT 没有 CLS token，N = (latent_size / patch_size)^2
-    # 取 anchor patch（中心点）attend to 所有 patch
     N = attn.shape[-1]
-    anchor = N // 2
+    if anchor < 0 or anchor >= N:
+        anchor = N // 2
 
     anchor_attn = attn[:, anchor, :]   # (num_heads, N)
 
@@ -293,6 +294,7 @@ def main():
     parser.add_argument("--dit_ours",    required=True,  help="Ours checkpoint")
     parser.add_argument("--output",      default="attention_comparison.pdf")
     parser.add_argument("--block_idx",   type=int, default=8,  help="DiT block index")
+    parser.add_argument("--anchor",      type=int, default=-1, help="anchor patch 索引 (0~255)，-1 为中心点")
     parser.add_argument("--timestep",    type=float, default=0.05)
     parser.add_argument("--class_label", type=int, default=0)
     parser.add_argument("--img_size",    type=int, default=256, help="输入图像尺寸 (VAE 输入)")
@@ -337,6 +339,7 @@ def main():
         timestep=args.timestep,
         class_label=args.class_label,
         block_idx=args.block_idx,
+        anchor=args.anchor,
         device=device,
     )
     attn_vanilla = get_dit_attention(dit_vanilla, z_latent, **common_kwargs)
