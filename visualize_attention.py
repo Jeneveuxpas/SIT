@@ -8,13 +8,15 @@ time every method uses its own learned K/V).
 
 Usage example (2 queries × 3 methods):
     CUDA_VISIBLE_DEVICES=7 python visualize_attention.py \
-    --image images/dog.jpg \
+    --image images/bird.jpg \
     --ckpts "/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
             "/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
     --model SiT-XL/2 \
-    --queries 6,6 8,6 8,8 6,8 \
+    --query-region "4,4:8,8" \
+    --viz-mode attn_output \
+    --layer 4 \
     --timestep 0.1 \
-    --out attention_grid.pdf
+    --out bird.pdf
 
 """
 
@@ -442,6 +444,10 @@ def main():
                         default=["center", "top-left"],
                         help='Query positions: "center", "top-left", '
                              '"bottom-right", or integer token index')
+    parser.add_argument("--query-region", type=str, default=None,
+                        help='Region of queries: "r1,c1:r2,c2" expands to all '
+                             'grid positions in [r1..r2, c1..c2]. '
+                             'Overrides --queries. E.g. "4,4:8,8"')
     parser.add_argument("--timestep", type=float, default=0.5,
                         help="Diffusion timestep t ∈ [0,1], 0=clean, 1=noise")
     parser.add_argument("--class-label", type=int, default=0,
@@ -478,6 +484,16 @@ def main():
     patch_size = 2  # SiT default
     grid_size = latent_h // patch_size  # e.g. 32 // 2 = 16
     total_tokens = grid_size * grid_size
+
+    # Expand --query-region "r1,c1:r2,c2" into individual queries
+    if args.query_region is not None:
+        tl, br = args.query_region.split(":")
+        r1, c1 = int(tl.split(",")[0]), int(tl.split(",")[1])
+        r2, c2 = int(br.split(",")[0]), int(br.split(",")[1])
+        r1, r2 = min(r1, r2), max(r1, r2)
+        c1, c2 = min(c1, c2), max(c1, c2)
+        args.queries = [f"{r},{c}" for r in range(r1, r2 + 1) for c in range(c1, c2 + 1)]
+        print(f"Query region ({r1},{c1}):({r2},{c2}) → {len(args.queries)} queries")
 
     query_indices = [resolve_query(q, grid_size) for q in args.queries]
     query_labels = []
