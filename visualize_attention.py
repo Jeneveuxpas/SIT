@@ -8,14 +8,12 @@ time every method uses its own learned K/V).
 
 Usage example (2 queries × 3 methods):
     CUDA_VISIBLE_DEVICES=7 python visualize_attention.py \
-    --image images/dog1.jpg \
-    --ckpts "/workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt" \
-            "/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
+    --image images/dog.jpg \
+    --ckpts "/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
             "/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
     --model SiT-XL/2 \
-    --layer 4 \
-    --queries 6,6 8,6 8,8 \
-    --timestep 0.0 \
+    --queries 6,6 8,6 8,8 6,8 \
+    --timestep 0.1 \
     --out attention_grid.pdf
 
 """
@@ -186,13 +184,15 @@ def extract_from_layer(model, latent, timestep, class_label, layer_idx,
 
     Args:
         viz_mode:
-          - "attn_weights": capture softmax(Q @ K^T) → (1, heads, N, N)
-          - "feature_sim":  capture block output → projector → (1, N, z_dim)
-                            in the REPA alignment space
+          - "attn_weights":  capture softmax(Q @ K^T) → (1, heads, N, N)
+          - "attn_output":   capture attn @ V (pre-proj) → (1, N, C)
+          - "feature_sim":   capture block output → (1, N, C)
+                             (to be projected externally)
 
     Returns:
-        If attn_weights: Tensor (1, heads, N, N)
-        If feature_sim:  Tensor (1, N, z_dim)  — projected patch token features
+        If attn_weights:  Tensor (1, heads, N, N)
+        If attn_output:   Tensor (1, N, C)  — attention-aggregated features
+        If feature_sim:   Tensor (1, N, C)  — full block hidden states
     """
     device = latent.device
     t = torch.tensor([timestep], device=device, dtype=torch.float32)
@@ -201,8 +201,8 @@ def extract_from_layer(model, latent, timestep, class_label, layer_idx,
     target_block = model.blocks[layer_idx]
     captured = []
 
-    if viz_mode == "attn_weights":
-        # Hook into the attention module to capture Q@K weights
+    if viz_mode in ("attn_weights", "attn_output"):
+        # Hook into the attention module
         attn_module = target_block.attn
         original_forward = attn_module.forward
 
@@ -218,10 +218,14 @@ def extract_from_layer(model, latent, timestep, class_label, layer_idx,
             attn = q @ k.transpose(-2, -1)          # (B, heads, N, N)
             attn = attn.softmax(dim=-1)
 
-            captured.append(attn.detach().cpu())
-
             x_out = attn @ v                         # (B, heads, N, head_dim)
             x_out = x_out.transpose(1, 2).reshape(B, N, C)
+
+            if viz_mode == "attn_weights":
+                captured.append(attn.detach().cpu())
+            else:  # attn_output
+                captured.append(x_out.detach().cpu())
+
             if hasattr(attn_module, 'norm'):
                 x_out = attn_module.norm(x_out)
             x_out = attn_module.proj(x_out)
@@ -232,7 +236,7 @@ def extract_from_layer(model, latent, timestep, class_label, layer_idx,
         attn_module.forward = _patched_attn_forward
         restore = lambda: setattr(attn_module, 'forward', original_forward)
     else:
-        # Hook the block at encoder_depth to capture hidden states
+        # feature_sim: hook the block to capture full hidden states
         original_forward = target_block.forward
 
         def _patched_block_forward(x_in, c):
@@ -348,8 +352,6 @@ def plot_grid(
         # --- Columns 1+: pure attention heatmaps --------------------------
         for col, label in enumerate(method_labels, start=1):
             ax = fig.add_subplot(gs[row, col])
-            attn_matrix = attn_dict[label][row]  # (1, heads, N, N)
-
             data = attn_dict[label][row]
 
             if viz_mode == "attn_weights":
@@ -357,27 +359,28 @@ def plot_grid(
                 attn_map = data[0].mean(dim=0).numpy()  # (N, N)
                 query_attn = attn_map[q_idx]             # (N,)
             else:
-                # data: (1, N, C) → cosine similarity
+                # attn_output or feature_sim: (1, N, C) → cosine similarity
                 features = data[0]                       # (N, C)
                 query_feat = features[q_idx]              # (C,)
-                # Cosine similarity between query and all tokens
                 query_attn = F.cosine_similarity(
                     query_feat.unsqueeze(0), features, dim=-1
                 ).numpy()                                # (N,)
 
-            # Normalize to [0, 1]
-            vmin, vmax = query_attn.min(), query_attn.max()
-            if vmax > vmin:
-                query_attn = (query_attn - vmin) / (vmax - vmin)
-
             heatmap_2d = query_attn.reshape(grid_size, grid_size)
 
-            im = ax.imshow(
-                heatmap_2d,
-                cmap=cmap, vmin=0, vmax=1,
-                interpolation="nearest",
-                aspect="equal",
-            )
+            # No per-plot normalization — use fixed range for fair comparison
+            if viz_mode == "attn_weights":
+                # Attention weights are non-negative, use raw values
+                im = ax.imshow(
+                    heatmap_2d, cmap=cmap,
+                    interpolation="nearest", aspect="equal",
+                )
+            else:
+                # Cosine similarity: fixed [-1, 1]
+                im = ax.imshow(
+                    heatmap_2d, cmap=cmap, vmin=-1, vmax=1,
+                    interpolation="nearest", aspect="equal",
+                )
             all_ims.append(im)
 
             # Red ★ on the query position
@@ -394,7 +397,7 @@ def plot_grid(
     # Shared colorbar on the right
     cbar_ax = fig.add_subplot(gs[:, -1])
     cbar = fig.colorbar(all_ims[0], cax=cbar_ax)
-    cbar_label = "Cosine Similarity" if viz_mode == "feature_sim" else "Attention Weight"
+    cbar_label = "Attention Weight" if viz_mode == "attn_weights" else "Cosine Similarity"
     cbar.set_label(cbar_label, fontsize=10)
 
     plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.05)
@@ -435,11 +438,13 @@ def main():
                         choices=list(SiT_models.keys()),
                         help="SiT architecture name")
     parser.add_argument("--layer", type=int, default=14,
-                        help="Transformer block index to visualize (0-based)")
+                        help="Transformer block index for attn_weights mode (0-based). "
+                             "Ignored in feature_sim mode (auto-uses encoder_depth).")
     parser.add_argument("--viz-mode", type=str, default="feature_sim",
-                        choices=["attn_weights", "feature_sim"],
+                        choices=["attn_weights", "attn_output", "feature_sim"],
                         help="attn_weights: raw Q@K attention; "
-                             "feature_sim: cosine similarity of attention output")
+                             "attn_output: cosine sim of attn@V (pre-proj); "
+                             "feature_sim: cosine sim of projected block output")
     parser.add_argument("--queries", type=str, nargs="+",
                         default=["center", "top-left"],
                         help='Query positions: "center", "top-left", '
@@ -501,7 +506,7 @@ def main():
         )
 
         # For feature_sim, use encoder_depth (where projector aligns);
-        # for attn_weights, use user-specified --layer
+        # for attn_weights / attn_output, use user-specified --layer
         layer = (enc_depth - 1) if need_proj else args.layer
         print(f"  Extracting from layer {layer} (encoder_depth={enc_depth})")
 
