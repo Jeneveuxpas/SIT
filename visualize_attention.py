@@ -368,7 +368,7 @@ def plot_grid(
 
             heatmap_2d = query_attn.reshape(grid_size, grid_size)
 
-            # No per-plot normalization — use fixed range for fair comparison
+            # No per-plot min-max normalization — fixed mapping for fair comparison
             if viz_mode == "attn_weights":
                 # Attention weights are non-negative, use raw values
                 im = ax.imshow(
@@ -376,9 +376,10 @@ def plot_grid(
                     interpolation="nearest", aspect="equal",
                 )
             else:
-                # Cosine similarity: fixed [-1, 1]
+                # Cosine similarity: (s+1)/2 maps [-1,1] → [0,1]
+                heatmap_2d = (heatmap_2d + 1.0) / 2.0
                 im = ax.imshow(
-                    heatmap_2d, cmap=cmap, vmin=-1, vmax=1,
+                    heatmap_2d, cmap=cmap, vmin=0, vmax=1,
                     interpolation="nearest", aspect="equal",
                 )
             all_ims.append(im)
