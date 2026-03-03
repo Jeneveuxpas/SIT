@@ -331,11 +331,8 @@ def plot_grid(
                 ).numpy()
             all_heatmaps[(label, row)] = query_attn.reshape(grid_size, grid_size)
 
-    # Global vmin/vmax across ALL methods and queries (1%–99% percentile)
-    all_vals = np.concatenate([h.ravel() for h in all_heatmaps.values()])
-    global_vmin = np.percentile(all_vals, 1)
-    global_vmax = np.percentile(all_vals, 99)
-    print(f"Global color range: [{global_vmin:.4f}, {global_vmax:.4f}]")
+    # No normalization — use raw values; matplotlib auto-scales per imshow
+    # For cosine similarity this means raw [-1, 1] range
 
     # --- Plot -------------------------------------------------------------
     fig = plt.figure(figsize=(3.0 * n_cols + 0.6, 3.0 * n_queries))
@@ -376,7 +373,6 @@ def plot_grid(
 
             im = ax.imshow(
                 heatmap_2d, cmap=cmap,
-                vmin=global_vmin, vmax=global_vmax,
                 interpolation="nearest", aspect="equal",
             )
             all_ims.append(im)
