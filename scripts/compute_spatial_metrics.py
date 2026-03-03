@@ -7,7 +7,7 @@ by computing metrics on activations from intermediate layers at various timestep
 
 Usage:
     CUDA_VISIBLE_DEVICES=7 python scripts/compute_spatial_metrics.py \
-        --checkpoint /workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt \
+        --checkpoint /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt \
         --data-dir /dev/shm/data \
         --num-samples 256 \
         --device cuda
@@ -210,6 +210,33 @@ def sample_posterior(moments: torch.Tensor, latents_scale: float = 1., latents_b
     return z
 
 
+def parse_layer_indices_1based_to_0based(values) -> Optional[List[int]]:
+    """Parse layer indices from ckpt args ('4,8' or [4,8]) into 0-based list."""
+    if values is None:
+        return None
+    if isinstance(values, (list, tuple)):
+        return [int(v) - 1 for v in values]
+    return [int(v.strip()) - 1 for v in str(values).split(",") if v.strip()]
+
+
+def make_noisy_model_input(x0: torch.Tensor, t: torch.Tensor, path_type: str = "linear") -> torch.Tensor:
+    """Match training-time model input construction x_t = alpha(t) * x0 + sigma(t) * noise."""
+    if t.ndim == 1:
+        t = t.view(-1, 1, 1, 1)
+    noise = torch.randn_like(x0)
+
+    if path_type == "linear":
+        alpha_t = 1 - t
+        sigma_t = t
+    elif path_type == "cosine":
+        alpha_t = torch.cos(t * math.pi / 2)
+        sigma_t = torch.sin(t * math.pi / 2)
+    else:
+        raise ValueError(f"Unsupported path_type: {path_type}")
+
+    return alpha_t * x0 + sigma_t * noise
+
+
 def load_model_from_checkpoint(
     checkpoint_path: str,
     device: str = "cuda",
@@ -236,22 +263,49 @@ def load_model_from_checkpoint(
         base_name = model_name.replace('-EncoderKV', '')
         model_fn = SiT_models.get(base_name)
     
+    resolution = getattr(args, 'resolution', 256)
+    latent_size = resolution // 8
+
     # Build model with eval_mode=True to skip projectors
     block_kwargs = {
         "fused_attn": getattr(args, 'fused_attn', True),
         "qk_norm": getattr(args, 'qk_norm', False),
     }
-    
-    model = model_fn(
-        input_size=32,  # 256 // 8
+
+    model_kwargs = dict(
+        input_size=latent_size,
         in_channels=4,
         num_classes=getattr(args, 'num_classes', 1000),
         use_cfg=getattr(args, 'cfg_prob', 0) > 0,
         z_dims=[768],
         encoder_depth=getattr(args, 'encoder_depth', 8),
         eval_mode=True,
-        **block_kwargs
     )
+
+    # Recover EncoderKV-specific constructor args from checkpoint, when available.
+    if 'EncoderKV' in model_name:
+        enc_layer_indices = parse_layer_indices_1based_to_0based(
+            getattr(args, "enc_layer_indices", None)
+        )
+        sit_layer_indices = parse_layer_indices_1based_to_0based(
+            getattr(args, "sit_layer_indices", None)
+        )
+        if enc_layer_indices is not None:
+            model_kwargs["enc_layer_indices"] = enc_layer_indices
+        if sit_layer_indices is not None:
+            model_kwargs["sit_layer_indices"] = sit_layer_indices
+
+        for key in [
+            "enc_dim", "enc_heads",
+            "kv_proj_type", "kv_proj_hidden_dim", "kv_proj_kernel_size",
+            "kv_norm_type", "kv_zscore_alpha", "kv_replace_mode",
+            "distill_temperature", "kv_distill_snr_gamma", "kv_distill_min_weight",
+            "attn_loss_weight", "kv_loss_weight",
+        ]:
+            val = getattr(args, key, None)
+            if val is not None:
+                model_kwargs[key] = val
+    model = model_fn(**model_kwargs, **block_kwargs)
     
     # Load state dict
     state_dict = ckpt.get('ema', ckpt.get('model'))
@@ -259,7 +313,13 @@ def load_model_from_checkpoint(
     # Filter out projector weights since we're in eval_mode
     filtered_state_dict = {k: v for k, v in state_dict.items() if 'projector' not in k}
     
-    model.load_state_dict(filtered_state_dict, strict=False)
+    missing, unexpected = model.load_state_dict(filtered_state_dict, strict=False)
+    print(f"State dict load: {len(missing)} missing keys, {len(unexpected)} unexpected keys")
+    if len(missing) > 0:
+        print(f"  Missing key sample: {missing[:10]}")
+    if len(unexpected) > 0:
+        print(f"  Unexpected key sample: {unexpected[:10]}")
+
     model = model.to(device).eval()
     
     return model, args
@@ -327,6 +387,7 @@ def evaluate_spatial_metrics(
     num_samples: int = 256,
     timesteps: List[float] = [0.1, 0.5, 0.9],
     layer_depths: List[int] = [4, 8, 12],
+    path_type: str = "linear",
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     """
     Evaluate spatial metrics on DiT hidden states.
@@ -365,8 +426,7 @@ def evaluate_spatial_metrics(
     
     print(f"Collected {all_latents.size(0)} samples")
     
-    # Grid size (32x32 / 2x2 patch = 16x16)
-    H = W = 16
+    ordered_layer_depths = sorted(set(layer_depths))
     
     # Evaluate at different timesteps
     for t_val in timesteps:
@@ -375,22 +435,27 @@ def evaluate_spatial_metrics(
         
         # Create noisy latents at this timestep
         t = torch.full((all_latents.size(0),), t_val, device=device)
-        noise = torch.randn_like(all_latents)
-        
-        # Linear interpolation: x_t = (1-t) * x_0 + t * noise
-        x_t = (1 - t.view(-1, 1, 1, 1)) * all_latents + t.view(-1, 1, 1, 1) * noise
+        x_t = make_noisy_model_input(all_latents, t, path_type=path_type)
         
         # Extract hidden states at specified layers
         with torch.no_grad():
             hidden_states_list = extract_hidden_states(
-                model, x_t, t, all_labels, layer_depths
+                model, x_t, t, all_labels, ordered_layer_depths
             )
         
         # Compute metrics for each layer
-        for layer_idx, hidden_states in zip(layer_depths, hidden_states_list):
+        for layer_idx, hidden_states in zip(ordered_layer_depths, hidden_states_list):
             layer_key = f"layer_{layer_idx}"
-            
-            metrics = compute_spatial_metrics(hidden_states, H, W)
+
+            n_tokens = hidden_states.size(1)
+            side = int(math.sqrt(n_tokens))
+            if side * side != n_tokens:
+                raise ValueError(
+                    f"Hidden states token count {n_tokens} is not a perfect square "
+                    f"(layer {layer_idx}); cannot infer H,W."
+                )
+
+            metrics = compute_spatial_metrics(hidden_states, side, side)
             
             results[t_key][layer_key] = {
                 'lds': metrics['lds'].mean().item(),
@@ -473,6 +538,7 @@ def main():
     # Load model
     model, ckpt_args = load_model_from_checkpoint(args.checkpoint, device)
     model_name = getattr(ckpt_args, 'exp_name', 'unknown')
+    path_type = getattr(ckpt_args, 'path_type', 'linear')
     
     # Load VAE latent stats
     latents_stats = torch.load("pretrained_models/sdvae-ft-mse-f8d4-latents-stats.pt", 
@@ -504,6 +570,7 @@ def main():
     print(f"Timesteps: {timesteps}")
     print(f"Layer depths: {layer_depths}")
     print(f"Num samples: {args.num_samples}")
+    print(f"Path type: {path_type}")
     
     # Run evaluation
     results = evaluate_spatial_metrics(
@@ -515,6 +582,7 @@ def main():
         num_samples=args.num_samples,
         timesteps=timesteps,
         layer_depths=layer_depths,
+        path_type=path_type,
     )
     
     # Print results
