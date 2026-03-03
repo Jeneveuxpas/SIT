@@ -1,495 +1,359 @@
 """
-Attention Map Visualization for Paper Figures.
+Attention Map Side-by-Side Comparison
+DINOv2 (teacher) | Vanilla DiT | iREPA | Ours
 
-Generates a publication-quality grid comparing attention heatmaps across
-different training methods (e.g., Vanilla / REPA / Scaffolding) and query
-positions.  All checkpoints are loaded as vanilla SiT (since at inference
-time every method uses its own learned K/V).
-"/workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt" \
-Usage example (2 queries × 3 methods):
-    CUDA_VISIBLE_DEVICES=7 python visualize_attention.py \
-    --image images/dog1.jpg \
-    --ckpts "/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
-            "/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
-    --model SiT-XL/2 \
-    --layer 4 \
-    --queries all \
-    --timestep 0.5 \
-    --out attention_grid.pdf
+依赖：
+    pip install torch torchvision timm matplotlib einops
+    pip install git+https://github.com/facebookresearch/dinov2.git  # DINOv2
 
+使用方法：
+    python visualize_attention_maps.py \
+        --image path/to/image.jpg \
+        --dit_vanilla  checkpoints/dit_vanilla.pt \
+        --dit_irepa    checkpoints/dit_irepa.pt \
+        --dit_ours     checkpoints/dit_ours.pt \
+        --output       attention_comparison.pdf
 """
 
-import os
-import sys
 import argparse
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from PIL import Image
+import torchvision.transforms as T
 
-# ---------------------------------------------------------------------------
-# Imports from the SiT codebase
-# ---------------------------------------------------------------------------
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from models.sit import SiT_models
-from models.autoencoder import VAE_F8D4
-from torchvision import transforms
+from models.sit import SiT_XL_2
+from models.autoencoder import AutoencoderKL
 
 
-# ========================== Image helpers ==================================
+# ─────────────────────────────────────────────
+# 1. 图像预处理
+# ─────────────────────────────────────────────
 
-def center_crop_arr(pil_image, image_size):
-    """Center-crop and resize to a square, following the SiT training recipe."""
-    while min(*pil_image.size) >= 2 * image_size:
-        pil_image = pil_image.resize(
-            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
-        )
-    scale = image_size / min(*pil_image.size)
-    pil_image = pil_image.resize(
-        tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
-    )
-    arr = np.array(pil_image)
-    crop_y = (arr.shape[0] - image_size) // 2
-    crop_x = (arr.shape[1] - image_size) // 2
-    return Image.fromarray(
-        arr[crop_y : crop_y + image_size, crop_x : crop_x + image_size]
-    )
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD  = (0.229, 0.224, 0.225)
 
-
-def load_image(image_path, size=256):
-    """Load an image, center-crop, and return both the tensor and PIL image."""
-    img = Image.open(image_path).convert("RGB")
-    img = center_crop_arr(img, size)
-
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+def load_image(path: str, img_size: int = 224) -> tuple[torch.Tensor, np.ndarray]:
+    """
+    返回:
+        tensor : (1, 3, H, W)  归一化后的输入
+        vis    : (H, W, 3)     uint8 原图，用于背景展示
+    """
+    img = Image.open(path).convert("RGB")
+    transform = T.Compose([
+        T.Resize((img_size, img_size)),
+        T.ToTensor(),
+        T.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
-    x = transform(img).unsqueeze(0)  # (1, 3, H, W)
-    return x, img
+    vis_transform = T.Compose([
+        T.Resize((img_size, img_size)),
+        T.ToTensor(),
+    ])
+    tensor = transform(img).unsqueeze(0)          # (1,3,H,W)
+    vis    = (vis_transform(img).permute(1,2,0).numpy() * 255).astype(np.uint8)
+    return tensor, vis
 
 
-# ========================== VAE helpers ====================================
+# ─────────────────────────────────────────────
+# 2. 提取 DINOv2 的 attention
+# ─────────────────────────────────────────────
 
-def encode_to_latent(pixel_tensor, vae, latents_scale, latents_bias, device):
-    """
-    Encode a pixel-space image tensor (1, 3, H, W) into the normalised
-    latent space (1, 4, H/8, W/8) expected by SiT.
-    """
-    with torch.no_grad():
-        pixel_tensor = pixel_tensor.to(device)
-        posterior = vae.encode(pixel_tensor)
-        # Sample from posterior (mean + std * noise)
-        z = posterior.sample()
-        # Apply the same normalization as training
-        z = (z - latents_bias) * latents_scale
-    return z
-
-
-# ========================== Model loading ==================================
-
-def load_vae(device):
-    """Load VAE and latent-space normalization statistics."""
-    vae = VAE_F8D4().to(device).eval()
-    vae_ckpt = torch.load(
-        "pretrained_models/sdvae-ft-mse-f8d4.pt",
-        map_location=device, weights_only=False,
-    )
-    vae.load_state_dict(vae_ckpt)
-
-    latents_stats = torch.load(
-        "pretrained_models/sdvae-ft-mse-f8d4-latents-stats.pt",
-        map_location=device, weights_only=False,
-    )
-    latents_scale = latents_stats["latents_scale"].to(device).view(1, -1, 1, 1)
-    latents_bias  = latents_stats["latents_bias"].to(device).view(1, -1, 1, 1)
-    return vae, latents_scale, latents_bias
-
-
-def load_sit_model(ckpt_path, model_name, device, resolution=256):
-    """
-    Load a vanilla SiT model from *any* checkpoint (vanilla / REPA /
-    Scaffolding).  Extra keys (e.g. kv_proj, projectors) are silently
-    ignored via strict=False.
-    """
-    if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-
-    # Auto-detect block_kwargs from checkpoint args
-    ckpt_args = ckpt.get("args", None)
-    qk_norm = False
-    if ckpt_args is not None and hasattr(ckpt_args, "qk_norm"):
-        qk_norm = ckpt_args.qk_norm
-
-    latent_size = resolution // 8
-    block_kwargs = {"fused_attn": False, "qk_norm": qk_norm}
-    model = SiT_models[model_name](
-        input_size=latent_size,
-        in_channels=4,
-        num_classes=1000,
-        use_cfg=False,
-        eval_mode=True,
-        **block_kwargs,
-    )
-
-    # Pick EMA weights if available, else raw model weights
-    if "ema" in ckpt:
-        state_dict = ckpt["ema"]
-    elif "model" in ckpt:
-        state_dict = ckpt["model"]
-    else:
-        state_dict = ckpt
-
-    # Filter out keys that don't belong to vanilla SiT
-    filtered = {k: v for k, v in state_dict.items() if "kv_proj" not in k}
-    missing, unexpected = model.load_state_dict(filtered, strict=False)
-
-    # Silent sanity print (helpful for debugging, not user-facing)
-    if missing:
-        # Typically projector keys – fine in eval_mode
-        pass
-    if unexpected:
-        print(f"  [warn] {len(unexpected)} unexpected keys in {os.path.basename(ckpt_path)}")
-
-    model.eval().to(device)
+def load_dinov2(model_name: str = "dinov2_vitb14") -> torch.nn.Module:
+    """从 torch.hub 加载 DINOv2，无需本地安装"""
+    model = torch.hub.load("facebookresearch/dinov2", model_name)
+    model.eval()
     return model
 
 
-# ========================== Attention / feature extraction =================
-
-def extract_from_layer(model, latent, timestep, class_label, layer_idx,
-                       viz_mode="feature_sim"):
+def get_dinov2_attention(
+    model: torch.nn.Module,
+    x: torch.Tensor,            # (1, 3, H, W)
+    patch_size: int = 14,
+) -> np.ndarray:
     """
-    Run a forward pass and intercept the target transformer block.
+    提取 DINOv2 最后一个 block 中所有 heads 的 CLS→patch attention，
+    返回 entropy 最低（最聚焦）那个 head 的 2D attention map。
 
-    Args:
-        viz_mode:
-          - "attn_weights": capture softmax(Q @ K^T) → (1, heads, N, N)
-          - "feature_sim":  capture attention output features → (1, N, C)
-
-    Returns:
-        If attn_weights: Tensor (1, heads, N, N)
-        If feature_sim:  Tensor (1, N, C)  — post-attention features
+    返回: (h_feat, w_feat) float32，已归一化到 [0,1]
     """
-    device = latent.device
-    t = torch.tensor([timestep], device=device, dtype=torch.float32)
-    y = torch.tensor([class_label], device=device, dtype=torch.long)
+    attn_store = []
 
-    target_block = model.blocks[layer_idx]
-    attn_module = target_block.attn  # timm Attention
+    def hook(module, inp, out):
+        # ViT attention 模块的 forward 返回 (attn_weight, value)
+        # timm DINOv2 的 Attention 类在 forward 里返回 (x, attn)
+        # 这里直接 hook attn_drop 之前的 softmax 输出
+        attn_store.append(out.detach())
 
-    original_forward = attn_module.forward
-    captured = []
+    # DINOv2 (timm backbone): 最后一个 block 的 attn.attn_drop
+    handle = model.blocks[-1].attn.attn_drop.register_forward_hook(hook)
 
-    def _patched_forward(x_in, attn_mask=None):
-        B, N, C = x_in.shape
-        qkv = attn_module.qkv(x_in).reshape(
-            B, N, 3, attn_module.num_heads, attn_module.head_dim
-        ).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)
-        q, k = attn_module.q_norm(q), attn_module.k_norm(k)
+    with torch.no_grad():
+        model(x)
+    handle.remove()
 
-        q = q * attn_module.scale
-        attn = q @ k.transpose(-2, -1)          # (B, heads, N, N)
-        attn = attn.softmax(dim=-1)
+    attn = attn_store[0]          # (1, num_heads, N+1, N+1)
+    attn = attn[0]                # (num_heads, N+1, N+1)
 
-        x_out = attn @ v                         # (B, heads, N, head_dim)
-        x_out = x_out.transpose(1, 2).reshape(B, N, C)
+    # CLS token attend to patch tokens
+    cls_attn = attn[:, 0, 1:]     # (num_heads, N_patches)
 
-        if viz_mode == "attn_weights":
-            captured.append(attn.detach().cpu())
-        else:  # feature_sim
-            captured.append(x_out.detach().cpu())
+    # 选 entropy 最低的 head（最聚焦）
+    probs   = cls_attn / cls_attn.sum(-1, keepdim=True).clamp(min=1e-8)
+    entropy = -(probs * (probs + 1e-8).log()).sum(-1)   # (num_heads,)
+    best    = entropy.argmin().item()
 
-        if hasattr(attn_module, 'norm'):
-            x_out = attn_module.norm(x_out)
-        x_out = attn_module.proj(x_out)
-        if hasattr(attn_module, 'proj_drop'):
-            x_out = attn_module.proj_drop(x_out)
-        return x_out
+    h_feat = x.shape[-2] // patch_size
+    w_feat = x.shape[-1] // patch_size
+    best_attn = cls_attn[best].reshape(h_feat, w_feat).cpu().numpy()
 
-    attn_module.forward = _patched_forward
-    try:
-        with torch.no_grad():
-            model(latent, t, y)
-    finally:
-        attn_module.forward = original_forward
-
-    if not captured:
-        raise RuntimeError("Failed to capture – check layer_idx.")
-    return captured[0]
+    # 归一化
+    best_attn = (best_attn - best_attn.min()) / (best_attn.max() - best_attn.min() + 1e-8)
+    return best_attn, best   # 同时返回 head index，供 DiT 对应使用
 
 
-# ========================== Query position helpers =========================
+# ─────────────────────────────────────────────
+# 3. 提取 DiT / SiT 的 attention
+# ─────────────────────────────────────────────
 
-def resolve_query(query_str, grid_size):
+def get_dit_attention(
+    model: torch.nn.Module,
+    z: torch.Tensor,             # (1, 4, 32, 32) VAE latent
+    timestep: float = 0.05,      # 低噪声，spatial 结构最清晰
+    class_label: int = 0,
+    block_idx: int = 8,          # 中间偏前的 block
+    anchor: int = -1,            # anchor patch 索引，-1 表示中心点
+    device: str = "cuda",
+) -> np.ndarray:
     """
-    Convert a query specifier to an integer token index.
+    对 DiT/SiT 模型提取指定 block 的 self-attention。
+    支持 vanilla DiT、iREPA、Ours（inference 时结构相同）。
 
-    Accepted values:
-      - "center"          → token at the grid center
-      - "top-left"        → token near top-left corner
-      - "bottom-right"    → token near bottom-right corner
-      - "row,col"         → grid coordinate, e.g. "8,8" or "4,12"
-      - an integer string → flat token index (clamped to valid range)
+    输入必须是 VAE latent (1, 4, 32, 32)。
+
+    返回: (h_feat, w_feat) float32，已归一化到 [0,1]
     """
-    total = grid_size * grid_size
-    if query_str == "center":
-        return (grid_size // 2) * grid_size + (grid_size // 2)
-    elif query_str == "top-left":
-        return (grid_size // 4) * grid_size + (grid_size // 4)
-    elif query_str == "bottom-right":
-        return (3 * grid_size // 4) * grid_size + (3 * grid_size // 4)
-    elif "," in query_str:
-        # Grid coordinate format: "row,col"
-        parts = query_str.split(",")
-        r, c = int(parts[0]), int(parts[1])
-        r = min(max(r, 0), grid_size - 1)
-        c = min(max(c, 0), grid_size - 1)
-        return r * grid_size + c
-    else:
-        idx = int(query_str)
-        return min(max(idx, 0), total - 1)
+    # 必须关闭 fused_attn，否则 attn_drop hook 捕获不到 attention weights
+    old_fused = []
+    for blk in model.blocks:
+        old_fused.append(blk.attn.fused_attn)
+        blk.attn.fused_attn = False
+
+    attn_store = []
+
+    def hook(module, inp, out):
+        attn_store.append(out.detach())
+
+    handle = model.blocks[block_idx].attn.attn_drop.register_forward_hook(hook)
+
+    t_tensor = torch.tensor([timestep], device=device)
+    y_tensor = torch.tensor([class_label], device=device)
+
+    # 加轻微噪声模拟去噪中间步
+    z = z.to(device)
+    noise = torch.randn_like(z) * timestep
+    z_noisy = z + noise
+
+    with torch.no_grad():
+        model(z_noisy, t_tensor, y_tensor)
+    handle.remove()
+
+    # 恢复 fused_attn 状态
+    for blk, old in zip(model.blocks, old_fused):
+        blk.attn.fused_attn = old
+
+    attn = attn_store[0]           # (1, num_heads, N, N)
+    attn = attn[0]                 # (num_heads, N, N)
+
+    # DiT 没有 CLS token，N = (latent_size / patch_size)^2
+    N = attn.shape[-1]
+    if anchor < 0 or anchor >= N:
+        anchor = N // 2
+
+    anchor_attn = attn[:, anchor, :]   # (num_heads, N)
+
+    # anchor_attn 已经过 softmax，直接算 entropy
+    entropy = -(anchor_attn * (anchor_attn + 1e-8).log()).sum(-1)
+    best    = entropy.argmin().item()
+
+    h_feat  = w_feat = int(N ** 0.5)
+    best_attn = anchor_attn[best].reshape(h_feat, w_feat).cpu().numpy()
+    best_attn = (best_attn - best_attn.min()) / (best_attn.max() - best_attn.min() + 1e-8)
+    return best_attn
 
 
-# ========================== Plotting =======================================
+# ─────────────────────────────────────────────
+# 4. 绘图：4列并排
+# ─────────────────────────────────────────────
 
-def plot_grid(
-    original_img,
-    attn_dict,           # {method_label: [data_for_q0, data_for_q1, ...]}
-    query_indices,
-    query_labels,
-    grid_size,
-    save_path,
-    viz_mode="feature_sim",
-    cmap="viridis",
+COLUMN_TITLES = [
+    "DINOv2\n(Teacher)",
+    "Vanilla DiT",
+    "iREPA",
+    "Ours",
+]
+CMAP = "inferno"   # 论文常用：inferno / magma / jet
+
+
+def plot_attention_comparison(
+    original_img   : np.ndarray,      # (H, W, 3) uint8
+    attn_maps      : list,            # list of 4 × (h_feat, w_feat) float32
+    save_path      : str = "attention_comparison.pdf",
+    img_size       : int = 224,
+    dpi            : int = 300,
 ):
     """
-    Draw an N_queries × (1 + N_methods) grid in paper style.
-
-    Column 0: original image with red ★ query marker.
-    Columns 1..N_methods: pure attention heatmaps (no image overlay)
-                          with red ★ showing the query position.
-    A shared colorbar is placed on the right.
+    生成 2行 × 4列 的对比图：
+      第 1 行：原图（4列相同，作为参考）
+      第 2 行：各方法的 attention heatmap 叠加在原图上
     """
-    method_labels = list(attn_dict.keys())
-    n_queries = len(query_indices)
-    n_methods = len(method_labels)
-    n_cols = 1 + n_methods  # first column is the original image
+    assert len(attn_maps) == 4, "需要恰好 4 个 attention map"
 
-    fig = plt.figure(figsize=(3.0 * n_cols + 0.6, 3.0 * n_queries))
-
-    # Use GridSpec: main grid + thin column for colorbar
-    gs = gridspec.GridSpec(
-        n_queries, n_cols + 1,
-        width_ratios=[1] * n_cols + [0.05],
-        wspace=0.08, hspace=0.12,
+    fig = plt.figure(figsize=(4 * 3.2, 2 * 3.0))
+    gs  = gridspec.GridSpec(
+        2, 4,
+        figure=fig,
+        wspace=0.04,
+        hspace=0.06,
+        left=0.01, right=0.99,
+        top=0.88,  bottom=0.02,
     )
 
-    img_w, img_h = original_img.size  # PIL: (W, H)
-    all_ims = []  # collect heatmap artists for shared colorbar
+    for col, (title, attn) in enumerate(zip(COLUMN_TITLES, attn_maps)):
 
-    for row, (q_idx, q_label) in enumerate(zip(query_indices, query_labels)):
-        # Compute query pixel coords (same for all columns)
-        qy_pix = (q_idx // grid_size + 0.5) * (img_h / grid_size)
-        qx_pix = (q_idx %  grid_size + 0.5) * (img_w / grid_size)
-        # Query coords in grid_size space (for heatmap columns)
-        qy_grid = q_idx // grid_size + 0.5
-        qx_grid = q_idx %  grid_size + 0.5
+        # ── 第 1 行：原图 ──────────────────────────────
+        ax_img = fig.add_subplot(gs[0, col])
+        ax_img.imshow(original_img)
+        ax_img.set_title(title, fontsize=11, fontweight="bold", pad=4)
+        ax_img.axis("off")
 
-        # --- Column 0: original image + query marker -----------------------
-        ax = fig.add_subplot(gs[row, 0])
-        ax.imshow(original_img)
-        ax.plot(
-            qx_pix, qy_pix,
-            marker="*", color="red", markersize=14,
-            markeredgecolor="darkred", markeredgewidth=0.8,
-        )
-        ax.set_ylabel(q_label, fontsize=12, fontweight="bold")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        if row == 0:
-            ax.set_title("Input", fontsize=12, fontweight="bold")
+        # ── 第 2 行：attention overlay ─────────────────
+        ax_attn = fig.add_subplot(gs[1, col])
 
-        # --- Columns 1+: pure attention heatmaps --------------------------
-        for col, label in enumerate(method_labels, start=1):
-            ax = fig.add_subplot(gs[row, col])
-            attn_matrix = attn_dict[label][row]  # (1, heads, N, N)
+        # 上采样 attention map 到原图尺寸
+        attn_tensor = torch.tensor(attn).unsqueeze(0).unsqueeze(0)   # (1,1,h,w)
+        attn_up = F.interpolate(
+            attn_tensor, size=(img_size, img_size), mode="bilinear", align_corners=False
+        ).squeeze().numpy()
 
-            data = attn_dict[label][row]
+        # 原图作为背景（灰度化，减少颜色干扰）
+        gray = np.mean(original_img, axis=-1, keepdims=True).repeat(3, axis=-1).astype(np.uint8)
+        ax_attn.imshow(gray, alpha=0.45)
+        im = ax_attn.imshow(attn_up, cmap=CMAP, alpha=0.75,
+                            vmin=0.0, vmax=1.0, interpolation="bilinear")
+        ax_attn.axis("off")
 
-            if viz_mode == "attn_weights":
-                # data: (1, heads, N, N) → average over heads
-                attn_map = data[0].mean(dim=0).numpy()  # (N, N)
-                query_attn = attn_map[q_idx]             # (N,)
-            else:
-                # data: (1, N, C) → cosine similarity
-                features = data[0]                       # (N, C)
-                query_feat = features[q_idx]              # (C,)
-                # Cosine similarity between query and all tokens
-                query_attn = F.cosine_similarity(
-                    query_feat.unsqueeze(0), features, dim=-1
-                ).numpy()                                # (N,)
+    # ── colorbar（整图共享）─────────────────────────────
+    cbar_ax = fig.add_axes([0.92, 0.06, 0.015, 0.38])
+    fig.colorbar(im, cax=cbar_ax)
+    cbar_ax.tick_params(labelsize=8)
 
-            # Normalize to [0, 1]
-            vmin, vmax = query_attn.min(), query_attn.max()
-            if vmax > vmin:
-                query_attn = (query_attn - vmin) / (vmax - vmin)
-
-            heatmap_2d = query_attn.reshape(grid_size, grid_size)
-
-            im = ax.imshow(
-                heatmap_2d,
-                cmap=cmap, vmin=0, vmax=1,
-                interpolation="nearest",
-                aspect="equal",
-            )
-            all_ims.append(im)
-
-            # Red ★ on the query position
-            ax.plot(
-                qx_grid, qy_grid,
-                marker="*", color="red", markersize=10,
-                markeredgecolor="darkred", markeredgewidth=0.6,
-            )
-            ax.set_xticks([])
-            ax.set_yticks([])
-            if row == 0:
-                ax.set_title(label, fontsize=12, fontweight="bold")
-
-    # Shared colorbar on the right
-    cbar_ax = fig.add_subplot(gs[:, -1])
-    cbar = fig.colorbar(all_ims[0], cax=cbar_ax)
-    cbar_label = "Cosine Similarity" if viz_mode == "feature_sim" else "Attention Weight"
-    cbar.set_label(cbar_label, fontsize=10)
-
-    plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.05)
+    plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
+    print(f"[✓] 图像已保存至: {save_path}")
     plt.close()
-    print(f"Saved attention grid → {save_path}")
 
 
-# ========================== CLI ============================================
+# ─────────────────────────────────────────────
+# 5. 主流程
+# ─────────────────────────────────────────────
 
-def parse_ckpt_arg(s):
-    """Parse 'Label:path' or plain 'path' into (label, path).
-    If no label is given, infer from the parent experiment directory name.
+def load_vae(vae_ckpt: str, device: str) -> AutoencoderKL:
+    """加载预训练 VAE (sd-vae-ft-ema 等)"""
+    vae = AutoencoderKL(embed_dim=4, ch_mult=[1, 2, 4, 4], use_variational=True).to(device)
+    state = torch.load(vae_ckpt, map_location=device)
+    if "state_dict" in state:
+        state = state["state_dict"]
+    vae.load_state_dict(state)
+    vae.eval()
+    return vae
+
+
+def load_dit_checkpoint(ckpt_path: str, device: str) -> torch.nn.Module:
     """
-    if ":" in s and not s.startswith("/"):
-        label, path = s.split(":", 1)
-        return label.strip(), path.strip()
-    # No label — auto-extract from path, e.g. ".../exps/vanilla_sit/checkpoints/0100000.pt" → "vanilla_sit"
-    path = s.strip()
-    parts = path.replace("\\", "/").split("/")
-    # Try to find the directory right before "checkpoints"
-    for i, p in enumerate(parts):
-        if p == "checkpoints" and i > 0:
-            return parts[i - 1], path
-    # Fallback: use filename without extension
-    return os.path.splitext(os.path.basename(path))[0], path
+    加载 SiT_XL_2 checkpoint，eval_mode=True 跳过 projector 创建。
+    """
+    model = SiT_XL_2(eval_mode=True).to(device)
+    state = torch.load(ckpt_path, map_location=device)
+    # 兼容 "model" / "ema" / 裸 state_dict 三种格式
+    if "model" in state:
+        state = state["model"]
+    elif "ema" in state:
+        state = state["ema"]
+    model.load_state_dict(state, strict=False)
+    model.eval()
+    return model
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Attention map grid visualization for paper figures.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("--image", type=str, required=True,
-                        help="Path to input RGB image")
-    parser.add_argument("--ckpts", type=parse_ckpt_arg, nargs="+", required=True,
-                        help='One or more "Label:checkpoint.pt" pairs')
-    parser.add_argument("--model", type=str, default="SiT-XL/2",
-                        choices=list(SiT_models.keys()),
-                        help="SiT architecture name")
-    parser.add_argument("--layer", type=int, default=14,
-                        help="Transformer block index to visualize (0-based)")
-    parser.add_argument("--viz-mode", type=str, default="feature_sim",
-                        choices=["attn_weights", "feature_sim"],
-                        help="attn_weights: raw Q@K attention; "
-                             "feature_sim: cosine similarity of attention output")
-    parser.add_argument("--queries", type=str, nargs="+",
-                        default=["center", "top-left"],
-                        help='Query positions: "center", "top-left", '
-                             '"bottom-right", or integer token index')
-    parser.add_argument("--timestep", type=float, default=0.5,
-                        help="Diffusion timestep t ∈ [0,1], 0=clean, 1=noise")
-    parser.add_argument("--class-label", type=int, default=0,
-                        help="ImageNet class label (default 0)")
-    parser.add_argument("--resolution", type=int, default=256,
-                        choices=[256, 512],
-                        help="Image resolution")
-    parser.add_argument("--cmap", type=str, default="viridis",
-                        help="Matplotlib colormap")
-    parser.add_argument("--out", type=str, default="attention_grid.pdf",
-                        help="Output file path")
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image",       required=True,  help="输入图像路径")
+    parser.add_argument("--vae_ckpt",    required=True,  help="VAE checkpoint 路径")
+    parser.add_argument("--dit_vanilla", required=True,  help="Vanilla DiT checkpoint")
+    parser.add_argument("--dit_irepa",   required=True,  help="iREPA checkpoint")
+    parser.add_argument("--dit_ours",    required=True,  help="Ours checkpoint")
+    parser.add_argument("--output",      default="attention_comparison.pdf")
+    parser.add_argument("--block_idx",   type=int, default=8,  help="DiT block index")
+    parser.add_argument("--anchor",      type=int, default=-1, help="anchor patch 索引 (0~255)，-1 为中心点")
+    parser.add_argument("--timestep",    type=float, default=0.05)
+    parser.add_argument("--class_label", type=int, default=0)
+    parser.add_argument("--img_size",    type=int, default=256, help="输入图像尺寸 (VAE 输入)")
+    parser.add_argument("--device",      default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    device = args.device
 
-    # --- Load image --------------------------------------------------------
-    pixel_tensor, original_img = load_image(args.image, size=args.resolution)
+    # ① 加载图像
+    print("[1/6] 加载图像 ...")
+    x, vis = load_image(args.image, img_size=args.img_size)
 
-    # --- Load VAE and encode to latent ------------------------------------
-    print("Loading VAE...")
-    vae, latents_scale, latents_bias = load_vae(device)
-    latent = encode_to_latent(pixel_tensor, vae, latents_scale, latents_bias, device)
-    print(f"Latent shape: {latent.shape}")  # expect (1, 4, 32, 32)
+    # ② DINOv2 attention
+    print("[2/6] 提取 DINOv2 attention ...")
+    dino = load_dinov2("dinov2_vitb14").to(device)
+    # DINOv2 patch_size=14, 需要把图像 resize 到 14 的整数倍
+    dino_size = (args.img_size // 14) * 14
+    x_dino = F.interpolate(x, size=(dino_size, dino_size)).to(device)
+    attn_dino, best_head = get_dinov2_attention(dino, x_dino, patch_size=14)
+    print(f"    → DINOv2 选择 head {best_head}")
+    del dino  # 释放显存
 
-    # Free VAE memory
+    # ③ VAE encode：RGB → latent
+    print("[3/6] VAE 编码 ...")
+    vae = load_vae(args.vae_ckpt, device)
+    x_vae = F.interpolate(x, size=(args.img_size, args.img_size)).to(device)
+    with torch.no_grad():
+        posterior = vae.encode(x_vae)
+        z_latent = posterior.sample()  # (1, 4, 32, 32)
+    print(f"    → latent shape: {z_latent.shape}")
     del vae
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
-    # --- Resolve query positions ------------------------------------------
-    latent_h = latent.shape[-2]
-    patch_size = 2  # SiT default
-    grid_size = latent_h // patch_size  # e.g. 32 // 2 = 16
-    total_tokens = grid_size * grid_size
+    # ④ 加载 DiT 系列模型
+    print("[4/6] 加载 DiT 模型 ...")
+    dit_vanilla = load_dit_checkpoint(args.dit_vanilla, device)
+    dit_irepa   = load_dit_checkpoint(args.dit_irepa,   device)
+    dit_ours    = load_dit_checkpoint(args.dit_ours,    device)
 
-    if "all" in args.queries:
-        query_indices = list(range(total_tokens))
-    else:
-        query_indices = [resolve_query(q, grid_size) for q in args.queries]
-        
-    query_labels = []
-    for q_idx in query_indices:
-        r, c = q_idx // grid_size, q_idx % grid_size
-        query_labels.append(f"Query ({r},{c})")
+    # ⑤ 提取 DiT attention（输入为 VAE latent）
+    print("[5/6] 提取 DiT attention maps ...")
+    common_kwargs = dict(
+        timestep=args.timestep,
+        class_label=args.class_label,
+        block_idx=args.block_idx,
+        anchor=args.anchor,
+        device=device,
+    )
+    attn_vanilla = get_dit_attention(dit_vanilla, z_latent, **common_kwargs)
+    attn_irepa   = get_dit_attention(dit_irepa,   z_latent, **common_kwargs)
+    attn_ours    = get_dit_attention(dit_ours,    z_latent, **common_kwargs)
 
-    print(f"Grid: {grid_size}×{grid_size} = {total_tokens} tokens")
-    print(f"Number of Queries: {len(query_indices)}")
-
-    # --- Load each checkpoint and extract attention -----------------------
-    attn_dict = {}  # label → [attn_for_q0, attn_for_q1, ...]
-    for label, ckpt_path in args.ckpts:
-        print(f"\nLoading [{label}] from {ckpt_path} ...")
-        model = load_sit_model(ckpt_path, args.model, device, args.resolution)
-
-        # Only need one forward pass per model (result is same for all queries)
-        data = extract_from_layer(
-            model, latent, args.timestep, args.class_label, args.layer,
-            viz_mode=args.viz_mode,
-        )
-        # Replicate for each query (same data, different query index used in plotting)
-        attn_dict[label] = [data] * len(query_indices)
-
-        # Free model memory before loading the next one
-        del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    # --- Plot grid ---------------------------------------------------------
-    plot_grid(
-        original_img, attn_dict,
-        query_indices, query_labels,
-        grid_size, args.out,
-        viz_mode=args.viz_mode, cmap=args.cmap,
+    # ⑥ 绘图
+    print("[6/6] 绘制对比图 ...")
+    attn_maps = [attn_dino, attn_vanilla, attn_irepa, attn_ours]
+    plot_attention_comparison(
+        original_img=vis,
+        attn_maps=attn_maps,
+        save_path=args.output,
+        img_size=args.img_size,
     )
 
 
