@@ -7,14 +7,15 @@ positions.  All checkpoints are loaded as vanilla SiT (since at inference
 time every method uses its own learned K/V).
 
 Usage example (2 queries × 3 methods):
-    python visualize_attention.py \
-    --image images/woman.jpg \
+    CUDA_VISIBLE_DEVICES=7 python visualize_attention.py \
+    --image images/dog1.jpg \
     --ckpts "/workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt" \
-            "/workspace/SIT/exps/kv_coeff-4.0/checkpoints/0100000.pt" \
+            "/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
+            "/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
     --model SiT-XL/2 \
     --layer 4 \
-    --queries 6,6 \
-    --timestep 0.4 \
+    --queries 6,6 8,6 8,8 \
+    --timestep 0.0 \
     --out attention_grid.pdf
 
 """
@@ -109,31 +110,49 @@ def load_vae(device):
     return vae, latents_scale, latents_bias
 
 
-def load_sit_model(ckpt_path, model_name, device, resolution=256):
+def load_sit_model(ckpt_path, model_name, device, resolution=256, need_projector=False):
     """
-    Load a vanilla SiT model from *any* checkpoint (vanilla / REPA /
-    Scaffolding).  Extra keys (e.g. kv_proj, projectors) are silently
-    ignored via strict=False.
+    Load a SiT model from a checkpoint.  When need_projector=True, the
+    projector head is kept so we can map block outputs into the alignment
+    space for feature-similarity visualisation.
     """
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
-    # Auto-detect block_kwargs from checkpoint args
+    # Auto-detect settings from checkpoint args
     ckpt_args = ckpt.get("args", None)
     qk_norm = False
-    if ckpt_args is not None and hasattr(ckpt_args, "qk_norm"):
-        qk_norm = ckpt_args.qk_norm
+    encoder_depth = 8
+    projection_layer_type = "conv"
+    proj_kwargs_kernel_size = 1
+    z_dims = [768]
+
+    if ckpt_args is not None:
+        if hasattr(ckpt_args, "qk_norm"):
+            qk_norm = ckpt_args.qk_norm
+        if hasattr(ckpt_args, "encoder_depth"):
+            encoder_depth = ckpt_args.encoder_depth
+        if hasattr(ckpt_args, "projection_layer_type"):
+            projection_layer_type = ckpt_args.projection_layer_type
+        if hasattr(ckpt_args, "proj_kwargs_kernel_size"):
+            proj_kwargs_kernel_size = ckpt_args.proj_kwargs_kernel_size
 
     latent_size = resolution // 8
     block_kwargs = {"fused_attn": False, "qk_norm": qk_norm}
+
+    # eval_mode=False when we need projector, so it gets created
     model = SiT_models[model_name](
         input_size=latent_size,
         in_channels=4,
         num_classes=1000,
         use_cfg=False,
-        eval_mode=True,
+        eval_mode=(not need_projector),
+        z_dims=z_dims,
+        encoder_depth=encoder_depth,
+        projection_layer_type=projection_layer_type,
+        proj_kwargs_kernel_size=proj_kwargs_kernel_size,
         **block_kwargs,
     )
 
@@ -145,19 +164,17 @@ def load_sit_model(ckpt_path, model_name, device, resolution=256):
     else:
         state_dict = ckpt
 
-    # Filter out keys that don't belong to vanilla SiT
+    # Filter out encoder-KV keys that don't belong to vanilla SiT
     filtered = {k: v for k, v in state_dict.items() if "kv_proj" not in k}
     missing, unexpected = model.load_state_dict(filtered, strict=False)
 
-    # Silent sanity print (helpful for debugging, not user-facing)
     if missing:
-        # Typically projector keys – fine in eval_mode
-        pass
+        print(f"  [info] {len(missing)} missing keys in {os.path.basename(ckpt_path)}: {missing[:5]}...")
     if unexpected:
         print(f"  [warn] {len(unexpected)} unexpected keys in {os.path.basename(ckpt_path)}")
 
     model.eval().to(device)
-    return model
+    return model, encoder_depth
 
 
 # ========================== Attention / feature extraction =================
@@ -170,12 +187,12 @@ def extract_from_layer(model, latent, timestep, class_label, layer_idx,
     Args:
         viz_mode:
           - "attn_weights": capture softmax(Q @ K^T) → (1, heads, N, N)
-          - "feature_sim":  capture full block output → (1, N, C)
-                            (includes attention + residual + MLP + residual)
+          - "feature_sim":  capture block output → projector → (1, N, z_dim)
+                            in the REPA alignment space
 
     Returns:
         If attn_weights: Tensor (1, heads, N, N)
-        If feature_sim:  Tensor (1, N, C)  — patch token representations
+        If feature_sim:  Tensor (1, N, z_dim)  — projected patch token features
     """
     device = latent.device
     t = torch.tensor([timestep], device=device, dtype=torch.float32)
@@ -215,7 +232,7 @@ def extract_from_layer(model, latent, timestep, class_label, layer_idx,
         attn_module.forward = _patched_attn_forward
         restore = lambda: setattr(attn_module, 'forward', original_forward)
     else:
-        # Hook the entire block to capture full patch token representations
+        # Hook the block at encoder_depth to capture hidden states
         original_forward = target_block.forward
 
         def _patched_block_forward(x_in, c):
@@ -475,15 +492,31 @@ def main():
 
     # --- Load each checkpoint and extract attention -----------------------
     attn_dict = {}  # label → [attn_for_q0, attn_for_q1, ...]
+    need_proj = (args.viz_mode == "feature_sim")
     for label, ckpt_path in args.ckpts:
         print(f"\nLoading [{label}] from {ckpt_path} ...")
-        model = load_sit_model(ckpt_path, args.model, device, args.resolution)
+        model, enc_depth = load_sit_model(
+            ckpt_path, args.model, device, args.resolution,
+            need_projector=need_proj,
+        )
+
+        # For feature_sim, use encoder_depth (where projector aligns);
+        # for attn_weights, use user-specified --layer
+        layer = (enc_depth - 1) if need_proj else args.layer
+        print(f"  Extracting from layer {layer} (encoder_depth={enc_depth})")
 
         # Only need one forward pass per model (result is same for all queries)
         data = extract_from_layer(
-            model, latent, args.timestep, args.class_label, args.layer,
+            model, latent, args.timestep, args.class_label, layer,
             viz_mode=args.viz_mode,
         )
+
+        # Pass block output through projector for feature_sim
+        if need_proj and hasattr(model, 'projectors') and len(model.projectors) > 0:
+            with torch.no_grad():
+                data = model.projectors[0](data.to(device)).detach().cpu()
+            print(f"  Projected to alignment space: {data.shape}")
+
         # Replicate for each query (same data, different query index used in plotting)
         attn_dict[label] = [data] * len(query_indices)
 
