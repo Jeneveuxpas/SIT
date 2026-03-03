@@ -7,8 +7,8 @@ by computing metrics on activations from intermediate layers at various timestep
 
 Usage:
     CUDA_VISIBLE_DEVICES=7 python scripts/compute_spatial_metrics.py \
-        --checkpoint /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt \
-        --data-dir dev/shm/data \
+        --checkpoint /workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt \
+        --data-dir /dev/shm/data \
         --num-samples 256 \
         --device cuda
 """
@@ -285,8 +285,37 @@ def extract_hidden_states(
     Returns:
         List of hidden states tensors, one per layer depth
     """
-    # Use forward_features method
-    return model.forward_features(x, t, y, encoder_depths=layer_depths, proj=False)
+    # Base SiT path.
+    if hasattr(model, "forward_features"):
+        return model.forward_features(x, t, y, encoder_depths=layer_depths, proj=False)
+
+    # Fallback for SiTWithEncoderKV which does not implement forward_features.
+    required_attrs = ("x_embedder", "pos_embed", "t_embedder", "y_embedder", "blocks")
+    if not all(hasattr(model, attr) for attr in required_attrs):
+        raise AttributeError(
+            "Model does not expose forward_features and missing required attrs "
+            f"for fallback extraction: {required_attrs}"
+        )
+
+    x_tokens = model.x_embedder(x) + model.pos_embed
+    t_embed = model.t_embedder(t)
+    y_embed = model.y_embedder(y, model.training)
+    c = t_embed + y_embed
+
+    hidden_states = []
+    max_depth = max(layer_depths)
+    requested_depths = set(layer_depths)
+
+    for i, block in enumerate(model.blocks):
+        block_out = block(x_tokens, c)
+        x_tokens = block_out[0] if isinstance(block_out, tuple) else block_out
+
+        if (i + 1) in requested_depths:
+            hidden_states.append(x_tokens)
+        if (i + 1) >= max_depth:
+            break
+
+    return hidden_states
 
 
 def evaluate_spatial_metrics(
