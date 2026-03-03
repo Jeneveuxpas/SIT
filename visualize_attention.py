@@ -5,13 +5,13 @@ DINOv2 (teacher) | Vanilla DiT | iREPA | Ours
 依赖：
     pip install torch torchvision timm matplotlib einops
     pip install git+https://github.com/facebookresearch/dinov2.git  # DINOv2
-
 使用方法：
-    python visualize_attention_maps.py \
-        --image path/to/image.jpg \
-        --dit_vanilla  checkpoints/dit_vanilla.pt \
-        --dit_irepa    checkpoints/dit_irepa.pt \
-        --dit_ours     checkpoints/dit_ours.pt \
+    CUDA_VISIBLE_DEVICES=7 python visualize_attention.py \
+        --image "/workspace/SIT/images/dog.jpg" \
+        --vae_ckpt "/workspace/SIT/pretrained_models/sdvae-ft-mse-f8d4.pt" \
+        --dit_vanilla  "/workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt" \
+        --dit_irepa    "/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
+        --dit_ours     "/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
         --output       attention_comparison.pdf
 """
 
@@ -76,25 +76,37 @@ def get_dinov2_attention(
     提取 DINOv2 最后一个 block 中所有 heads 的 CLS→patch attention，
     返回 entropy 最低（最聚焦）那个 head 的 2D attention map。
 
+    DINOv2 官方 Attention 的 attn_drop 是 float 而非 nn.Dropout，
+    且使用 F.scaled_dot_product_attention 不暴露 attention weights，
+    因此 hook qkv 线性层的输出，手动计算 attention。
+
     返回: (h_feat, w_feat) float32，已归一化到 [0,1]
     """
-    attn_store = []
+    qkv_store = []
 
     def hook(module, inp, out):
-        # ViT attention 模块的 forward 返回 (attn_weight, value)
-        # timm DINOv2 的 Attention 类在 forward 里返回 (x, attn)
-        # 这里直接 hook attn_drop 之前的 softmax 输出
-        attn_store.append(out.detach())
+        qkv_store.append(out.detach())
 
-    # DINOv2 (timm backbone): 最后一个 block 的 attn.attn_drop
-    handle = model.blocks[-1].attn.attn_drop.register_forward_hook(hook)
+    # hook qkv 投影层，捕获 (B, N, 3*D) 输出
+    handle = model.blocks[-1].attn.qkv.register_forward_hook(hook)
 
     with torch.no_grad():
         model(x)
     handle.remove()
 
-    attn = attn_store[0]          # (1, num_heads, N+1, N+1)
-    attn = attn[0]                # (num_heads, N+1, N+1)
+    # 手动计算 attention weights
+    last_attn = model.blocks[-1].attn
+    num_heads = last_attn.num_heads
+    qkv = qkv_store[0]                                  # (1, N+1, 3*D)
+    B, N, _ = qkv.shape
+    head_dim = qkv.shape[-1] // (3 * num_heads)
+    qkv = qkv.reshape(B, N, 3, num_heads, head_dim)     # (1, N+1, 3, H, d)
+    q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)     # 各 (1, H, N+1, d)
+
+    scale = head_dim ** -0.5
+    attn = (q @ k.transpose(-2, -1)) * scale             # (1, H, N+1, N+1)
+    attn = attn.softmax(dim=-1)
+    attn = attn[0]                                        # (H, N+1, N+1)
 
     # CLS token attend to patch tokens
     cls_attn = attn[:, 0, 1:]     # (num_heads, N_patches)
@@ -110,7 +122,7 @@ def get_dinov2_attention(
 
     # 归一化
     best_attn = (best_attn - best_attn.min()) / (best_attn.max() - best_attn.min() + 1e-8)
-    return best_attn, best   # 同时返回 head index，供 DiT 对应使用
+    return best_attn, best
 
 
 # ─────────────────────────────────────────────
