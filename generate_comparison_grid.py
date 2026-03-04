@@ -13,18 +13,18 @@ Layout:
 
 Usage example (edit CKPT_CONFIGS and SAMPLES below to your needs):
 
-    CUDA_VISIBLE_DEVICES=6 python generate_comparison_grid.py \
+    CUDA_VISIBLE_DEVICES=7 python generate_comparison_grid.py \
         --method-a-label "SiT-XL/2+iREPA" \
         --method-b-label "SiT-XL/2+Attn.Scaf." \
-        --method-a-ckpts /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0200000.pt /workspace/iREPA-collections/0400000.pt \
+        --method-a-ckpts /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0200000.pt /workspace/SIT/iREPA-collections/0400000.pt \
         --method-b-ckpts /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0200000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0400000.pt \
         --ckpt-labels 100K 200K 400K \
-        --label-range 30 40 \
+        --label-range 50 60\
         --seeds 0 1 2 42 72 142 162 \
         --cfg-scale 4.0 \
         --num-steps 250 \
         --mode ode \
-        --out output/comparison_grid.png
+        --out output/
 
 Arguments
 ---------
@@ -551,50 +551,8 @@ def main():
         plt.close(fig)
         print(f"  [{combo_i+1}/{n_combos}] {strip_path}")
 
-    # ------------------------------------------------------------------
-    # Save combined overview grids (paginated by --grid-cols)
-    # ------------------------------------------------------------------
-    page_size = args.grid_cols
-    n_pages = math.ceil(n_combos / page_size)
-    print(f"\nSaving {n_pages} combined overview grid(s) …")
-
-    safe_a = args.method_a_label.replace("/", "-").replace(" ", "_")
-    safe_b = args.method_b_label.replace("/", "-").replace(" ", "_")
-
-    for page_i in range(n_pages):
-        page_combos = combos[page_i * page_size : (page_i + 1) * page_size]
-        group_titles = [
-            f"{imagenet_classname(cl)}\ncls{cl} s{s}"
-            for cl, s in page_combos
-        ]
-        # Rebuild images_a / images_b slices for this page
-        images_a_page = [
-            [cache[0][ck_i][(cl, s)] for (cl, s) in page_combos]
-            for ck_i in range(n_ckpts)
-        ]
-        images_b_page = [
-            [cache[1][ck_i][(cl, s)] for (cl, s) in page_combos]
-            for ck_i in range(n_ckpts)
-        ]
-        grid_path = os.path.join(
-            args.out_dir,
-            f"overview_{safe_a}_vs_{safe_b}_page{page_i+1:02d}.png",
-        )
-        make_grid_figure(
-            images_a=images_a_page,
-            images_b=images_b_page,
-            method_a_label=args.method_a_label,
-            method_b_label=args.method_b_label,
-            ckpt_labels=args.ckpt_labels,
-            group_titles=group_titles,
-            save_path=grid_path,
-            dpi=args.dpi,
-            cell_size=args.cell_size,
-        )
-
     print("\nDone! 🎉")
     print(f"  Strips : {strips_dir}/")
-    print(f"  Grids  : {args.out_dir}/overview_*.png")
 
 
 if __name__ == "__main__":
