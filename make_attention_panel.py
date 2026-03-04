@@ -40,12 +40,12 @@ Usage example (from-ckpts mode)
         "iREPA:/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
         "Ours:/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
     --model SiT-XL/2 \
-    --layer 4 \
+    --layer 8 \
     --timestep 0.1 \
     --out output/panel.pdf \
-    --row-label $'Diffusion Features\n(SiT-XL/2 Layer 4)' \
+    --row-label $'Diffusion Features\n(SiT-XL/2 Layer 8)' \
     --labels "Vanilla" "iREPA" "Ours" \
-    --row-label-x 0.7
+    --row-label-x 0.9
 
   The 4 images map to:
     panel[0,0..3] ← images[0] + queries[0]   (row 0, group 0)
@@ -123,7 +123,8 @@ def assemble_panel(
     save_path,
     cmap="viridis",
     vmin=None, vmax=None,
-    row_label_x=0.5,   # 0=figure left edge, 1=leftmost subplot; 0.5=midpoint
+    row_label_x=0.5,
+    font_family="serif",   # "serif" = Times-like, "sans-serif" = Helvetica-like
 ):
     """
     Draw the 2 × 8 panel.
@@ -134,6 +135,20 @@ def assemble_panel(
         cell 2 → row 1, group 0  (cols 0-3)
         cell 3 → row 1, group 1  (cols 4-7)
     """
+    # --- Font configuration --------------------------------------------------
+    if font_family == "serif":
+        plt.rcParams.update({
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "Times", "Computer Modern Roman",
+                           "DejaVu Serif", "serif"],
+            "mathtext.fontset": "cm",
+        })
+    else:  # sans-serif
+        plt.rcParams.update({
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Helvetica", "Arial", "Liberation Sans",
+                                "DejaVu Sans", "sans-serif"],
+        })
     N_ROWS   = 2
     N_GROUPS = 2
     N_METHODS = len(method_labels)          # 3
@@ -342,6 +357,9 @@ def main():
         "--labels", nargs=3, default=["Vanilla", "iREPA", "Ours"], metavar="NAME",
         help="Names for the 3 methods (columns 2-4 within each group)",
     )
+    parser.add_argument("--font", default="serif",
+        choices=["serif", "sans-serif"],
+        help="Font family: 'serif' (Times New Roman, default) or 'sans-serif' (Helvetica/Arial)")
     parser.add_argument("--row-label-x", type=float, default=0.5, metavar="X",
         help="Horizontal position of row label: 0=figure edge, 1=first subplot. Default 0.5 (midpoint).")
     parser.add_argument("--cmap", default="viridis")
@@ -439,6 +457,7 @@ def main():
         save_path=args.out,
         cmap=args.cmap,
         row_label_x=args.row_label_x,
+        font_family=args.font,
     )
 
 
