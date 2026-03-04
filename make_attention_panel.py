@@ -45,7 +45,9 @@ Usage example (from-ckpts mode)
     --out output/panel.pdf \
     --row-label $'Diffusion attention output\n(SiT-XL/2 Layer 8)' \
     --labels "Vanilla" "iREPA" "AttnScaf" \
-    --row-label-x 0.9
+    --row-label-x 0.9  \
+    --fig-width 6.7 \
+    --fontsize 9
 
   The 4 images map to:
     panel[0,0..3] ← images[0] + queries[0]   (row 0, group 0)
@@ -217,11 +219,13 @@ def assemble_panel(
         else:
             return COLS_PER_GROUP + 1 + local_col   # 5-8
 
-    MARKER_KWARGS_PIX  = dict(marker="*", color="red", markersize=13,
-                               markeredgecolor="darkred", markeredgewidth=0.7,
+    # Scale marker size with cell width so stars don't dominate at small fig sizes
+    _ms_scale = cell_w / 2.2   # 1.0 at default cell_w=2.2", smaller when fig_width given
+    MARKER_KWARGS_PIX  = dict(marker="*", color="red", markersize=max(13 * _ms_scale, 3),
+                               markeredgecolor="darkred", markeredgewidth=max(0.7 * _ms_scale, 0.3),
                                linestyle="None")
-    MARKER_KWARGS_GRID = dict(marker="*", color="red", markersize=10,
-                               markeredgecolor="darkred", markeredgewidth=0.5,
+    MARKER_KWARGS_GRID = dict(marker="*", color="red", markersize=max(10 * _ms_scale, 3),
+                               markeredgecolor="darkred", markeredgewidth=max(0.5 * _ms_scale, 0.2),
                                linestyle="None")
 
     all_ims = []
@@ -248,7 +252,7 @@ def assemble_panel(
 
             # Group/column header: top row only
             if row == 0:
-                ax0.set_title("Input", fontsize=fontsize, fontweight="bold", pad=3)
+                ax0.set_title("Input", fontsize=fontsize, fontweight="normal", pad=3)
 
             # ---- Cols 1-3 of group: method heatmaps -----------------------
             for m_idx, method in enumerate(method_labels):
@@ -268,7 +272,7 @@ def assemble_panel(
                 ax.set_yticks([])
 
                 if row == 0:
-                    ax.set_title(method, fontsize=fontsize, fontweight="bold", pad=3)
+                    ax.set_title(method, fontsize=fontsize, fontweight="normal", pad=3)
 
     # ---- Single shared rotated label on the far left -------------------------
     # row_label_x: fraction between 0 (figure edge) and gs.left (first subplot)
@@ -278,7 +282,7 @@ def assemble_panel(
         fig.text(
             x_label, y_center, row_label,
             ha="center", va="center",
-            fontsize=fontsize, fontweight="bold",
+            fontsize=fontsize, fontweight="normal",
             rotation=90,
             multialignment="center",
         )
