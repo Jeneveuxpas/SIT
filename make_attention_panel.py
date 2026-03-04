@@ -47,7 +47,8 @@ Usage example (from-ckpts mode)
     --labels "Vanilla" "iREPA" "AttnScaf" \
     --row-label-x 0.7  \
     --fig-width 6.7 \
-    --fontsize 9
+    --fontsize 9 \
+    --font "STIXGeneral" 
 
   The 4 images map to:
     panel[0,0..3] ← images[0] + queries[0]   (row 0, group 0)
@@ -213,10 +214,10 @@ def assemble_panel(
 
     # Scale marker size with cell width so stars don't dominate at small fig sizes
     _ms_scale = cell_w / 2.2   # 1.0 at default cell_w=2.2", smaller when fig_width given
-    MARKER_KWARGS_PIX  = dict(marker="*", color="red", markersize=max(13 * _ms_scale, 3),
+    MARKER_KWARGS_PIX  = dict(marker="*", color="red", markersize=max(18 * _ms_scale, 4),
                                markeredgecolor="darkred", markeredgewidth=max(0.7 * _ms_scale, 0.3),
                                linestyle="None")
-    MARKER_KWARGS_GRID = dict(marker="*", color="red", markersize=max(10 * _ms_scale, 3),
+    MARKER_KWARGS_GRID = dict(marker="*", color="red", markersize=max(14 * _ms_scale, 4),
                                markeredgecolor="darkred", markeredgewidth=max(0.5 * _ms_scale, 0.2),
                                linestyle="None")
 
