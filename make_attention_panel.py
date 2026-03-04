@@ -32,20 +32,19 @@ Layout
 
 Usage example (from-ckpts mode)
 ---------------------------------
-  CUDA_VISIBLE_DEVICES=0 python make_attention_panel.py \\
-    --mode from-ckpts \\
-    --images images/tomato.jpg images/tomato.jpg images/dog.jpg images/dog.jpg \\
-    --queries "8,8"  "4,4"  "8,8"  "4,4" \\
-    --ckpts \\
-        "Vanilla:/path/to/vanilla/checkpoints/0100000.pt" \\
-        "iREPA:/path/to/irepa/checkpoints/0100000.pt" \\
-        "Ours:/path/to/ours/checkpoints/0100000.pt" \\
-    --model SiT-XL/2 \\
-    --layer 14 \\
-    --timestep 0.3 \\
-    --out output/panel.pdf \\
-    --row-labels "Row A" "Row B" \\
-    --group-labels "Condition 1" "Condition 2"
+  CUDA_VISIBLE_DEVICES=0 python make_attention_panel.py \
+    --images images/bird1.jpg images/bird1.jpg images/sleep.jpg images/sleep.jpg \
+    --queries "2,12"  "7,6"  "2,10"  "6,7" \
+    --ckpts \
+        "Vanilla:/workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt" \
+        "iREPA:/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
+        "Ours:/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
+    --model SiT-XL/2 \
+    --layer 4 \
+    --timestep 0.1 \
+    --out output/panel.pdf \
+    --row-label $'Diffusion Features\n(SiT-XL/2 Layer 4)' \
+    --labels "Vanilla" "iREPA" "Ours"
 
   The 4 images map to:
     panel[0,0..3] ← images[0] + queries[0]   (row 0, group 0)
@@ -135,16 +134,12 @@ def assemble_panel(
     COLS_PER_GROUP = 1 + N_METHODS          # 4
     N_COLS   = N_GROUPS * COLS_PER_GROUP    # 8
 
-    # --- Auto vmin/vmax from all heatmaps -----------------------------------
-    all_vals = np.concatenate([
-        c["heatmaps"][i].ravel()
-        for c in cell_data
-        for i in range(N_METHODS)
-    ])
-    if vmin is None:
-        vmin = float(all_vals.min())
-    if vmax is None:
-        vmax = float(all_vals.max())
+    # --- Normalization: per-heatmap by default --------------------------------
+    # Using per-heatmap (vmin=None, vmax=None) means each subplot auto-scales
+    # to its own range, showing maximum spatial contrast regardless of the
+    # absolute cosine-similarity level.  Pass explicit vmin/vmax to override.
+    # (Global normalization tends to wash out methods with uniformly high
+    # cosine similarity, e.g. vanilla SiT at low timestep.)
 
     # Figure sizing: each cell ~2.4 inches wide, 2.4 tall; colorbar 0.25
     cell_w = 2.2
@@ -172,7 +167,7 @@ def assemble_panel(
         width_ratios=width_ratios,
         wspace=0.04,
         hspace=0.08,
-        left=0.10, right=0.97,
+        left=0.14, right=0.97,
         top=0.90,  bottom=0.03,
     )
 
@@ -220,10 +215,11 @@ def assemble_panel(
             for m_idx, method in enumerate(method_labels):
                 gc = gs_col(grp, 1 + m_idx)
                 ax = fig.add_subplot(gs[row, gc])
+                # vmin/vmax=None → each heatmap auto-scales to its own range
                 im = ax.imshow(
                     heatmaps[m_idx],
                     cmap=cmap,
-                    vmin=vmin, vmax=vmax,
+                    vmin=vmin, vmax=vmax,   # None by default → per-heatmap
                     interpolation="nearest",
                     aspect="equal",
                 )
@@ -236,10 +232,12 @@ def assemble_panel(
                     ax.set_title(method, fontsize=10, fontweight="bold", pad=3)
 
     # ---- Single shared rotated label on the far left -------------------------
+    # Place label halfway between figure edge (x=0) and the leftmost subplot.
     y_center = (gs.top + gs.bottom) / 2
+    x_label  = gs.left / 2          # midpoint between edge and first subplot
     if row_label:
         fig.text(
-            0.01, y_center, row_label,
+            x_label, y_center, row_label,
             ha="center", va="center",
             fontsize=10, fontweight="bold",
             rotation=90,
