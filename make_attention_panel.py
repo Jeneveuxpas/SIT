@@ -111,13 +111,14 @@ def compute_heatmap(data, q_idx, grid_size, viz_mode="attn_output"):
 # ===========================================================================
 
 def assemble_panel(
-    cell_data,          # list of 4 dicts, each: {"orig": PIL, "heatmaps": [H, H, H], "q_pix": (qx,qy), "q_grid": (qx,qy)}
-    method_labels,      # ["Vanilla", "iREPA", "Ours"]  length 3
-    row_label,          # single string, shared vertical label for the whole panel
-    group_labels,       # ["Condition 1", "Condition 2"] length 2  (or None)
+    cell_data,
+    method_labels,
+    row_label,
+    group_labels,
     save_path,
     cmap="viridis",
     vmin=None, vmax=None,
+    row_label_x=0.5,   # 0=figure left edge, 1=leftmost subplot; 0.5=midpoint
 ):
     """
     Draw the 2 × 8 panel.
@@ -134,12 +135,20 @@ def assemble_panel(
     COLS_PER_GROUP = 1 + N_METHODS          # 4
     N_COLS   = N_GROUPS * COLS_PER_GROUP    # 8
 
-    # --- Normalization: per-heatmap by default --------------------------------
-    # Using per-heatmap (vmin=None, vmax=None) means each subplot auto-scales
-    # to its own range, showing maximum spatial contrast regardless of the
-    # absolute cosine-similarity level.  Pass explicit vmin/vmax to override.
-    # (Global normalization tends to wash out methods with uniformly high
-    # cosine similarity, e.g. vanilla SiT at low timestep.)
+    # --- Global normalization across all heatmaps ---------------------------
+    # All heatmaps share the same vmin/vmax so that colors represent true
+    # cosine similarity values.  This means Vanilla (spatially uniform:
+    # all values near 1.0) will appear uniformly yellow — which is the
+    # correct scientific result showing its lack of spatial structure.
+    all_vals = np.concatenate([
+        c["heatmaps"][i].ravel()
+        for c in cell_data
+        for i in range(N_METHODS)
+    ])
+    if vmin is None:
+        vmin = float(all_vals.min())
+    if vmax is None:
+        vmax = float(all_vals.max())
 
     # Figure sizing: each cell ~2.4 inches wide, 2.4 tall; colorbar 0.25
     cell_w = 2.2
@@ -215,11 +224,11 @@ def assemble_panel(
             for m_idx, method in enumerate(method_labels):
                 gc = gs_col(grp, 1 + m_idx)
                 ax = fig.add_subplot(gs[row, gc])
-                # vmin/vmax=None → each heatmap auto-scales to its own range
+                # Shared global vmin/vmax — colors = true cosine similarity
                 im = ax.imshow(
                     heatmaps[m_idx],
                     cmap=cmap,
-                    vmin=vmin, vmax=vmax,   # None by default → per-heatmap
+                    vmin=vmin, vmax=vmax,
                     interpolation="nearest",
                     aspect="equal",
                 )
@@ -232,9 +241,9 @@ def assemble_panel(
                     ax.set_title(method, fontsize=10, fontweight="bold", pad=3)
 
     # ---- Single shared rotated label on the far left -------------------------
-    # Place label halfway between figure edge (x=0) and the leftmost subplot.
+    # row_label_x: fraction between 0 (figure edge) and gs.left (first subplot)
     y_center = (gs.top + gs.bottom) / 2
-    x_label  = gs.left / 2          # midpoint between edge and first subplot
+    x_label  = row_label_x * gs.left   # e.g. 0.5 → midpoint
     if row_label:
         fig.text(
             x_label, y_center, row_label,
@@ -266,7 +275,7 @@ def assemble_panel(
                 fontsize=11, fontweight="bold",
             )
 
-    # ---- Shared colorbar ---------------------------------------------------
+    # ---- Shared colorbar (actual data range) --------------------------------
     cbar_ax = fig.add_subplot(gs[:, -1])
     cbar = fig.colorbar(all_ims[0], cax=cbar_ax)
     cbar.set_label("Cosine Similarity", fontsize=9)
@@ -323,6 +332,8 @@ def main():
         "--labels", nargs=3, default=["Vanilla", "iREPA", "Ours"], metavar="NAME",
         help="Names for the 3 methods (columns 2-4 within each group)",
     )
+    parser.add_argument("--row-label-x", type=float, default=0.5, metavar="X",
+        help="Horizontal position of row label: 0=figure edge, 1=first subplot. Default 0.5 (midpoint).")
     parser.add_argument("--cmap", default="viridis")
     parser.add_argument("--out", default="output/panel.pdf", help="Output file (.pdf or .png)")
 
@@ -417,6 +428,7 @@ def main():
         group_labels=args.group_labels,
         save_path=args.out,
         cmap=args.cmap,
+        row_label_x=args.row_label_x,
     )
 
 
