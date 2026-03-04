@@ -45,7 +45,7 @@ Usage example (from-ckpts mode)
     --out output/panel.pdf \
     --row-label $'Diffusion attention output\n(SiT-XL/2 Layer 8)' \
     --labels "Vanilla" "iREPA" "AttnScaf" \
-    --row-label-x 0.9  \
+    --row-label-x 0.7  \
     --fig-width 6.7 \
     --fontsize 9
 
@@ -140,19 +140,11 @@ def assemble_panel(
         cell 3 → row 1, group 1  (cols 4-7)
     """
     # --- Font configuration --------------------------------------------------
-    if font_family == "serif":
-        plt.rcParams.update({
-            "font.family": "serif",
-            "font.serif": ["Times New Roman", "Times", "Computer Modern Roman",
-                           "DejaVu Serif", "serif"],
-            "mathtext.fontset": "cm",
-        })
-    else:  # sans-serif
-        plt.rcParams.update({
-            "font.family": "sans-serif",
-            "font.sans-serif": ["Helvetica", "Arial", "Liberation Sans",
-                                "DejaVu Sans", "sans-serif"],
-        })
+    # font_family can be any font name, e.g. "Arial", "Times New Roman",
+    # "STIXGeneral", "DejaVu Sans", "Helvetica", etc.
+    plt.rcParams.update({
+        "font.family": font_family,
+    })
     N_ROWS   = 2
     N_GROUPS = 2
     N_METHODS = len(method_labels)          # 3
@@ -246,6 +238,8 @@ def assemble_panel(
             ax0.plot(qx_pix, qy_pix, **MARKER_KWARGS_PIX)
             ax0.set_xticks([])
             ax0.set_yticks([])
+            for spine in ax0.spines.values():
+                spine.set_visible(False)
 
             # Row label: drawn once per row as rotated fig.text, to the left of group 0
             # (done after the loop, see below)
@@ -270,6 +264,8 @@ def assemble_panel(
                 ax.plot(qx_grid, qy_grid, **MARKER_KWARGS_GRID)
                 ax.set_xticks([])
                 ax.set_yticks([])
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
 
                 if row == 0:
                     ax.set_title(method, fontsize=fontsize, fontweight="normal", pad=3)
@@ -371,9 +367,8 @@ def main():
         "--labels", nargs=3, default=["Vanilla", "iREPA", "Ours"], metavar="NAME",
         help="Names for the 3 methods (columns 2-4 within each group)",
     )
-    parser.add_argument("--font", default="sans-serif",
-        choices=["serif", "sans-serif"],
-        help="Font family: 'sans-serif' (default) or 'serif' (Times New Roman)")
+    parser.add_argument("--font", default="DejaVu Sans",
+        help="Font name, e.g. 'DejaVu Sans' (default), 'Arial', 'Times New Roman', 'STIXGeneral'")
     parser.add_argument("--fontsize", type=float, default=9,
         help="Base font size in pt (default 9). For ECCV full-width figures, try 9.")
     parser.add_argument("--fig-width", type=float, default=None,
