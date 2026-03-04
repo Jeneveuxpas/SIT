@@ -43,7 +43,7 @@ Usage example (from-ckpts mode)
     --layer 8 \
     --timestep 0.1 \
     --out output/panel.pdf \
-    --row-label $'Diffusion Features\n(SiT-XL/2 Layer 8)' \
+    --row-label $'Diffusion attention output\n(SiT-XL/2 Layer 8)' \
     --labels "Vanilla" "iREPA" "Ours" \
     --row-label-x 0.9
 
@@ -124,7 +124,7 @@ def assemble_panel(
     cmap="viridis",
     vmin=None, vmax=None,
     row_label_x=0.5,
-    font_family="serif",   # "serif" = Times-like, "sans-serif" = Helvetica-like
+    font_family="sans-serif",  # matches matplotlib default (DejaVu Sans / Helvetica)
 ):
     """
     Draw the 2 × 8 panel.
