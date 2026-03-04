@@ -38,13 +38,13 @@ Usage example (from-ckpts mode)
     --ckpts \
         "Vanilla:/workspace/SIT/exps/vanilla_sit/checkpoints/0100000.pt" \
         "iREPA:/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
-        "Ours:/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
+        "AttnScaf:/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
     --model SiT-XL/2 \
     --layer 8 \
     --timestep 0.1 \
     --out output/panel.pdf \
     --row-label $'Diffusion attention output\n(SiT-XL/2 Layer 8)' \
-    --labels "Vanilla" "iREPA" "Ours" \
+    --labels "Vanilla" "iREPA" "AttnScaf" \
     --row-label-x 0.9
 
   The 4 images map to:
@@ -124,7 +124,9 @@ def assemble_panel(
     cmap="viridis",
     vmin=None, vmax=None,
     row_label_x=0.5,
-    font_family="sans-serif",  # matches matplotlib default (DejaVu Sans / Helvetica)
+    font_family="sans-serif",
+    fontsize=9,        # base font size for column/row labels (pt in the saved PDF)
+    fig_width=None,    # total figure width in inches; None = auto from cell_w
 ):
     """
     Draw the 2 × 8 panel.
@@ -170,14 +172,22 @@ def assemble_panel(
     if vmax is None:
         vmax = float(all_vals.max())
 
-    # Figure sizing: each cell ~2.4 inches wide, 2.4 tall; colorbar 0.25
-    cell_w = 2.2
-    cell_h = 2.2
-    gap_w  = 0.15   # extra gap between the two groups
+    # Figure sizing -----------------------------------------------------------
+    # If fig_width is given, derive cell_w from it; otherwise use default 2.2"
+    # ECCV textwidth ≈ 6.7". Designing the figure at that width means font sizes
+    # are already at print scale and LaTeX won't shrink them.
+    if fig_width is not None:
+        # subtract fixed widths (gap + colorbar + row-label margin)
+        fixed_w = 0.15 + 0.35 + 0.9
+        cell_w = (fig_width - fixed_w) / N_COLS
+    else:
+        cell_w = 2.2
+    cell_h = cell_w          # keep cells square
+    gap_w  = 0.15
     cbar_w = 0.35
 
-    fig_w = N_COLS * cell_w + gap_w + cbar_w + 0.9   # +0.9 for rotated row labels
-    fig_h = N_ROWS * cell_h + 0.55                    # +0.55 for col labels
+    fig_w = N_COLS * cell_w + gap_w + cbar_w + 0.9
+    fig_h = N_ROWS * cell_h + fontsize / 72 * 4  # headroom for column titles
 
     fig = plt.figure(figsize=(fig_w, fig_h))
 
@@ -238,7 +248,7 @@ def assemble_panel(
 
             # Group/column header: top row only
             if row == 0:
-                ax0.set_title("Input", fontsize=10, fontweight="bold", pad=3)
+                ax0.set_title("Input", fontsize=fontsize, fontweight="bold", pad=3)
 
             # ---- Cols 1-3 of group: method heatmaps -----------------------
             for m_idx, method in enumerate(method_labels):
@@ -258,7 +268,7 @@ def assemble_panel(
                 ax.set_yticks([])
 
                 if row == 0:
-                    ax.set_title(method, fontsize=10, fontweight="bold", pad=3)
+                    ax.set_title(method, fontsize=fontsize, fontweight="bold", pad=3)
 
     # ---- Single shared rotated label on the far left -------------------------
     # row_label_x: fraction between 0 (figure edge) and gs.left (first subplot)
@@ -268,7 +278,7 @@ def assemble_panel(
         fig.text(
             x_label, y_center, row_label,
             ha="center", va="center",
-            fontsize=10, fontweight="bold",
+            fontsize=fontsize, fontweight="bold",
             rotation=90,
             multialignment="center",
         )
@@ -303,8 +313,8 @@ def assemble_panel(
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(sm, cax=cbar_ax, ticks=[0.0, 0.25, 0.50, 0.75, 1.0])
-    cbar.set_label("Cosine Similarity", fontsize=9)
-    cbar.ax.tick_params(labelsize=8)
+    cbar.set_label("Cosine Similarity", fontsize=fontsize)
+    cbar.ax.tick_params(labelsize=max(fontsize - 1, 6))
 
     plt.savefig(save_path, dpi=300, bbox_inches="tight", pad_inches=0.04)
     plt.close()
@@ -357,9 +367,13 @@ def main():
         "--labels", nargs=3, default=["Vanilla", "iREPA", "Ours"], metavar="NAME",
         help="Names for the 3 methods (columns 2-4 within each group)",
     )
-    parser.add_argument("--font", default="serif",
+    parser.add_argument("--font", default="sans-serif",
         choices=["serif", "sans-serif"],
-        help="Font family: 'serif' (Times New Roman, default) or 'sans-serif' (Helvetica/Arial)")
+        help="Font family: 'sans-serif' (default) or 'serif' (Times New Roman)")
+    parser.add_argument("--fontsize", type=float, default=9,
+        help="Base font size in pt (default 9). For ECCV full-width figures, try 9.")
+    parser.add_argument("--fig-width", type=float, default=None,
+        help="Total figure width in inches. ECCV textwidth=6.7. None=auto (2.2in/cell).")
     parser.add_argument("--row-label-x", type=float, default=0.5, metavar="X",
         help="Horizontal position of row label: 0=figure edge, 1=first subplot. Default 0.5 (midpoint).")
     parser.add_argument("--cmap", default="viridis")
@@ -458,6 +472,8 @@ def main():
         cmap=args.cmap,
         row_label_x=args.row_label_x,
         font_family=args.font,
+        fontsize=args.fontsize,
+        fig_width=args.fig_width,
     )
 
 
