@@ -7,16 +7,16 @@ positions.  All checkpoints are loaded as vanilla SiT (since at inference
 time every method uses its own learned K/V).
 
 Usage example (2 queries × 3 methods):
-    CUDA_VISIBLE_DEVICES=5 python visualize_attention.py \
-    --image images/dog.jpg \
+    CUDA_VISIBLE_DEVICES=6 python visualize_attention.py \
+    --image images/dog7.jpg \
     --ckpts "/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
             "/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
     --model SiT-XL/2 \
-    --query-region "4,4:8,8" \
+    --query-region "1,2:12,12" \
     --viz-mode attn_output \
     --layer 4 \
-    --timestep 0.1 \
-    --out dog_attn_0.1_1.pdf
+    --timestep 0.1 0.3 0.5 0.8 \
+    --out output/
 
 """
 
@@ -432,8 +432,8 @@ def main():
     parser.add_argument("--model", type=str, default="SiT-XL/2",
                         choices=list(SiT_models.keys()),
                         help="SiT architecture name")
-    parser.add_argument("--layer", type=int, default=14,
-                        help="Transformer block index for attn_weights mode (0-based). "
+    parser.add_argument("--layer", type=int, nargs="+", default=[14],
+                        help="Transformer block index(es) for attn_weights/attn_output mode (0-based). "
                              "Ignored in feature_sim mode (auto-uses encoder_depth).")
     parser.add_argument("--viz-mode", type=str, default="feature_sim",
                         choices=["attn_weights", "attn_output", "feature_sim"],
@@ -473,22 +473,28 @@ def main():
 
     # --- Load each checkpoint ------------------------------------------------
     need_proj = (args.viz_mode == "feature_sim")
-    models_info = []
+    models_info = []  # [(label, model, enc_depth)]
     for label, ckpt_path in args.ckpts:
         print(f"\nLoading [{label}] from {ckpt_path} ...")
         model, enc_depth = load_sit_model(
             ckpt_path, args.model, device, args.resolution,
             need_projector=need_proj,
         )
-        layer = (enc_depth - 1) if need_proj else args.layer
-        print(f"  Will extract from layer {layer} (encoder_depth={enc_depth})")
-        models_info.append((label, model, enc_depth, layer))
+        print(f"  encoder_depth={enc_depth}")
+        models_info.append((label, model, enc_depth))
+
+    # For feature_sim, layer is fixed to encoder_depth-1; otherwise use user-specified layers
+    if need_proj:
+        layers = [models_info[0][2] - 1]
+        print(f"  feature_sim mode: using layer {layers[0]} (encoder_depth)")
+    else:
+        layers = args.layer
 
     # --- Output directory ----------------------------------------------------
     out_dir = args.out
     os.makedirs(out_dir, exist_ok=True)
 
-    # --- Loop over images × timesteps --------------------------------------
+    # --- Loop over images × timesteps × layers ------------------------------
     for image_path in args.image:
         img_name = os.path.splitext(os.path.basename(image_path))[0]
         print(f"\n{'#'*60}")
@@ -506,7 +512,7 @@ def main():
         total_tokens = grid_size * grid_size
 
         # Expand --query-region "r1,c1:r2,c2" into individual queries
-        queries = list(args.queries)  # copy so we don't mutate across images
+        queries = list(args.queries)
         if args.query_region is not None:
             tl, br = args.query_region.split(":")
             r1, c1 = int(tl.split(",")[0]), int(tl.split(",")[1])
@@ -525,38 +531,38 @@ def main():
         print(f"Grid: {grid_size}×{grid_size} = {total_tokens} tokens")
         print(f"Queries: {list(zip(queries, query_indices))}")
 
-        # --- Loop over timesteps -------------------------------------------
-        for timestep in args.timestep:
-            print(f"\n{'='*60}")
-            print(f"Timestep = {timestep}")
-            print(f"{'='*60}")
+        for layer in layers:
+            for timestep in args.timestep:
+                print(f"\n{'='*60}")
+                print(f"Layer = {layer}, Timestep = {timestep}")
+                print(f"{'='*60}")
 
-            attn_dict = {}
-            for label, model, enc_depth, layer in models_info:
-                print(f"  Extracting [{label}] layer {layer} ...")
-                data = extract_from_layer(
-                    model, latent, timestep, args.class_label, layer,
-                    viz_mode=args.viz_mode,
+                attn_dict = {}
+                for label, model, enc_depth in models_info:
+                    cur_layer = (enc_depth - 1) if need_proj else layer
+                    print(f"  Extracting [{label}] layer {cur_layer} ...")
+                    data = extract_from_layer(
+                        model, latent, timestep, args.class_label, cur_layer,
+                        viz_mode=args.viz_mode,
+                    )
+                    if need_proj and hasattr(model, 'projectors') and len(model.projectors) > 0:
+                        with torch.no_grad():
+                            data = model.projectors[0](data.to(device)).detach().cpu()
+                        print(f"  Projected to alignment space: {data.shape}")
+                    attn_dict[label] = [data] * len(query_indices)
+
+                save_path = os.path.join(out_dir, f"{img_name}_{args.viz_mode}_t{timestep}_L{layer}.pdf")
+
+                plot_grid(
+                    original_img, attn_dict,
+                    query_indices, query_labels,
+                    grid_size, save_path,
+                    viz_mode=args.viz_mode, cmap=args.cmap,
                 )
-                if need_proj and hasattr(model, 'projectors') and len(model.projectors) > 0:
-                    with torch.no_grad():
-                        data = model.projectors[0](data.to(device)).detach().cpu()
-                    print(f"  Projected to alignment space: {data.shape}")
-                attn_dict[label] = [data] * len(query_indices)
-
-            layer_tag = models_info[0][3]
-            save_path = os.path.join(out_dir, f"{img_name}_{args.viz_mode}_t{timestep}_L{layer_tag}.pdf")
-
-            plot_grid(
-                original_img, attn_dict,
-                query_indices, query_labels,
-                grid_size, save_path,
-                viz_mode=args.viz_mode, cmap=args.cmap,
-            )
 
     # Free memory
     del vae
-    for _, model, _, _ in models_info:
+    for _, model, _ in models_info:
         del model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
