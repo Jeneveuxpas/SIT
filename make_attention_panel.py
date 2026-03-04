@@ -86,7 +86,7 @@ from visualize_attention import (
 # Heatmap computation
 # ===========================================================================
 
-def compute_heatmap(data, q_idx, grid_size, viz_mode="attn_output"):
+def compute_heatmap(data, q_idx, grid_size, viz_mode="attn_output", label=""):
     """
     Convert raw extracted tensor into a (grid_size, grid_size) heatmap.
 
@@ -104,6 +104,10 @@ def compute_heatmap(data, q_idx, grid_size, viz_mode="attn_output"):
         hmap = F.cosine_similarity(
             query_feat.unsqueeze(0), features, dim=-1
         ).numpy()
+    # Debug: print actual value range
+    print(f"  [{label or 'method'}] cosine sim: "
+          f"min={hmap.min():.4f}  max={hmap.max():.4f}  "
+          f"mean={hmap.mean():.4f}  std={hmap.std():.6f}")
     return hmap.reshape(grid_size, grid_size)
 
 
@@ -416,7 +420,7 @@ def main():
             if need_proj and hasattr(model, "projectors") and len(model.projectors) > 0:
                 with torch.no_grad():
                     data = model.projectors[0](data.to(device)).detach().cpu()
-            hmap = compute_heatmap(data, q_idx, grid_size, args.viz_mode)
+            hmap = compute_heatmap(data, q_idx, grid_size, args.viz_mode, label=mlabel)
             heatmaps.append(hmap)
 
         cell_data.append({
