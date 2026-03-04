@@ -44,7 +44,8 @@ Usage example (from-ckpts mode)
     --timestep 0.1 \
     --out output/panel.pdf \
     --row-label $'Diffusion Features\n(SiT-XL/2 Layer 4)' \
-    --labels "Vanilla" "iREPA" "Ours"
+    --labels "Vanilla" "iREPA" "Ours" \
+    --row-label-x 0.7
 
   The 4 images map to:
     panel[0,0..3] ← images[0] + queries[0]   (row 0, group 0)
@@ -275,9 +276,14 @@ def assemble_panel(
                 fontsize=11, fontweight="bold",
             )
 
-    # ---- Shared colorbar (actual data range) --------------------------------
+    # ---- Shared colorbar fixed to [0, 1] with clean ticks -------------------
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
     cbar_ax = fig.add_subplot(gs[:, -1])
-    cbar = fig.colorbar(all_ims[0], cax=cbar_ax)
+    norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, cax=cbar_ax, ticks=[0.0, 0.25, 0.50, 0.75, 1.0])
     cbar.set_label("Cosine Similarity", fontsize=9)
     cbar.ax.tick_params(labelsize=8)
 
