@@ -134,12 +134,20 @@ def assemble_panel(
     COLS_PER_GROUP = 1 + N_METHODS          # 4
     N_COLS   = N_GROUPS * COLS_PER_GROUP    # 8
 
-    # --- Normalization: per-heatmap by default --------------------------------
-    # Using per-heatmap (vmin=None, vmax=None) means each subplot auto-scales
-    # to its own range, showing maximum spatial contrast regardless of the
-    # absolute cosine-similarity level.  Pass explicit vmin/vmax to override.
-    # (Global normalization tends to wash out methods with uniformly high
-    # cosine similarity, e.g. vanilla SiT at low timestep.)
+    # --- Global normalization across all heatmaps ---------------------------
+    # All heatmaps share the same vmin/vmax so that colors represent true
+    # cosine similarity values.  This means Vanilla (spatially uniform:
+    # all values near 1.0) will appear uniformly yellow — which is the
+    # correct scientific result showing its lack of spatial structure.
+    all_vals = np.concatenate([
+        c["heatmaps"][i].ravel()
+        for c in cell_data
+        for i in range(N_METHODS)
+    ])
+    if vmin is None:
+        vmin = float(all_vals.min())
+    if vmax is None:
+        vmax = float(all_vals.max())
 
     # Figure sizing: each cell ~2.4 inches wide, 2.4 tall; colorbar 0.25
     cell_w = 2.2
@@ -215,11 +223,11 @@ def assemble_panel(
             for m_idx, method in enumerate(method_labels):
                 gc = gs_col(grp, 1 + m_idx)
                 ax = fig.add_subplot(gs[row, gc])
-                # vmin/vmax=None → each heatmap auto-scales to its own range
+                # Shared global vmin/vmax — colors = true cosine similarity
                 im = ax.imshow(
                     heatmaps[m_idx],
                     cmap=cmap,
-                    vmin=vmin, vmax=vmax,   # None by default → per-heatmap
+                    vmin=vmin, vmax=vmax,
                     interpolation="nearest",
                     aspect="equal",
                 )
@@ -266,7 +274,7 @@ def assemble_panel(
                 fontsize=11, fontweight="bold",
             )
 
-    # ---- Shared colorbar ---------------------------------------------------
+    # ---- Shared colorbar (actual data range) --------------------------------
     cbar_ax = fig.add_subplot(gs[:, -1])
     cbar = fig.colorbar(all_ims[0], cax=cbar_ax)
     cbar.set_label("Cosine Similarity", fontsize=9)

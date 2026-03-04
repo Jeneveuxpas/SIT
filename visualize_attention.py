@@ -7,14 +7,14 @@ positions.  All checkpoints are loaded as vanilla SiT (since at inference
 time every method uses its own learned K/V).
 
 Usage example (2 queries × 3 methods):
-    CUDA_VISIBLE_DEVICES=6 python visualize_attention.py \
-    --image images/dog7.jpg \
+    CUDA_VISIBLE_DEVICES=7 python visualize_attention.py \
+    --image images/dog4.jpg \
     --ckpts "/workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt" \
             "/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt" \
     --model SiT-XL/2 \
-    --query-region "1,2:12,12" \
+    --query-region "2,2:16,16" \
     --viz-mode attn_output \
-    --layer 4 \
+    --layer 4 8 10 \
     --timestep 0.1 0.3 0.5 0.8 \
     --out output/
 
