@@ -213,12 +213,14 @@ def assemble_panel(
             return COLS_PER_GROUP + 1 + local_col   # 5-8
 
     # Scale marker size with cell width so stars don't dominate at small fig sizes
-    _ms_scale = cell_w / 2.2   # 1.0 at default cell_w=2.2", smaller when fig_width given
-    MARKER_KWARGS_PIX  = dict(marker="*", color="red", markersize=max(18 * _ms_scale, 4),
-                               markeredgecolor="darkred", markeredgewidth=max(0.7 * _ms_scale, 0.3),
+    _ms_scale = cell_w / 2.2
+    _ms = max(16 * _ms_scale, 4)
+    _mew = max(0.6 * _ms_scale, 0.3)
+    MARKER_KWARGS_PIX  = dict(marker="*", color="red", markersize=_ms,
+                               markeredgecolor="darkred", markeredgewidth=_mew,
                                linestyle="None")
-    MARKER_KWARGS_GRID = dict(marker="*", color="red", markersize=max(14 * _ms_scale, 4),
-                               markeredgecolor="darkred", markeredgewidth=max(0.5 * _ms_scale, 0.2),
+    MARKER_KWARGS_GRID = dict(marker="*", color="red", markersize=_ms,
+                               markeredgecolor="darkred", markeredgewidth=_mew,
                                linestyle="None")
 
     all_ims = []
