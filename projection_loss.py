@@ -97,6 +97,31 @@ class CosineProjectionLoss(ProjectionLoss):
         return loss.mean()
 
 
+# =========================================
+# Cosine
+# =========================================
+
+@register_loss("cosine_repa")
+class CosineProjectionLoss(ProjectionLoss):
+    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-6, **kwargs):
+        self.spnorm_method = spnorm_method
+        self.zscore_alpha = zscore_alpha
+        self.eps = eps
+
+    def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
+        self._check(zs, zs_tilde)
+        # cast to float32
+        zs = zs.float()
+        zs_tilde = zs_tilde.float()
+        
+        zs = F.normalize(zs, dim=-1)
+        zs_tilde = F.normalize(zs_tilde, dim=-1)
+        
+        cos_sim = (zs * zs_tilde).sum(dim=-1)    # [B,T]
+        loss = -cos_sim
+        return loss.mean()
+
+
 @register_loss("cosine_v")
 class CosineVelocityProjectionLoss(ProjectionLoss):
     KWARG_ALIASES = {"spnorm": "spnorm_method"}
@@ -407,7 +432,6 @@ class CosineNoisyProjectionLoss(ProjectionLoss):
     matching the noisy latent construction in diffusion/flow matching.
     
     Requires passing alpha_t and sigma_t through kwargs.
-    
     Args:
         spnorm_method: "none" or "zscore" (default: "zscore")
         zscore_alpha: scaling factor for zscore normalization (default: 1.0)
