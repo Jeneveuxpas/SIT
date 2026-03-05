@@ -25,7 +25,7 @@ Usage example:
         --cfg-scale 1.0 \
         --num-steps 250 \
         --mode ode \
-        --out comparison_grid.png
+        --out comparison_grid.pdf
 """
 
 import argparse
@@ -156,7 +156,7 @@ def generate_image(model, vae, latents_scale, latents_bias,
 
 
 # ══════════════════════════════════════════════════════════════
-#  Grid layout & plotting
+#  Grid layout & plotting (ECCV publication style)
 # ══════════════════════════════════════════════════════════════
 
 def make_grid_figure(
@@ -166,8 +166,10 @@ def make_grid_figure(
     group_titles,    # per-(label,seed) group titles
     save_path,
     groups_per_row=3,
-    dpi=200,
-    cell_size=2.2,
+    dpi=300,
+    fig_width=6.7,     # ECCV textwidth ≈ 6.7 inches
+    font_family="STIXGeneral",
+    fontsize=9,
 ):
     """
     Draw the comparison grid matching Figure 8 style.
@@ -192,6 +194,11 @@ def make_grid_figure(
     """
     import math
 
+    # --- Font configuration (ECCV style) ---
+    plt.rcParams.update({
+        "font.family": font_family,
+    })
+
     n_ckpts   = len(ckpt_labels)
     n_groups  = len(group_titles)
     n_methods = len(method_labels)
@@ -202,16 +209,39 @@ def make_grid_figure(
     n_cols_total = groups_per_row * n_ckpts
     n_rows_total = n_super_rows * n_methods
 
-    fig_w = cell_size * n_cols_total + 1.2
-    fig_h = cell_size * n_rows_total + 0.9 * n_super_rows
+    # Derive cell_w from fig_width (matching make_attention_panel.py approach)
+    # Reserve space for row labels on the left
+    row_label_margin = 0.6
+    cell_w = (fig_width - row_label_margin) / n_cols_total
+    cell_h = cell_w  # keep cells square
+
+    fig_w = fig_width
+    fig_h = cell_h * n_rows_total + fontsize / 72 * 5 * n_super_rows  # headroom for titles
 
     fig = plt.figure(figsize=(fig_w, fig_h))
 
+    # Build width_ratios with gaps between groups
+    gap_ratio = 0.18  # relative to one cell
+    width_ratios = []
+    for grp_i in range(groups_per_row):
+        if grp_i > 0:
+            width_ratios.append(gap_ratio)  # gap column
+        width_ratios.extend([1.0] * n_ckpts)
+
+    n_gs_cols = len(width_ratios)
+
     gs = gridspec.GridSpec(
-        n_rows_total, n_cols_total,
-        left=0.06, right=0.99, top=0.93, bottom=0.01,
-        wspace=0.04, hspace=0.08,
+        n_rows_total, n_gs_cols,
+        width_ratios=width_ratios,
+        left=0.08, right=0.99, top=0.90, bottom=0.01,
+        wspace=0.03, hspace=0.06,
     )
+
+    def gs_col(local_grp, ckpt_idx):
+        """Map (local_grp, ckpt_idx) to gridspec column index."""
+        # Each group after the first adds 1 gap column
+        return local_grp * (n_ckpts + 1) + ckpt_idx if local_grp > 0 \
+            else ckpt_idx
 
     for super_row in range(n_super_rows):
         grp_start = super_row * groups_per_row
@@ -222,7 +252,7 @@ def make_grid_figure(
 
             for local_grp, grp_idx in enumerate(range(grp_start, grp_end)):
                 for ckpt_idx in range(n_ckpts):
-                    col = local_grp * n_ckpts + ckpt_idx
+                    col = gs_col(local_grp, ckpt_idx)
                     ax = fig.add_subplot(gs[row, col])
 
                     img = images[m_idx][ckpt_idx][grp_idx]
@@ -230,22 +260,15 @@ def make_grid_figure(
                     ax.set_xticks([])
                     ax.set_yticks([])
 
-                    # Thin separator between groups
-                    lw_left = 2.0 if ckpt_idx == 0 and local_grp > 0 else 0.5
                     for spine in ax.spines.values():
-                        spine.set_linewidth(0.5)
-                        spine.set_color("#cccccc")
-                    ax.spines["left"].set_linewidth(lw_left)
-                    ax.spines["left"].set_color(
-                        "#888888" if lw_left > 1 else "#cccccc"
-                    )
+                        spine.set_visible(False)
 
                     # Row label on leftmost column
                     if ckpt_idx == 0 and local_grp == 0:
                         ax.set_ylabel(
                             m_label,
-                            fontsize=7.5,
-                            fontweight="bold",
+                            fontsize=fontsize,
+                            fontweight="normal",
                             rotation=90,
                             labelpad=4,
                             va="center",
@@ -253,32 +276,36 @@ def make_grid_figure(
 
                     # Ckpt label on first method row of each super-row
                     if m_idx == 0:
-                        ax.set_title(ckpt_labels[ckpt_idx], fontsize=7, pad=2)
+                        ax.set_title(
+                            ckpt_labels[ckpt_idx],
+                            fontsize=fontsize, fontweight="normal",
+                            pad=2,
+                        )
 
             # Group title above first method row
             if m_idx == 0:
                 for local_grp, grp_idx in enumerate(range(grp_start, grp_end)):
-                    col_start = local_grp * n_ckpts
-                    col_end   = col_start + n_ckpts - 1
+                    col_start = gs_col(local_grp, 0)
+                    col_end   = gs_col(local_grp, n_ckpts - 1)
                     ax_span = fig.add_subplot(
                         gs[row, col_start : col_end + 1]
                     )
                     ax_span.set_visible(False)
                     ax_span.text(
-                        0.5, 1.25, group_titles[grp_idx],
+                        0.5, 1.35, group_titles[grp_idx],
                         ha="center", va="bottom",
-                        fontsize=8, fontweight="bold",
+                        fontsize=fontsize, fontweight="bold",
                         transform=ax_span.transAxes,
                     )
 
     # Add "Training Iteration" arrow header at top
     fig.text(
-        0.52, 0.98, "Training Iteration →",
+        0.54, 0.97, "Training Iteration  →",
         ha="center", va="top",
-        fontsize=9, fontweight="bold",
+        fontsize=fontsize + 1, fontweight="bold",
     )
 
-    plt.savefig(save_path, dpi=dpi, bbox_inches="tight", pad_inches=0.05)
+    plt.savefig(save_path, dpi=dpi, bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
     print(f"  Saved → {save_path}")
 
@@ -366,12 +393,16 @@ def parse_args():
     parser.add_argument("--model", type=str, default="SiT-XL/2",
                         choices=list(SiT_models.keys()))
 
-    # ── Output ───────────────────────────────────────────────
-    parser.add_argument("--out", type=str, default="comparison_grid_v2.png",
-                        help="Output image path (PNG or PDF)")
-    parser.add_argument("--dpi", type=int, default=200)
-    parser.add_argument("--cell-size", type=float, default=2.2,
-                        help="Cell size in inches for each image cell")
+    # ── Output & figure style ────────────────────────────────
+    parser.add_argument("--out", type=str, default="comparison_grid_v2.pdf",
+                        help="Output file path (.pdf or .png)")
+    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--fig-width", type=float, default=6.7,
+                        help="Total figure width in inches. ECCV textwidth=6.7.")
+    parser.add_argument("--font", default="STIXGeneral",
+                        help="Font name, e.g. 'STIXGeneral', 'DejaVu Sans', 'Arial'")
+    parser.add_argument("--fontsize", type=float, default=9,
+                        help="Base font size in pt (default 9). ECCV: try 8-9.")
 
     return parser.parse_args()
 
@@ -481,7 +512,9 @@ def main():
         save_path=args.out,
         groups_per_row=args.groups_per_row,
         dpi=args.dpi,
-        cell_size=args.cell_size,
+        fig_width=args.fig_width,
+        font_family=args.font,
+        fontsize=args.fontsize,
     )
 
     print("\nDone! 🎉")
