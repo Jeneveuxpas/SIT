@@ -214,7 +214,7 @@ def make_grid_figure(
 
     # Build height_ratios: insert gap rows between super-rows
     # e.g. for 2 super-rows × 2 methods:  [1, 1, gap, 1, 1]
-    super_row_gap = 0.25  # relative to one cell row
+    super_row_gap = 0.08  # relative to one cell row
     height_ratios = []
     for sr in range(n_super_rows):
         if sr > 0:
@@ -267,6 +267,13 @@ def make_grid_figure(
                 for ckpt_idx in range(n_ckpts):
                     col = gs_col(local_grp, ckpt_idx)
                     ax = fig.add_subplot(gs[row, col])
+
+                    # Track axes for arrow positioning
+                    if super_row == 0 and m_idx == 0 and local_grp == 0:
+                        if ckpt_idx == 0:
+                            _arrow_ax_left = ax
+                        if ckpt_idx == n_ckpts - 1:
+                            _arrow_ax_right = ax
 
                     img = images[m_idx][ckpt_idx][grp_idx]
                     ax.imshow(np.array(img))
@@ -324,18 +331,10 @@ def make_grid_figure(
             )
 
     # ---- "Training Iteration" arrow spanning the first column group ----
-    # Get the position of the first group's first and last columns
-    first_col = gs_col(0, 0)
-    last_col  = gs_col(0, n_ckpts - 1)
-    first_row = gs_row(0, 0)
-
-    # Get axes positions to compute arrow endpoints in figure coords
-    ax_left  = fig.add_subplot(gs[first_row, first_col])
-    ax_right = fig.add_subplot(gs[first_row, last_col])
     fig.canvas.draw()  # force layout computation
 
-    bbox_l = ax_left.get_position()
-    bbox_r = ax_right.get_position()
+    bbox_l = _arrow_ax_left.get_position()
+    bbox_r = _arrow_ax_right.get_position()
 
     arrow_y = bbox_l.y1 + 0.06  # above the ckpt labels
     arrow_x0 = bbox_l.x0
