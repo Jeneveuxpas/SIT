@@ -191,6 +191,7 @@ def make_grid_figure(
       └───────────────────────────────────────────────────────-─┘
     """
     import math
+    from matplotlib.patches import FancyArrowPatch
 
     # --- Font configuration (ECCV style) ---
     plt.rcParams.update({
@@ -205,48 +206,62 @@ def make_grid_figure(
 
     # Total grid dimensions
     n_cols_total = groups_per_row * n_ckpts
-    n_rows_total = n_super_rows * n_methods
 
-    # Derive cell_w from fig_width (matching make_attention_panel.py approach)
-    # Reserve space for row labels on the left
+    # Derive cell_w from fig_width
     row_label_margin = 0.6
     cell_w = (fig_width - row_label_margin) / n_cols_total
     cell_h = cell_w  # keep cells square
 
+    # Build height_ratios: insert gap rows between super-rows
+    # e.g. for 2 super-rows × 2 methods:  [1, 1, gap, 1, 1]
+    super_row_gap = 0.25  # relative to one cell row
+    height_ratios = []
+    for sr in range(n_super_rows):
+        if sr > 0:
+            height_ratios.append(super_row_gap)  # gap row
+        height_ratios.extend([1.0] * n_methods)
+    n_gs_rows = len(height_ratios)
+
     fig_w = fig_width
-    fig_h = cell_h * n_rows_total + fontsize / 72 * 5 * n_super_rows  # headroom for titles
+    n_real_rows = n_super_rows * n_methods
+    fig_h = cell_h * n_real_rows + cell_h * super_row_gap * max(0, n_super_rows - 1) \
+            + fontsize / 72 * 8  # headroom for arrow + titles
 
     fig = plt.figure(figsize=(fig_w, fig_h))
 
-    # Build width_ratios with gaps between groups
-    gap_ratio = 0.18  # relative to one cell
+    # Build width_ratios with small gaps between groups
+    gap_ratio = 0.08  # small gap between column groups
     width_ratios = []
     for grp_i in range(groups_per_row):
         if grp_i > 0:
-            width_ratios.append(gap_ratio)  # gap column
+            width_ratios.append(gap_ratio)
         width_ratios.extend([1.0] * n_ckpts)
-
     n_gs_cols = len(width_ratios)
 
     gs = gridspec.GridSpec(
-        n_rows_total, n_gs_cols,
+        n_gs_rows, n_gs_cols,
         width_ratios=width_ratios,
-        left=0.06, right=0.99, top=0.92, bottom=0.01,
-        wspace=0.03, hspace=0.12,
+        height_ratios=height_ratios,
+        left=0.06, right=0.99, top=0.90, bottom=0.01,
+        wspace=0.02, hspace=0.03,
     )
 
     def gs_col(local_grp, ckpt_idx):
         """Map (local_grp, ckpt_idx) to gridspec column index."""
-        # Each group after the first adds 1 gap column
         return local_grp * (n_ckpts + 1) + ckpt_idx if local_grp > 0 \
             else ckpt_idx
+
+    def gs_row(super_row, m_idx):
+        """Map (super_row, method_idx) to gridspec row index, accounting for gap rows."""
+        return super_row * (n_methods + 1) + m_idx if super_row > 0 \
+            else m_idx
 
     for super_row in range(n_super_rows):
         grp_start = super_row * groups_per_row
         grp_end   = min(grp_start + groups_per_row, n_groups)
 
         for m_idx, m_label in enumerate(method_labels):
-            row = super_row * n_methods + m_idx
+            row = gs_row(super_row, m_idx)
 
             for local_grp, grp_idx in enumerate(range(grp_start, grp_end)):
                 for ckpt_idx in range(n_ckpts):
@@ -269,9 +284,11 @@ def make_grid_figure(
                             pad=2,
                         )
 
-            # Group title above first method row
+            # Group title above first method row (skip group 0 — arrow goes there)
             if m_idx == 0:
                 for local_grp, grp_idx in enumerate(range(grp_start, grp_end)):
+                    if super_row == 0 and local_grp == 0:
+                        continue  # arrow replaces title for first group
                     col_start = gs_col(local_grp, 0)
                     col_end   = gs_col(local_grp, n_ckpts - 1)
                     ax_span = fig.add_subplot(
@@ -279,22 +296,26 @@ def make_grid_figure(
                     )
                     ax_span.set_visible(False)
                     ax_span.text(
-                        0.5, 1.35, group_titles[grp_idx],
+                        0.5, 1.30, group_titles[grp_idx],
                         ha="center", va="bottom",
                         fontsize=fontsize, fontweight="bold",
                         transform=ax_span.transAxes,
                     )
 
-    # ---- Row labels: placed via fig.text() to avoid overlap ----
+    # ---- Row labels via fig.text() ----
     gs_left = gs.left
     for super_row in range(n_super_rows):
         for m_idx, m_label in enumerate(method_labels):
-            row = super_row * n_methods + m_idx
-            # Compute vertical center of this row in figure coords
-            # GridSpec row 0 is at top, row n_rows_total-1 is at bottom
-            row_top = gs.top - (row / n_rows_total) * (gs.top - gs.bottom)
-            row_bot = gs.top - ((row + 1) / n_rows_total) * (gs.top - gs.bottom)
-            y_center = (row_top + row_bot) / 2
+            row = gs_row(super_row, m_idx)
+            # Vertical center of this gridspec row
+            cum_before = sum(height_ratios[:row])
+            cum_after  = sum(height_ratios[:row + 1])
+            total_h    = sum(height_ratios)
+            frac_top = cum_before / total_h
+            frac_bot = cum_after / total_h
+            y_top = gs.top - frac_top * (gs.top - gs.bottom)
+            y_bot = gs.top - frac_bot * (gs.top - gs.bottom)
+            y_center = (y_top + y_bot) / 2
             fig.text(
                 gs_left - 0.01, y_center, m_label,
                 ha="right", va="center",
@@ -302,10 +323,39 @@ def make_grid_figure(
                 rotation=90,
             )
 
-    # Add "Training Iteration" arrow header at top
+    # ---- "Training Iteration" arrow spanning the first column group ----
+    # Get the position of the first group's first and last columns
+    first_col = gs_col(0, 0)
+    last_col  = gs_col(0, n_ckpts - 1)
+    first_row = gs_row(0, 0)
+
+    # Get axes positions to compute arrow endpoints in figure coords
+    ax_left  = fig.add_subplot(gs[first_row, first_col])
+    ax_right = fig.add_subplot(gs[first_row, last_col])
+    fig.canvas.draw()  # force layout computation
+
+    bbox_l = ax_left.get_position()
+    bbox_r = ax_right.get_position()
+
+    arrow_y = bbox_l.y1 + 0.06  # above the ckpt labels
+    arrow_x0 = bbox_l.x0
+    arrow_x1 = bbox_r.x1
+
+    # Draw arrow
+    arrow = FancyArrowPatch(
+        (arrow_x0, arrow_y), (arrow_x1, arrow_y),
+        transform=fig.transFigure,
+        arrowstyle="->,head_width=3,head_length=3",
+        color="black", linewidth=1.2,
+        clip_on=False,
+    )
+    fig.patches.append(arrow)
+
+    # "Training Iteration" text centered on the arrow
     fig.text(
-        0.54, 0.97, "Training Iteration  →",
-        ha="center", va="top",
+        (arrow_x0 + arrow_x1) / 2, arrow_y + 0.015,
+        "Training Iteration",
+        ha="center", va="bottom",
         fontsize=fontsize + 1, fontweight="bold",
     )
 
