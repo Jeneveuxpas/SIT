@@ -13,18 +13,28 @@ Layout:
 
 Usage example (edit CKPT_CONFIGS and SAMPLES below to your needs):
 
-    CUDA_VISIBLE_DEVICES=7 python generate_comparison_grid.py \
+    CUDA_VISIBLE_DEVICES=4 python generate_comparison_grid.py \
         --method-a-label "SiT-XL/2+iREPA" \
         --method-b-label "SiT-XL/2+Attn.Scaf." \
         --method-a-ckpts /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0200000.pt /workspace/SIT/iREPA-collections/0400000.pt \
         --method-b-ckpts /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0200000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0400000.pt \
         --ckpt-labels 100K 200K 400K \
-        --label-range 50 60\
+        --class-labels 207 208 235 250 267 245 246 234 231 263 385 386 101 344 346 347 15 80 81 85 86 127 849 505 968 \
         --seeds 0 1 2 42 72 142 162 \
-        --cfg-scale 4.0 \
+        --cfg-scale 1.0 \
         --num-steps 250 \
         --mode ode \
-        --out output/
+        --out output/2
+CUDA_VISIBLE_DEVICES=0 python generate_comparison_grid_v2.py \
+    --method-a-label "SiT-XL/2 + iREPA" \
+    --method-b-label "SiT-XL/2 + AttnScaf" \
+    --method-a-ckpts /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0200000.pt /workspace/SIT/iREPA-collections/0400000.pt \
+        --method-b-ckpts /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0200000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0400000.pt \
+    --ckpt-labels 100K 200K 400K \
+    --class-labels 207 88 2 400 849 325 \
+    --seeds 0 1 2 42 72 142 \
+    --cfg-scale 1.0 --num-steps 250 --mode ode \
+    --out comparison_grid.png
 
 Arguments
 ---------
