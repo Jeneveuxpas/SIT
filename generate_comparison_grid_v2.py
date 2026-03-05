@@ -15,17 +15,15 @@ You provide:
 Usage example:
 
     CUDA_VISIBLE_DEVICES=0 python generate_comparison_grid_v2.py \
-        --method-a-label "SiT-XL/2" \
-        --method-b-label "SiT-XL/2+REPA" \
-        --method-a-ckpts ckpt_a_100k.pt ckpt_a_200k.pt ckpt_a_400k.pt \
-        --method-b-ckpts ckpt_b_100k.pt ckpt_b_200k.pt ckpt_b_400k.pt \
-        --ckpt-labels 100K 200K 400K \
-        --class-labels 207 88 2 400 849 325 \
-        --seeds 0 1 2 42 72 142 \
-        --cfg-scale 1.0 \
-        --num-steps 250 \
-        --mode ode \
-        --out comparison_grid.pdf
+    --method-a-label "SiT-XL/2 + iREPA" \
+    --method-b-label "SiT-XL/2 + AttnScaf" \
+    --method-a-ckpts /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0200000.pt /workspace/SIT/iREPA-collections/0400000.pt \
+    --method-b-ckpts /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0200000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0400000.pt \
+    --ckpt-labels 100K 200K 400K \
+    --class-labels 207 88 2 400 849 325 \
+    --seeds 0 1 2 42 72 142 \
+    --cfg-scale 1.0 --num-steps 250 --mode ode \
+    --out comparison_grid.pdf
 """
 
 import argparse
@@ -167,7 +165,7 @@ def make_grid_figure(
     save_path,
     groups_per_row=3,
     dpi=300,
-    fig_width=6.7,     # ECCV textwidth ≈ 6.7 inches
+    fig_width=13.5,    # Large figure; shrink in LaTeX with \includegraphics[width=\textwidth]
     font_family="STIXGeneral",
     fontsize=9,
 ):
@@ -233,8 +231,8 @@ def make_grid_figure(
     gs = gridspec.GridSpec(
         n_rows_total, n_gs_cols,
         width_ratios=width_ratios,
-        left=0.08, right=0.99, top=0.90, bottom=0.01,
-        wspace=0.03, hspace=0.06,
+        left=0.06, right=0.99, top=0.92, bottom=0.01,
+        wspace=0.03, hspace=0.12,
     )
 
     def gs_col(local_grp, ckpt_idx):
@@ -263,17 +261,6 @@ def make_grid_figure(
                     for spine in ax.spines.values():
                         spine.set_visible(False)
 
-                    # Row label on leftmost column
-                    if ckpt_idx == 0 and local_grp == 0:
-                        ax.set_ylabel(
-                            m_label,
-                            fontsize=fontsize,
-                            fontweight="normal",
-                            rotation=90,
-                            labelpad=4,
-                            va="center",
-                        )
-
                     # Ckpt label on first method row of each super-row
                     if m_idx == 0:
                         ax.set_title(
@@ -297,6 +284,23 @@ def make_grid_figure(
                         fontsize=fontsize, fontweight="bold",
                         transform=ax_span.transAxes,
                     )
+
+    # ---- Row labels: placed via fig.text() to avoid overlap ----
+    gs_left = gs.left
+    for super_row in range(n_super_rows):
+        for m_idx, m_label in enumerate(method_labels):
+            row = super_row * n_methods + m_idx
+            # Compute vertical center of this row in figure coords
+            # GridSpec row 0 is at top, row n_rows_total-1 is at bottom
+            row_top = gs.top - (row / n_rows_total) * (gs.top - gs.bottom)
+            row_bot = gs.top - ((row + 1) / n_rows_total) * (gs.top - gs.bottom)
+            y_center = (row_top + row_bot) / 2
+            fig.text(
+                gs_left - 0.01, y_center, m_label,
+                ha="right", va="center",
+                fontsize=fontsize, fontweight="normal",
+                rotation=90,
+            )
 
     # Add "Training Iteration" arrow header at top
     fig.text(
@@ -397,8 +401,9 @@ def parse_args():
     parser.add_argument("--out", type=str, default="comparison_grid_v2.pdf",
                         help="Output file path (.pdf or .png)")
     parser.add_argument("--dpi", type=int, default=300)
-    parser.add_argument("--fig-width", type=float, default=6.7,
-                        help="Total figure width in inches. ECCV textwidth=6.7.")
+    parser.add_argument("--fig-width", type=float, default=13.5,
+                        help="Total figure width in inches. Default 13.5 (large, "
+                             "rescale in LaTeX). ECCV textwidth=6.7.")
     parser.add_argument("--font", default="STIXGeneral",
                         help="Font name, e.g. 'STIXGeneral', 'DejaVu Sans', 'Arial'")
     parser.add_argument("--fontsize", type=float, default=9,
