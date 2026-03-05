@@ -287,7 +287,7 @@ def make_grid_figure(
                     if m_idx == 0:
                         ax.set_title(
                             ckpt_labels[ckpt_idx],
-                            fontsize=fontsize, fontweight="normal",
+                            fontsize=fontsize + 2, fontweight="normal",
                             pad=2,
                         )
 
@@ -324,7 +324,7 @@ def make_grid_figure(
             y_bot = gs.top - frac_bot * (gs.top - gs.bottom)
             y_center = (y_top + y_bot) / 2
             fig.text(
-                gs_left - 0.01, y_center, m_label,
+                gs_left - 0.005, y_center, m_label,
                 ha="right", va="center",
                 fontsize=fontsize, fontweight="normal",
                 rotation=90,
@@ -336,7 +336,7 @@ def make_grid_figure(
     bbox_l = _arrow_ax_left.get_position()
     bbox_r = _arrow_ax_right.get_position()
 
-    arrow_y = bbox_l.y1 + 0.06  # above the ckpt labels
+    arrow_y = bbox_l.y1 + 0.035  # just above the ckpt labels
     arrow_x0 = bbox_l.x0
     arrow_x1 = bbox_r.x1
 
@@ -344,18 +344,18 @@ def make_grid_figure(
     arrow = FancyArrowPatch(
         (arrow_x0, arrow_y), (arrow_x1, arrow_y),
         transform=fig.transFigure,
-        arrowstyle="->,head_width=3,head_length=3",
-        color="black", linewidth=1.2,
+        arrowstyle="->,head_width=2.5,head_length=2.5",
+        color="black", linewidth=0.8,
         clip_on=False,
     )
     fig.patches.append(arrow)
 
     # "Training Iteration" text centered on the arrow
     fig.text(
-        (arrow_x0 + arrow_x1) / 2, arrow_y + 0.015,
+        (arrow_x0 + arrow_x1) / 2, arrow_y + 0.01,
         "Training Iteration",
         ha="center", va="bottom",
-        fontsize=fontsize + 1, fontweight="bold",
+        fontsize=fontsize + 1, fontweight="normal",
     )
 
     plt.savefig(save_path, dpi=dpi, bbox_inches="tight", pad_inches=0.04)
