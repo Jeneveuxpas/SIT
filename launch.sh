@@ -2,14 +2,16 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # iREPA 统一启动脚本 - 训练 + 评估
-# 
+#
 # 用法: 
-#   ./launch.sh --config configs/default.yaml --exp-name my_exp
-#   ./launch.sh --config configs/kv_coeff-8.0.yaml --exp-name kv_coeff-8.0 --gpu 2,5 --num-gpus 2
-#  ./launch.sh --config configs/10,12-4,6.yaml --exp-name 10,12-4,6 --gpu 2,3 --num-gpus 2 
-#  ./launch.sh --config configs/kv_coeff-3.0_mlp_hd2304_ln_50-200k.yaml --exp-name kv_coeff-3.0_mlp_hd2304_ln_50-200k --gpu 4,5,6,7 --num-gpus 4
-#  ./launch.sh --config configs/attn_mse_repa_early_stop_fade.yaml --exp-name attn_mse_repa_early_stop_fade --gpu 0,1,2,3 --num-gpus 4 --resume-step 500000
-#  ./launch.sh --config configs/SiT-XL.yaml --exp-name SiT-XL --gpu 4,5,6,7 --num-gpus 4 --resume-step 400000
+#   ./launch.sh --config configs/path-cosine_repa-cosine_v.yaml --exp-name cosine_repa-cosine_v --gpu 2,3 --num-gpus 2
+#   ./launch.sh --config configs/conv_3_2.0_0.25.yaml --exp-name conv_3_2.0_0.25 --gpu 4,5,6,7 --num-gpus 4 
+# ./launch.sh --config configs/irepa_only-2.0.yaml --exp-name irepa_only-2.0 --gpu 6,7 --num-gpus 2 
+#  ./launch.sh --config configs/sam2-s-16.yaml --exp-name sam2-s-16 --gpu 2 --num-gpus 1
+ 
+# ./launch.sh --config configs/cosine_1.yaml --exp-name cosine_1 --gpu 6,7 --num-gpus 2 
+#  ./launch.sh --config configs/conv_3_kv_2.0-20-400k.yaml --exp-name conv_3_kv_2.0-20-400k --gpu 4,5,6,7 --num-gpus 4 --resume-step 040000
+#  ./launch.sh --config configs/attn_mse_repa_early_stop_600.yaml --exp-name attn_mse_repa_early_stop_600 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0600000
 
 # ============================================================================
 set -e
@@ -21,6 +23,8 @@ RESUME_STEP="${RESUME_STEP:-0}"  # 恢复训练的步数，0表示从头开始
 EVAL_STEPS="${EVAL_STEPS:-}"  # 评估的 checkpoint steps，逗号分隔，留空则评估最新
 EVAL_ONLY="${EVAL_ONLY:-false}"
 SKIP_EVAL="${SKIP_EVAL:-false}"
+REINIT_SIT="${REINIT_SIT:-false}"
+REINIT_KV_PROJ="${REINIT_KV_PROJ:-false}"
 
 # FID 评估参数
 NUM_FID_SAMPLES="${NUM_FID_SAMPLES:-50000}"
@@ -69,6 +73,14 @@ while [[ $# -gt 0 ]]; do
             RESUME_STEP="$2"
             shift 2
             ;;
+        --reinit-sit)
+            REINIT_SIT="true"
+            shift
+            ;;
+        --reinit-kv-proj)
+            REINIT_KV_PROJ="true"
+            shift
+            ;;
         *)
             echo "未知参数: $1"
             exit 1
@@ -84,7 +96,6 @@ fi
 
 SAVE_PATH="exps/${EXP_NAME}"
 export CUDA_VISIBLE_DEVICES="${GPU}"
-MASTER_PORT=$((29500 + RANDOM % 1000))
 
 # +
 # ============================================================================
@@ -101,6 +112,7 @@ if [ "$EVAL_ONLY" = "false" ]; then
     echo "================================================"
 
     # 构建训练命令
+    MASTER_PORT=$((29500 + RANDOM % 1000))
     TRAIN_CMD="accelerate launch --main_process_port ${MASTER_PORT} --num_processes ${NUM_GPUS} train.py --exp-name ${EXP_NAME}"
 
     if [ -n "$CONFIG" ]; then
@@ -113,8 +125,18 @@ if [ "$EVAL_ONLY" = "false" ]; then
         echo "从 step ${RESUME_STEP} 恢复训练"
     fi
 
+    # 添加 ablation 参数
+    if [ "$REINIT_SIT" = "true" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --reinit-sit"
+        echo "[Ablation] 进入 Stage 2 时重新初始化 SiT body"
+    fi
+    if [ "$REINIT_KV_PROJ" = "true" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --reinit-kv-proj"
+        echo "[Ablation] 进入 Stage 2 时重新初始化 KV projection"
+    fi
+
     # 执行训练
-   eval ${TRAIN_CMD}
+    eval ${TRAIN_CMD}
 
     echo "================================================"
     echo "训练完成！"

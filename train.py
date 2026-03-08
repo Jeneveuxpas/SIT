@@ -105,22 +105,6 @@ def safe_unwrap_model(model):
         model = model._orig_mod
     return model
 
-
-def get_inner_scheduler(lr_scheduler):
-    """Return underlying torch scheduler (supports accelerate wrappers)."""
-    return getattr(lr_scheduler, "scheduler", lr_scheduler)
-
-
-def get_current_lr(optimizer) -> float:
-    """Return current LR from the first optimizer parameter group."""
-    if hasattr(optimizer, "param_groups") and len(optimizer.param_groups) > 0:
-        return float(optimizer.param_groups[0].get("lr", 0.0))
-    # Fallback for wrapped optimizer objects.
-    inner_optimizer = getattr(optimizer, "optimizer", None)
-    if inner_optimizer is not None and hasattr(inner_optimizer, "param_groups") and len(inner_optimizer.param_groups) > 0:
-        return float(inner_optimizer.param_groups[0].get("lr", 0.0))
-    return 0.0
-
 def parse_layer_indices(indices_str: str) -> list:
     """Parse comma-separated layer indices string to list of ints (1-based -> 0-based)."""
     return [int(x.strip()) - 1 for x in indices_str.split(',')]
@@ -215,6 +199,8 @@ def main(args):
     if args.use_kv and len(encoders) > 0:
         encoder_kv_extractor = EncoderKVExtractor(encoders[0].model, enc_layer_indices)
         encoder_kv_extractor.eval()
+        # Set target token count for spatial interpolation (SAM2 windowed attention etc.)
+        encoder_kv_extractor._target_num_patches = (latent_size // 2) ** 2  # SiT patches: (32/2)^2 = 256
         
         # Auto-detect enc_dim and enc_heads from the encoder layer
         if len(enc_layer_indices) > 0:
@@ -260,6 +246,7 @@ def main(args):
         kv_proj_kernel_size=args.kv_proj_kernel_size,
         kv_norm_type=args.kv_norm_type,
         kv_zscore_alpha=args.kv_zscore_alpha,
+        kv_replace_mode=args.kv_replace_mode,
         distill_temperature=args.distill_temperature,
         kv_distill_snr_gamma=args.kv_distill_snr_gamma,
         kv_distill_min_weight=args.kv_distill_min_weight,
@@ -299,7 +286,7 @@ def main(args):
     )
     if accelerator.is_main_process:
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
-        logger.info(f"Encoder KV: {len(enc_layer_indices)} layer pairs")
+        logger.info(f"Encoder KV: {len(enc_layer_indices)} layer pairs, replace_mode={args.kv_replace_mode}")
         logger.info(f"Encoder layers: {enc_layer_indices} -> SiT layers: {sit_layer_indices}")
     
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
@@ -313,50 +300,16 @@ def main(args):
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
-    )
-
-    # Setup scheduler
-    lr_scheduler = None
-    if args.lr_scheduler == "cosine":
-        from torch.optim.lr_scheduler import LambdaLR
-        def cosine_schedule_with_warmup(step):
-            if step < args.lr_warmup_steps:
-                return float(step) / float(max(1, args.lr_warmup_steps))
-            
-            decay_start = args.lr_decay_start_step if args.lr_decay_start_step is not None else args.lr_warmup_steps
-            if step < decay_start:
-                return 1.0
-                
-            progress = float(step - decay_start) / float(max(1, args.max_train_steps - decay_start))
-            
-            # Calculate cosine decay multiplier (starts at 1.0, ends at 0.0)
-            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
-            
-            # Scale range from [min_lr, base_lr] instead of [0, base_lr]
-            # Multiplier = min_ratio + (1 - min_ratio) * cosine_decay
-            min_ratio = args.min_lr / args.learning_rate
-            return min_ratio + (1.0 - min_ratio) * cosine_decay
-
-        # Keep last_epoch=-1 at construction. Resume alignment is handled after checkpoint load.
-        # Set initial_lr to ensure LambdaLR can compute base learning rate correctly
-        for group in optimizer.param_groups:
-            group.setdefault('initial_lr', group['lr'])
-
-        lr_scheduler = LambdaLR(optimizer, lr_lambda=cosine_schedule_with_warmup)
-    elif args.lr_scheduler == "constant":
-        pass  # Default behavior
+    )    
     
     # Setup data
-    if args.repa_loss:
-        try:
-            # We can preprocess ImageNet 256/512 here, and directly load from disk
-            train_dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
-        except Exception as e:
-            print(f"Error loading HFImgLatentDataset: {e}")
-            print("Falling back to ImageFolderLatentDataset")
-            train_dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, resolution=args.resolution, split="train")
-    else:
-        train_dataset = HFLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
+    try:
+        # We can preprocess ImageNet 256/512 here, and directly load from disk
+        train_dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
+    except Exception as e:
+        print(f"Error loading HFImgLatentDataset: {e}")
+        print("Falling back to ImageFolderLatentDataset")
+        train_dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, resolution=args.resolution, split="train")
     print(train_dataset)
 
     local_batch_size = int(args.batch_size // accelerator.num_processes)
@@ -378,21 +331,11 @@ def main(args):
     
     # resume:
     global_step = 0
-    scheduler_state_loaded = False
-    scheduler_state = None  # Store scheduler state to load after prepare
     grad_norm = 0.0  # Initialize grad_norm to avoid undefined variable error
     if args.resume_step > 0:
-        ckpt_name = str(args.resume_step).zfill(7) + '.pt'
-        ckpt_path = f'{checkpoint_dir}/{ckpt_name}'
-
-        if not os.path.exists(ckpt_path):
-            raise FileNotFoundError(
-                f"Resume checkpoint not found: {ckpt_path}. "
-                f"Please check --resume-step={args.resume_step} is correct."
-            )
-
+        ckpt_name = str(args.resume_step).zfill(7) +'.pt'
         ckpt = torch.load(
-            ckpt_path,
+            f'{checkpoint_dir}/{ckpt_name}',
             map_location='cpu',
             weights_only=False,
         )
@@ -400,15 +343,6 @@ def main(args):
         ema.load_state_dict(ckpt['ema'])
         optimizer.load_state_dict(ckpt['opt'])
         global_step = ckpt['steps']
-
-        # Store scheduler state to load after accelerator.prepare()
-        if lr_scheduler is not None:
-            scheduler_state = ckpt.get("scheduler", None)
-
-        if accelerator.is_main_process:
-            logger.info(
-                f"Resumed from step {global_step} with optimizer learning rate {get_current_lr(optimizer):.6g}"
-            )
 
     if args.compile:
         # Allow larger cache size for DYNAMO compilation
@@ -433,62 +367,6 @@ def main(args):
     model, optimizer, train_dataloader = accelerator.prepare(
         model, optimizer, train_dataloader
     )
-    if lr_scheduler is not None:
-        lr_scheduler = accelerator.prepare(lr_scheduler)
-
-        # Load scheduler state after prepare (if available from checkpoint)
-        if args.resume_step > 0 and scheduler_state is not None:
-            try:
-                lr_scheduler.load_state_dict(scheduler_state)
-                scheduler_state_loaded = True
-                inner_scheduler = get_inner_scheduler(lr_scheduler)
-
-                # Verify loaded scheduler state matches global_step
-                # With scheduler.step() after global_step+=1: global_step=N => last_epoch=N
-                expected_last_epoch = global_step
-                if inner_scheduler.last_epoch != expected_last_epoch:
-                    if accelerator.is_main_process:
-                        logger.warning(
-                            f"Scheduler last_epoch mismatch: loaded={inner_scheduler.last_epoch}, "
-                            f"expected={expected_last_epoch} (global_step={global_step}). "
-                            f"Using loaded value."
-                        )
-
-                if accelerator.is_main_process:
-                    logger.info(
-                        f"Loaded scheduler state from checkpoint. "
-                        f"Scheduler last_epoch = {inner_scheduler.last_epoch}, "
-                        f"Current lr = {get_current_lr(optimizer):.6g}"
-                    )
-            except Exception as e:
-                if accelerator.is_main_process:
-                    logger.warning(f"Failed to load scheduler state from checkpoint: {e}")
-
-        # If resumed from a checkpoint without scheduler state (e.g., resumed from constant LR
-        # and switched to cosine), align scheduler to the current global step.
-        if args.resume_step > 0 and not scheduler_state_loaded:
-            # Training loop steps scheduler AFTER incrementing global_step.
-            # After N completed updates: global_step=N, scheduler.last_epoch=N.
-            # We need to set scheduler to last_epoch = global_step.
-            scheduler_epoch = global_step
-            if scheduler_epoch > 0:
-                try:
-                    # Use wrapper scheduler first to preserve accelerate multi-GPU semantics.
-                    lr_scheduler.step(scheduler_epoch)
-                except TypeError:
-                    # Fallback for older wrappers that do not accept epoch argument.
-                    inner_scheduler = get_inner_scheduler(lr_scheduler)
-                    inner_scheduler.step(epoch=scheduler_epoch)
-                    if accelerator.is_main_process:
-                        logger.warning(
-                            "Scheduler wrapper does not accept epoch argument; "
-                            "used inner scheduler for resume alignment fallback."
-                        )
-            if accelerator.is_main_process:
-                logger.info(
-                    f"Scheduler state missing in checkpoint; fast-forwarded scheduler to epoch {scheduler_epoch}. "
-                    f"Current lr = {get_current_lr(optimizer):.6g}"
-                )
 
     if accelerator.is_main_process:
         tracker_config = vars(copy.deepcopy(args))
@@ -530,7 +408,11 @@ def main(args):
 
     # define spatial normalization class object
 
+    # Ablation: track whether stage-transition re-init has been done
+    _stage_reinit_done = False
+
     for epoch in range(args.epochs):
+
         model.train()
         for batch in train_dataloader:
             if len(batch) == 3:
@@ -545,6 +427,36 @@ def main(args):
             # Auto-stage switching (by step count)
             current_stage = 1 if global_step < args.stage1_steps else 2
             current_align_mode = args.align_mode
+
+            # ── Ablation: re-initialize SiT body at Stage 1→2 transition ──
+            if (current_stage == 2 and not _stage_reinit_done
+                    and getattr(args, 'reinit_sit', False)):
+                _stage_reinit_done = True
+                if accelerator.is_main_process:
+                    logger.info(f"[Ablation] Stage 1→2 transition at step {global_step}: "
+                                "re-initializing SiT body (keeping KV projections)")
+                # Unwrap model for direct parameter access
+                raw_model = safe_unwrap_model(model)
+                # Save kv_proj state dicts before re-init
+                kv_proj_states = {}
+                for i, block in enumerate(raw_model.blocks):
+                    if hasattr(block, 'kv_proj'):
+                        kv_proj_states[i] = {k: v.clone() for k, v in block.kv_proj.state_dict().items()}
+                # Re-initialize the entire model
+                raw_model.initialize_weights()
+                # Restore kv_proj weights
+                for i, block in enumerate(raw_model.blocks):
+                    if i in kv_proj_states and hasattr(block, 'kv_proj'):
+                        block.kv_proj.load_state_dict(kv_proj_states[i])
+                # Reset EMA to match re-initialized model
+                update_ema(ema, raw_model, decay=0)
+                # Reset optimizer state (stale momentum from pre-reinit params)
+                optimizer.zero_grad(set_to_none=True)
+                for state in optimizer.state.values():
+                    state.clear()
+                if accelerator.is_main_process:
+                    logger.info(f"[Ablation] SiT body re-initialized; preserved kv_proj in "
+                                f"{len(kv_proj_states)} blocks; optimizer state & EMA reset")
 
             # Stage-wise termination gates
             # REPA: controls projection loss branch
@@ -589,6 +501,7 @@ def main(args):
                     raw_image_enc = encoders[0].preprocess(raw_image)
                     with accelerator.autocast():
                         encoder_kv_extractor.reset_cache()
+                        encoder_kv_extractor._batch_size = raw_image_enc.shape[0]  # For SAM2 un-windowing
                         features = encoders[0].forward_features(raw_image_enc)
                         z = features['x_norm_patchtokens']
                         zs.append(z)
@@ -610,9 +523,17 @@ def main(args):
                             for encoder in encoders:
                                 # Preprocess the image using encoder's built-in method
                                 raw_image_ = encoder.preprocess(raw_image)
+
+                                # Encode the features
+                                # outputs dictionary with keys: 'x_norm_patchtokens' and 'x_norm_clstoken'
                                 features = encoder.forward_features(raw_image_) 
 
+                                # normalize spatial features
+                                # normalize spatial features (handled in loss now)
+                                # Legacy Note: args.cls_token_weight was previously passed but ignored by SpatialNormalization.
+                                # We keep it ignored here to match original behavior.
                                 z = features['x_norm_patchtokens']
+
                                 # append to list
                                 zs.append(z)
 
@@ -657,8 +578,7 @@ def main(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
-                if lr_scheduler is not None:
-                    lr_scheduler.step()
+
                 if global_step % args.checkpointing_steps == 0 and global_step > 0:
                     if accelerator.is_main_process:
                         original_model = safe_unwrap_model(model)
@@ -667,7 +587,6 @@ def main(args):
                             "model": original_model.state_dict(),
                             "ema": ema.state_dict(),
                             "opt": optimizer.state_dict(),
-                            "scheduler": lr_scheduler.state_dict() if lr_scheduler is not None else None,
                             "args": args,
                             "steps": global_step,
                         }
@@ -704,7 +623,7 @@ def main(args):
                     if accelerator.is_main_process:
                         logger.info(f"Generated samples: Stage {current_stage}")
 
-                # Include the loss and grad norms in the logging.
+                # Include the loss and grad norms in the logging
                 logs = {
                     "loss": loss.detach().item(),
                     "denoising_loss": denoising_loss_mean.detach().item(),
@@ -717,23 +636,24 @@ def main(args):
                     "repa_gate": repa_gate,
                     "kv_gate": kv_gate,
                     "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                    "lr": get_current_lr(optimizer),
+                    "stage": current_stage,
                 }
                 logs.update(loss_dict)
                 progress_bar.set_postfix(**logs)
                 accelerator.log(logs, step=global_step)
 
-                if global_step >= args.max_train_steps:
-                    break
+            if global_step >= args.max_train_steps:
+                break
         if global_step >= args.max_train_steps:
             break
 
+    # Cleanup
     if encoder_kv_extractor is not None:
         encoder_kv_extractor.remove_hooks()
-
+    
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
-
+    
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         logger.info("Done!")
@@ -772,8 +692,8 @@ def parse_args(input_args=None):
     parser.add_argument("--distill-coeff", type=float, default=1.0,
                         help="Coefficient for distillation loss (0 in Stage 1, this value in Stage 2)")
     parser.add_argument("--align-mode", type=str, default="attn_mse",
-                        choices=["logits", "attn_mse", "snr_attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
-                        help="Alignment mode: logits, attn_mse, snr_attn_mse, attn_kl, kv_mse, attn_hybrid")
+                        choices=["logits", "attn_mse", "attn_cosine", "snr_attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
+                        help="Alignment mode: logits, attn_mse, attn_cosine, snr_attn_mse, attn_kl, kv_mse, attn_hybrid")
     parser.add_argument("--distill-temperature", type=float, default=1.0,
                         help="Temperature for attn_kl mode (<1 sharpens distributions, making alignment harder)")
     parser.add_argument("--attn-loss-weight", type=float, default=1.0,
@@ -800,6 +720,10 @@ def parse_args(input_args=None):
                         help="Normalization type for K/V: zscore=per-spatial, zscore_token=per-token")
     parser.add_argument("--kv-zscore-alpha", type=float, default=1.0, 
                         help="Alpha for z-score normalization: (x - alpha * mean) / std")
+    parser.add_argument("--kv-replace-mode", type=str, default="kv",
+                        choices=["kv", "k", "v", "qkv", "qk", "q"],
+                        help="Which attention components to replace from encoder in Stage 1: "
+                             "kv (default), k-only, v-only, qkv (all), qk, q-only")
     # enc-dim and enc-heads are now auto-detected from encoder
     # dataset
     parser.add_argument("--data-dir", type=str, default="../data")
@@ -820,12 +744,7 @@ def parse_args(input_args=None):
     parser.add_argument("--adam-beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
     parser.add_argument("--adam-weight-decay", type=float, default=0., help="Weight decay to use.")
     parser.add_argument("--adam-epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
-
     parser.add_argument("--max-grad-norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--lr-scheduler", type=str, default="constant", choices=["constant", "cosine"], help="Learning rate scheduler.")
-    parser.add_argument("--lr-warmup-steps", type=int, default=0, help="Number of warmup steps for LR scheduler.")
-    parser.add_argument("--lr-decay-start-step", type=int, default=None, help="Step to start LR decay (default: after warmup).")
-    parser.add_argument("--min-lr", type=float, default=0.0, help="Minimum learning rate for cosine scheduler.")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ema-decay", type=float, default=0.9999)
     parser.add_argument("--ema-update-freq", type=int, default=1)
@@ -840,7 +759,7 @@ def parse_args(input_args=None):
     parser.add_argument("--path-type", type=str, default="linear", choices=["linear", "cosine"])
     parser.add_argument("--prediction", type=str, default="v", choices=["v"]) # currently we only support v-prediction
     parser.add_argument("--cfg-prob", type=float, default=0.1)
-    parser.add_argument("--enc-type", type=str, default='dinov2-vit-b')
+    parser.add_argument("--enc-type", type=str, default='dinov2-b')
     parser.add_argument("--proj-coeff", type=str, default="1.0")
     parser.add_argument("--weighting", default="uniform", type=str, help="Max gradient norm.")
     parser.add_argument("--repa-loss", action=argparse.BooleanOptionalAction, default=True)
@@ -852,12 +771,19 @@ def parse_args(input_args=None):
                         help="Absolute step to begin turning off REPA projection loss (None keeps it on)")
     parser.add_argument("--repa-stop-fade-steps", type=int, default=0,
                         help="Cosine fade length for REPA projection loss after repa-stop-step (0 = hard stop)")
-
     # whether to normalize spatial features
     parser.add_argument("--spnorm-method", type=str, default="zscore", choices=["none", "zscore", "zscore_token", "layernorm"])
     parser.add_argument("--cls-token-weight", type=float, default=0.2)
     parser.add_argument("--zscore-alpha", type=float, default=0.6)
     parser.add_argument("--zscore-proj-skip-std", action=argparse.BooleanOptionalAction, default=False)
+
+    # Ablation: selective re-initialization after checkpoint loading
+    parser.add_argument("--reinit-sit", action=argparse.BooleanOptionalAction, default=False,
+                        help="Re-initialize SiT body after loading checkpoint (keep KV projections). "
+                             "Use with --resume-step to test Stage 1's contribution to SiT.")
+    parser.add_argument("--reinit-kv-proj", action=argparse.BooleanOptionalAction, default=False,
+                        help="Re-initialize KV projection after loading checkpoint (keep SiT body). "
+                             "Use with --resume-step to test Stage 1's contribution to KV projection.")
 
     # config file (YAML)
     parser.add_argument("--config", type=str, default=None,

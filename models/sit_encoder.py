@@ -112,109 +112,89 @@ class AttentionWithEncoderKV(nn.Module):
     def forward(
         self, 
         x: torch.Tensor,
+        q_enc: Optional[torch.Tensor] = None,
         k_enc: Optional[torch.Tensor] = None,
         v_enc: Optional[torch.Tensor] = None,
         stage: int = 2,
         align_mode: str = 'attn_mse',
         time_input: Optional[torch.Tensor] = None,
         path_type: str = "linear",
+        kv_replace_mode: str = "kv",
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward attention with staged Encoder-KV training.
+        
+        kv_replace_mode controls which components are replaced from encoder:
+        - 'kv': Replace K,V (default)
+        - 'k': Replace only K
+        - 'v': Replace only V
+        - 'qkv': Replace Q,K,V
+        - 'qk': Replace Q,K
+        - 'q': Replace only Q
         """
         B, N, C = x.shape
         
         # Compute Q, K, V from input
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, heads, N, head_dim)
-        q, k_sit, v_sit = qkv.unbind(0)
+        q_sit, k_sit, v_sit = qkv.unbind(0)
         
         # Apply QK norm
-        q = self.q_norm(q)
+        q_sit = self.q_norm(q_sit)
         k_sit = self.k_norm(k_sit)
         
         distill_loss = None
         
-        if stage == 1 and k_enc is not None and v_enc is not None:
-            k = k_enc
-            v = v_enc
-        elif stage == 2 and k_enc is not None and v_enc is not None:
-            # Stage 2: Use SiT K/V with alignment loss
+        # Helper: select Q/K/V based on kv_replace_mode and encoder outputs
+        def _select_qkv(q_src, k_src, v_src):
+            """Select which components to use from encoder vs SiT based on mode."""
+            q = q_src if (kv_replace_mode in ('qkv', 'qk', 'q') and q_src is not None) else q_sit
+            k = k_src if (kv_replace_mode in ('kv', 'k', 'qkv', 'qk') and k_src is not None) else k_sit
+            v = v_src if (kv_replace_mode in ('kv', 'v', 'qkv') and v_src is not None) else v_sit
+            return q, k, v
+        
+        # Check if any encoder component is available
+        has_enc = (q_enc is not None or k_enc is not None or v_enc is not None)
+        
+        if stage == 1 and has_enc:
+            q, k, v = _select_qkv(q_enc, k_enc, v_enc)
+        elif stage == 2 and has_enc:
+            # Stage 2: Use SiT Q/K/V with alignment loss against encoder
+            # First compute teacher (encoder) attention output for distillation
+            q_teacher, k_teacher, v_teacher = _select_qkv(q_enc, k_enc, v_enc)
             
-            if align_mode == 'logits':
-                # Numerical Stability Fix: Ensure float32 for alignment calculation
-                # to prevent overflow/underflow in exponential/norm operations
-                logits_enc = (q.float() @ k_enc.float().transpose(-2, -1)) * self.scale
-                logits_sit = (q.float() @ k_sit.float().transpose(-2, -1)) * self.scale
-                
-                # Check for zero vectors before normalize to avoid NaN
-                logits_enc_n = F.normalize(logits_enc, dim=-1, eps=1e-6)
-                logits_sit_n = F.normalize(logits_sit, dim=-1, eps=1e-6)
-                
-                distill_loss = 1 - F.cosine_similarity(logits_sit_n, logits_enc_n.detach(), dim=-1).mean()
-                
-            elif align_mode == 'attn_mse':
-                attn_enc = self._compute_attn_output(q, k_enc, v_enc)
-                attn_sit = self._compute_attn_output(q, k_sit, v_sit)
+            if align_mode == 'attn_mse':
+                attn_enc = self._compute_attn_output(q_teacher, k_teacher, v_teacher)
+                attn_sit = self._compute_attn_output(q_sit, k_sit, v_sit)
                 distill_loss = F.mse_loss(attn_sit, attn_enc.detach())
-
-            elif align_mode == 'snr_attn_mse':
-                attn_enc = self._compute_attn_output(q, k_enc, v_enc)
-                attn_sit = self._compute_attn_output(q, k_sit, v_sit)
-                attn_loss_per_sample = self._per_sample_mse(attn_sit, attn_enc.detach())
-                attn_weight = self._snr_weight(
-                    time_input=time_input,
-                    path_type=path_type,
-                    dtype=attn_loss_per_sample.dtype,
-                    device=attn_loss_per_sample.device,
-                ).reshape(-1)
-                distill_loss = (attn_weight * attn_loss_per_sample).mean()
-
-            elif align_mode == 'attn_kl':
-                tau = max(self.distill_temperature, 1e-3)
-                logits_enc = (q.float() @ k_enc.float().transpose(-2, -1)) * self.scale
-                logits_sit = (q.float() @ k_sit.float().transpose(-2, -1)) * self.scale
-                target = F.softmax(logits_enc / tau, dim=-1).detach()
-                log_probs = F.log_softmax(logits_sit / tau, dim=-1)
-                kl = F.kl_div(log_probs, target, reduction='none').sum(dim=-1)
-                distill_loss = (tau * tau) * kl.mean()
-
             elif align_mode == 'kv_mse':
-                k_loss_per_sample = self._per_sample_mse(k_sit.float(), k_enc.float().detach())
-                v_loss_per_sample = self._per_sample_mse(v_sit.float(), v_enc.float().detach())
-                kv_weight = self._snr_weight(
-                    time_input=time_input,
-                    path_type=path_type,
-                    dtype=k_loss_per_sample.dtype,
-                    device=k_loss_per_sample.device,
-                ).reshape(-1)
-                distill_loss = (kv_weight * (k_loss_per_sample + v_loss_per_sample)).mean()
-
-            elif align_mode == 'attn_hybrid':
-                # Combine easy-but-weak attention output alignment with
-                # SNR-gated KV alignment that only activates where matching is possible.
-                attn_enc = self._compute_attn_output(q, k_enc, v_enc)
-                attn_sit = self._compute_attn_output(q, k_sit, v_sit)
-                attn_loss_per_sample = self._per_sample_mse(attn_sit, attn_enc.detach())
-                k_loss_per_sample = self._per_sample_mse(k_sit.float(), k_enc.float().detach())
-                v_loss_per_sample = self._per_sample_mse(v_sit.float(), v_enc.float().detach())
-                kv_weight = self._snr_weight(
-                    time_input=time_input,
-                    path_type=path_type,
-                    dtype=attn_loss_per_sample.dtype,
-                    device=attn_loss_per_sample.device,
-                ).reshape(-1)
-                distill_loss = (
-                    self.attn_loss_weight * attn_loss_per_sample
-                    + self.kv_loss_weight * kv_weight * (k_loss_per_sample + v_loss_per_sample)
-                ).mean()
-
+                # For kv_mse, compare the components that are being replaced
+                loss_components = []
+                if k_enc is not None and kv_replace_mode in ('kv', 'k', 'qkv', 'qk'):
+                    loss_components.append(self._per_sample_mse(k_sit.float(), k_enc.float().detach()))
+                if v_enc is not None and kv_replace_mode in ('kv', 'v', 'qkv'):
+                    loss_components.append(self._per_sample_mse(v_sit.float(), v_enc.float().detach()))
+                if q_enc is not None and kv_replace_mode in ('qkv', 'qk', 'q'):
+                    loss_components.append(self._per_sample_mse(q_sit.float(), q_enc.float().detach()))
+                if loss_components:
+                    combined = sum(loss_components)
+                    kv_weight = self._snr_weight(
+                        time_input=time_input,
+                        path_type=path_type,
+                        dtype=combined.dtype,
+                        device=combined.device,
+                    ).reshape(-1)
+                    distill_loss = (kv_weight * combined).mean()
+                else:
+                    distill_loss = torch.tensor(0.0, device=x.device, dtype=torch.float32)
             else:
                 raise ValueError(f"Unknown align_mode: {align_mode}")
             
+            q = q_sit
             k = k_sit
             v = v_sit
         else:
+            q = q_sit
             k = k_sit
             v = v_sit
         
@@ -235,7 +215,7 @@ class AttentionWithEncoderKV(nn.Module):
 
 class SiTBlockWithEncoderKV(nn.Module):
     """
-    SiT block with optional Encoder K/V injection.
+    SiT block with optional Encoder Q/K/V injection.
     """
     def __init__(
         self, 
@@ -249,6 +229,7 @@ class SiTBlockWithEncoderKV(nn.Module):
         kv_proj_kernel_size: int = 1,
         kv_norm_type: str = "zscore",
         kv_zscore_alpha: float = 1.0,
+        kv_replace_mode: str = "kv",
         **block_kwargs
     ):
         super().__init__()
@@ -276,8 +257,9 @@ class SiTBlockWithEncoderKV(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
         
-        # Encoder K/V projection
+        # Encoder Q/K/V projection
         self.has_enc_kv = enc_dim is not None and enc_heads is not None
+        self.kv_replace_mode = kv_replace_mode
         if self.has_enc_kv:
             self.kv_proj = EncoderKVProjection(
                 enc_dim, hidden_size, enc_heads, num_heads,
@@ -286,6 +268,7 @@ class SiTBlockWithEncoderKV(nn.Module):
                 kv_proj_kernel_size=kv_proj_kernel_size,
                 kv_norm_type=kv_norm_type,
                 kv_zscore_alpha=kv_zscore_alpha,
+                kv_replace_mode=kv_replace_mode,
             )
         
 
@@ -293,7 +276,7 @@ class SiTBlockWithEncoderKV(nn.Module):
         self, 
         x: torch.Tensor, 
         c: torch.Tensor,
-        enc_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        enc_kv: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
         stage: int = 2,
         align_mode: str = 'attn_mse',
         time_input: Optional[torch.Tensor] = None,
@@ -302,27 +285,29 @@ class SiTBlockWithEncoderKV(nn.Module):
         """
         Forward pass.
         Args:
-            enc_kv: Optional (K_enc, V_enc) tuple from encoder
+            enc_kv: Optional (Q_enc, K_enc, V_enc) tuple from encoder
         """
         # AdaLN modulation
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.adaLN_modulation(c).chunk(6, dim=-1)
         )     
-        # Prepare Encoder K/V if available
-        k_enc, v_enc = None, None
+        # Prepare Encoder Q/K/V if available
+        q_enc, k_enc, v_enc = None, None, None
         if self.has_enc_kv and enc_kv is not None and self.training:
-            k_raw, v_raw = enc_kv
-            k_enc, v_enc = self.kv_proj(k_raw, v_raw, stage=stage)
+            q_raw, k_raw, v_raw = enc_kv
+            q_enc, k_enc, v_enc = self.kv_proj(q_enc=q_raw, k_enc=k_raw, v_enc=v_raw, stage=stage)
         
-        # Attention with stage-based K/V selection
+        # Attention with stage-based Q/K/V selection
         attn_out, distill_loss = self.attn(
             modulate(self.norm1(x), shift_msa, scale_msa),
+            q_enc=q_enc,
             k_enc=k_enc,
             v_enc=v_enc,
             stage=stage,
             align_mode=align_mode,
             time_input=time_input,
             path_type=path_type,
+            kv_replace_mode=self.kv_replace_mode,
         )
         x = x + gate_msa.unsqueeze(1) * attn_out
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
@@ -369,6 +354,7 @@ class SiTWithEncoderKV(nn.Module):
         kv_proj_kernel_size: int = 3,
         kv_norm_type: str = "layernorm",
         kv_zscore_alpha: float = 1.0,
+        kv_replace_mode: str = "kv",
         distill_temperature: float = 1.0,
         kv_distill_snr_gamma: float = 1.0,
         kv_distill_min_weight: float = 0.0,
@@ -390,6 +376,7 @@ class SiTWithEncoderKV(nn.Module):
         self.projection_layer_type = projection_layer_type
         self.hidden_size = hidden_size
         self.distill_temperature = distill_temperature
+        self.kv_replace_mode = kv_replace_mode
         
         # Encoder KV config
         self.enc_layer_indices = enc_layer_indices
@@ -420,6 +407,7 @@ class SiTWithEncoderKV(nn.Module):
                     kv_proj_kernel_size=kv_proj_kernel_size,
                     kv_norm_type=kv_norm_type,
                     kv_zscore_alpha=kv_zscore_alpha,
+                    kv_replace_mode=kv_replace_mode,
                     **{
                         **block_kwargs,
                         "distill_temperature": distill_temperature,
@@ -493,7 +481,7 @@ class SiTWithEncoderKV(nn.Module):
         x: torch.Tensor, 
         t: torch.Tensor, 
         y: torch.Tensor,
-        enc_kv_list: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        enc_kv_list: Optional[List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = None,
         stage: int = 2,
         align_mode: str = 'attn_mse',
         return_logvar: bool = False,
@@ -501,7 +489,7 @@ class SiTWithEncoderKV(nn.Module):
         """
         Forward pass.
         Args:
-            enc_kv_list: List of (K, V) tuples from encoder extractor
+            enc_kv_list: List of (Q, K, V) tuples from encoder extractor
         """
         x = self.x_embedder(x) + self.pos_embed
         N, T, D = x.shape
@@ -535,10 +523,7 @@ class SiTWithEncoderKV(nn.Module):
             
             if (i + 1) == self.encoder_depth and not self.eval_mode:
                 for projector in self.projectors:
-                    if self.projection_layer_type in ["mlp", "linear"]:
-                        z = projector(x.reshape(-1, D)).reshape(N, T, -1)
-                    else:
-                        z = projector(x)
+                    z = projector(x)
                     zs.append(z)
                     zs_original.append(x.clone())
         
