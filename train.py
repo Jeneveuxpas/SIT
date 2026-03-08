@@ -33,7 +33,7 @@ from models.encoder_adapter import EncoderKVExtractor
 from loss import SILossWithEncoderKV
 from vision_encoder import load_encoders
 
-from dataset import HFImgLatentDataset, HFLatentDataset, ImageFolderLatentDataset
+from dataset import HFImgLatentDataset, HFLatentDataset, ImageFolderLatentDataset, EDM2ImgLatentDataset
 import wandb
 from torchvision.utils import make_grid
 from utils import ALL_SPNORM_METHODS
@@ -302,14 +302,18 @@ def main(args):
         eps=args.adam_epsilon,
     )    
     
-    # Setup data
+    # Setup data: try HF format first, then edm2/REPA format, then ImageFolder fallback
     try:
-        # We can preprocess ImageNet 256/512 here, and directly load from disk
         train_dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
     except Exception as e:
         print(f"Error loading HFImgLatentDataset: {e}")
-        print("Falling back to ImageFolderLatentDataset")
-        train_dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, resolution=args.resolution, split="train")
+        try:
+            print("Trying EDM2ImgLatentDataset (REPA preprocessing format)...")
+            train_dataset = EDM2ImgLatentDataset(args.data_dir)
+        except Exception as e2:
+            print(f"Error loading EDM2ImgLatentDataset: {e2}")
+            print("Falling back to ImageFolderLatentDataset")
+            train_dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, resolution=args.resolution, split="train")
     print(train_dataset)
 
     local_batch_size = int(args.batch_size // accelerator.num_processes)
