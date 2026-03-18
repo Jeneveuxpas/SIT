@@ -299,8 +299,7 @@ class SiTBlockWithEncoderKV(nn.Module):
         if self.has_enc_kv and enc_kv is not None and self.training:
             q_raw, k_raw, v_raw = enc_kv
             q_enc, k_enc, v_enc = self.kv_proj(
-                q_enc=q_raw, k_enc=k_raw, v_enc=v_raw, stage=stage,
-                c=c if self.kv_use_adaln else None,
+                q_enc=q_raw, k_enc=k_raw, v_enc=v_raw, stage=stage, c=c,
             )
         
         # Attention with stage-based Q/K/V selection

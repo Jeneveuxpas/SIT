@@ -714,8 +714,8 @@ def parse_args(input_args=None):
     parser.add_argument("--kv-stop-fade-steps", type=int, default=0,
                         help="Cosine fade length for KV distillation after kv-stop-step (0 = hard stop)")
     parser.add_argument("--kv-proj-type", type=str, default="linear",
-                        choices=["linear", "mlp", "conv"],
-                        help="Projection type for Encoder K/V: linear, mlp, or conv")
+                        choices=["linear", "mlp", "conv", "head_gate"],
+                        help="Projection type for Encoder K/V: linear, mlp, conv, or head_gate")
     parser.add_argument("--kv-proj-hidden-dim", type=int, default=None,
                         help="Hidden dimension for MLP projection (default: max(enc_dim, sit_dim))")
     parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
