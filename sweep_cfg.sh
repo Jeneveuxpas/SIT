@@ -1,16 +1,17 @@
 #!/bin/bash
+# -*- coding: utf-8 -*-
 # 批量搜索 cfg-scale
 # 用法: ./sweep_cfg.sh --guidance-high 0.65
 #       ./sweep_cfg.sh --guidance-high 0.7
 #       ./sweep_cfg.sh --guidance-high 0.75
 
-CONFIG="configs/SIT-XL.yaml"
-EXP_NAME="SIT-XL"
-STEPS="1000000"
+CONFIG="configs/conv_3_kv_2.0.yaml"
+EXP_NAME="conv_3_kv_2.0"
+STEPS="0400000"
 GUIDANCE_LOW="0.0"
 GUIDANCE_HIGH=""
 GPU="0,1,2,3,4,5,6,7"
-NUM_GPUS="8"
+NUM_GPUS="8" 
 
 # 解析参数
 while [[ $# -gt 0 ]]; do
@@ -32,7 +33,7 @@ if [ -z "$GUIDANCE_HIGH" ]; then
 fi
 
 # 要搜索的 cfg-scale 列表，按需修改
-CFG_SCALES=(1.65 1.70 1.75 1.80 1.85)
+CFG_SCALES=(2.1)
 
 echo "================================================"
 echo "CFG-Scale 批量搜索"

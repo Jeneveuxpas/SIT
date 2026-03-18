@@ -22,8 +22,8 @@ from samplers import euler_sampler
 
 # ---------- (label, seed) pairs ----------
 PAIRS = [
-    (980, 0), (849, 2), (928, 2), (933, 0), (958, 1), (970, 0),
-    (203, 42), (170, 142), (93, 72), (88, 142), (84, 162), (55, 0),
+    (980, 0),(203, 42) , (928, 2), (970, 0), (958, 1), (84, 162),
+    (849, 2),(39, 72), (51 ,2), (88, 142) , (55, 0),(933, 0),
 ]
 
 CKPT = "/workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0400000.pt"
@@ -148,7 +148,7 @@ def main():
         )
         images.append(img)
 
-    make_grid_pdf(images, nrows=2, ncols=6, out_path="grid_eccv.pdf")
+    make_grid_pdf(images, nrows=2, ncols=6, out_path="cfg_images.pdf")
 
 
 if __name__ == "__main__":

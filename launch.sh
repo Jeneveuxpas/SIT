@@ -8,7 +8,7 @@
 #   ./launch.sh --config configs/SIT-XL-50-350-350.yaml --exp-name SIT-XL-50-350-350 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0500000
 # ./launch.sh --config configs/SIT-XL-150.yaml --exp-name SIT-XL-150 --gpu 2,3 --num-gpus 2 --resume-step 0150000
 #  ./launch.sh --config configs/sam2-s-16.yaml --exp-name sam2-s-16 --gpu 2 --num-gpus 1
- 
+
 #  ./launch.sh --config configs/Q_init.yaml --exp-name Q_init --gpu 0 --num-gpus 1 --resume-step 0030000 --reinit-sit
 #  ./launch.sh --config configs/kv-stop-300-500k.yaml --exp-name kv-stop-300-500k --gpu 0,1,2,3 --num-gpus 4 --resume-step 300000
 #  ./launch.sh --config configs/attn_mse_repa_early_stop_600.yaml --exp-name attn_mse_repa_early_stop_600 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0600000
@@ -136,7 +136,7 @@ if [ "$EVAL_ONLY" = "false" ]; then
     fi
 
     # 执行训练
-#     eval ${TRAIN_CMD}
+    eval ${TRAIN_CMD}
 
     echo "================================================"
     echo "训练完成！"

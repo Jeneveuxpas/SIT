@@ -8,11 +8,11 @@ Given a checkpoint, cfg scale, class labels, and seeds, generates all
 individually for easy browsing.
 
 Usage:
-    CUDA_VISIBLE_DEVICES=0 python generate_pick.py \
-        --ckpt /path/to/checkpoint.pt \
-        --cfg-scale 1.8 \
-        --class-labels 207 88 360 270 \
-        --seeds 0 1 2 42 \
+    CUDA_VISIBLE_DEVICES=7 python generate_pick.py \
+        --ckpt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0400000.pt  \
+        --cfg-scale 4.0 \
+        --class-labels 928 \
+        --seed-range 0 30  \
         --num-steps 250 \
         --out-dir pick_output
 """
@@ -129,8 +129,12 @@ def main():
     parser.add_argument("--cfg-scale", type=float, default=1.8)
     parser.add_argument("--class-labels", type=int, nargs="+", required=True,
                         metavar="CLS")
-    parser.add_argument("--seeds", type=int, nargs="+", required=True,
-                        metavar="S")
+    # Seeds: explicit list OR a range (start end [step])
+    seed_group = parser.add_mutually_exclusive_group(required=True)
+    seed_group.add_argument("--seeds", type=int, nargs="+", metavar="S",
+                            help="Explicit seed list, e.g. 0 1 42 99")
+    seed_group.add_argument("--seed-range", type=int, nargs="+", metavar="N",
+                            help="Seed range: START END [STEP], e.g. 0 100 or 0 200 2")
     parser.add_argument("--num-steps", type=int, default=250)
     parser.add_argument("--path-type", type=str, default=None,
                         choices=["linear", "cosine"],
@@ -141,6 +145,14 @@ def main():
     parser.add_argument("--out-dir", type=str, default="pick_output")
 
     args = parser.parse_args()
+
+    if args.seed_range is not None:
+        if len(args.seed_range) == 2:
+            args.seeds = list(range(args.seed_range[0], args.seed_range[1]))
+        elif len(args.seed_range) == 3:
+            args.seeds = list(range(args.seed_range[0], args.seed_range[1], args.seed_range[2]))
+        else:
+            parser.error("--seed-range takes 2 or 3 values: START END [STEP]")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")

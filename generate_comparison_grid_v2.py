@@ -15,15 +15,16 @@ You provide:
 Usage example:
 
     CUDA_VISIBLE_DEVICES=0 python generate_comparison_grid_v2.py \
-    --method-a-label "SiT-XL/2 + iREPA" \
-    --method-b-label "SiT-XL/2 + AttnScaf" \
+    --method-a-label "iREPA" \
+    --method-b-label "AttnScaf" \
     --method-a-ckpts /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0200000.pt /workspace/SIT/iREPA-collections/0400000.pt \
     --method-b-ckpts /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0200000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0400000.pt \
     --ckpt-labels 100K 200K 400K \
-    --class-labels 207 88 2 400 849 325 \
-    --seeds 0 1 2 42 72 142 \
+    --class-labels 335 31 511 200 417 127 \
+    --seeds 1 142 43 45 2 67 \
     --cfg-scale 1.0 --num-steps 250 --mode ode \
-    --out comparison_grid.pdf
+    --out wocfg_compare.pdf \
+    --fontsize 18
 """
 
 import argparse
@@ -167,7 +168,7 @@ def make_grid_figure(
     dpi=300,
     fig_width=13.5,    # Large figure; shrink in LaTeX with \includegraphics[width=\textwidth]
     font_family="STIXGeneral",
-    fontsize=9,
+    fontsize=13,
 ):
     """
     Draw the comparison grid matching Figure 8 style.
@@ -214,7 +215,7 @@ def make_grid_figure(
 
     # Build height_ratios: insert gap rows between super-rows
     # e.g. for 2 super-rows × 2 methods:  [1, 1, gap, 1, 1]
-    super_row_gap = 0.08  # relative to one cell row
+    super_row_gap = 0.03  # relative to one cell row
     height_ratios = []
     for sr in range(n_super_rows):
         if sr > 0:
@@ -224,8 +225,10 @@ def make_grid_figure(
 
     fig_w = fig_width
     n_real_rows = n_super_rows * n_methods
-    fig_h = cell_h * n_real_rows + cell_h * super_row_gap * max(0, n_super_rows - 1) \
-            + fontsize / 72 * 8  # headroom for arrow + titles
+    gs_top = 0.95
+    gs_bottom = 0.01
+    content_h = cell_h * n_real_rows + cell_h * super_row_gap * max(0, n_super_rows - 1)
+    fig_h = content_h / (gs_top - gs_bottom)
 
     fig = plt.figure(figsize=(fig_w, fig_h))
 
@@ -242,8 +245,8 @@ def make_grid_figure(
         n_gs_rows, n_gs_cols,
         width_ratios=width_ratios,
         height_ratios=height_ratios,
-        left=0.06, right=0.99, top=0.90, bottom=0.01,
-        wspace=0.02, hspace=0.03,
+        left=0.06, right=0.99, top=gs_top, bottom=gs_bottom,
+        wspace=0.02, hspace=0.01,
     )
 
     def gs_col(local_grp, ckpt_idx):

@@ -33,7 +33,7 @@ from models.encoder_adapter import EncoderKVExtractor
 from loss import SILossWithEncoderKV
 from vision_encoder import load_encoders
 
-from dataset import HFImgLatentDataset, HFLatentDataset, ImageFolderLatentDataset
+from dataset import HFImgLatentDataset, HFLatentDataset, ImageFolderLatentDataset, EDM2ImgLatentDataset
 import wandb
 from torchvision.utils import make_grid
 from utils import ALL_SPNORM_METHODS
@@ -134,100 +134,6 @@ def get_loss_stop_multiplier(step: int, stop_step: int = None, fade_steps: int =
     progress = min(1.0, (step - stop_step) / max(1, fade_steps))
     return 0.5 * (1.0 + math.cos(math.pi * progress))
 
-
-def get_sit_block_probe_params(model, layer_idx_1based: int):
-    """
-    Select lightweight probe parameters from a specific SiT block.
-    We use attention projection weights to keep monitoring cost low.
-    """
-    if not hasattr(model, "blocks"):
-        return []
-
-    block_idx = layer_idx_1based - 1
-    if block_idx < 0 or block_idx >= len(model.blocks):
-        return []
-
-    block = model.blocks[block_idx]
-    selected = []
-    for name, p in block.named_parameters():
-        if not p.requires_grad:
-            continue
-        if name in {"attn.qkv.weight", "attn.proj.weight"}:
-            selected.append(p)
-
-    # Fallback in case module naming differs.
-    if len(selected) == 0:
-        for name, p in block.named_parameters():
-            if p.requires_grad and name.startswith("attn."):
-                selected.append(p)
-    return selected
-
-
-def compute_grad_cosine(loss_main: torch.Tensor, loss_aux: torch.Tensor, params):
-    """
-    Compute cosine similarity between gradients of two losses
-    on a fixed probe parameter set.
-    """
-    if len(params) == 0:
-        return None
-    if not isinstance(loss_main, torch.Tensor) or not isinstance(loss_aux, torch.Tensor):
-        return None
-    if not loss_main.requires_grad or not loss_aux.requires_grad:
-        return None
-
-    grads_main = torch.autograd.grad(
-        loss_main, params, retain_graph=True, allow_unused=True
-    )
-    grads_aux = torch.autograd.grad(
-        loss_aux, params, retain_graph=True, allow_unused=True
-    )
-
-    device = params[0].device
-    dot = torch.tensor(0.0, device=device)
-    main_norm_sq = torch.tensor(0.0, device=device)
-    aux_norm_sq = torch.tensor(0.0, device=device)
-    used = 0
-
-    for g_main, g_aux in zip(grads_main, grads_aux):
-        if g_main is None or g_aux is None:
-            continue
-        gm = g_main.detach().float().reshape(-1)
-        ga = g_aux.detach().float().reshape(-1)
-        dot = dot + torch.dot(gm, ga)
-        main_norm_sq = main_norm_sq + torch.dot(gm, gm)
-        aux_norm_sq = aux_norm_sq + torch.dot(ga, ga)
-        used += 1
-
-    if used == 0:
-        return None
-    if main_norm_sq.item() <= 0 or aux_norm_sq.item() <= 0:
-        return None
-
-    main_norm = torch.sqrt(main_norm_sq)
-    aux_norm = torch.sqrt(aux_norm_sq)
-    cosine = dot / (main_norm * aux_norm + 1e-12)
-    return cosine, main_norm, aux_norm
-
-
-def reduce_scalar_mean(accelerator: Accelerator, value, device: torch.device):
-    """
-    Reduce a scalar metric across all processes with nan-safe mean.
-    Returns None when all processes report NaN.
-    """
-    if value is None:
-        t = torch.tensor(float("nan"), device=device, dtype=torch.float32)
-    elif isinstance(value, torch.Tensor):
-        t = value.detach().float()
-        if t.ndim > 0:
-            t = t.mean()
-    else:
-        t = torch.tensor(float(value), device=device, dtype=torch.float32)
-
-    gathered = accelerator.gather(t.view(1))
-    valid = ~torch.isnan(gathered)
-    if valid.any():
-        return gathered[valid].mean().item()
-    return None
 
 #################################################################################
 #                                  Training Loop                                #
@@ -396,14 +302,18 @@ def main(args):
         eps=args.adam_epsilon,
     )    
     
-    # Setup data
+    # Setup data: try HF format first, then edm2/REPA format, then ImageFolder fallback
     try:
-        # We can preprocess ImageNet 256/512 here, and directly load from disk
         train_dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
     except Exception as e:
         print(f"Error loading HFImgLatentDataset: {e}")
-        print("Falling back to ImageFolderLatentDataset")
-        train_dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, resolution=args.resolution, split="train")
+        try:
+            print("Trying EDM2ImgLatentDataset (REPA preprocessing format)...")
+            train_dataset = EDM2ImgLatentDataset(args.data_dir)
+        except Exception as e2:
+            print(f"Error loading EDM2ImgLatentDataset: {e2}")
+            print("Falling back to ImageFolderLatentDataset")
+            train_dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, resolution=args.resolution, split="train")
     print(train_dataset)
 
     local_batch_size = int(args.batch_size // accelerator.num_processes)
@@ -462,37 +372,6 @@ def main(args):
         model, optimizer, train_dataloader
     )
 
-    # Optional gradient-direction monitoring on fixed SiT probe layers.
-    kv_probe_params = []
-    repa_probe_params = []
-    grad_window_active = False
-    grad_window_remaining = 0
-    grad_window_start_step = None
-    grad_window_stats = {}
-    grad_window_stat_keys = [
-        f"grad_cos_main_kv_l{args.grad_monitor_kv_layer}",
-        f"grad_norm_main_kv_l{args.grad_monitor_kv_layer}",
-        f"grad_norm_kv_l{args.grad_monitor_kv_layer}",
-        f"grad_cos_main_repa_l{args.grad_monitor_repa_layer}",
-        f"grad_norm_main_repa_l{args.grad_monitor_repa_layer}",
-        f"grad_norm_repa_l{args.grad_monitor_repa_layer}",
-    ]
-    if args.grad_monitor:
-        probe_model = safe_unwrap_model(model)
-        kv_probe_params = get_sit_block_probe_params(probe_model, args.grad_monitor_kv_layer)
-        repa_probe_params = get_sit_block_probe_params(probe_model, args.grad_monitor_repa_layer)
-        if accelerator.is_main_process:
-            logger.info(
-                f"Grad monitor enabled (interval={args.grad_monitor_interval}, "
-                f"window_steps={args.grad_monitor_window_steps}): "
-                f"KV probe=layer{args.grad_monitor_kv_layer} ({len(kv_probe_params)} params), "
-                f"REPA probe=layer{args.grad_monitor_repa_layer} ({len(repa_probe_params)} params)"
-            )
-            if len(kv_probe_params) == 0:
-                logger.warning("Grad monitor: KV probe parameter set is empty.")
-            if len(repa_probe_params) == 0:
-                logger.warning("Grad monitor: REPA probe parameter set is empty.")
-
     if accelerator.is_main_process:
         tracker_config = vars(copy.deepcopy(args))
         accelerator.init_trackers(
@@ -540,7 +419,6 @@ def main(args):
 
         model.train()
         for batch in train_dataloader:
-            grad_monitor_logs = {}
             if len(batch) == 3:
                 raw_image, x, y = batch
                 raw_image = raw_image.to(device)
@@ -680,86 +558,6 @@ def main(args):
                 current_distill_coeff = base_distill_coeff * kv_gate
                 distill_loss = distill_loss_raw * current_distill_coeff
 
-                should_start_grad_window = (
-                    args.grad_monitor
-                    and accelerator.sync_gradients
-                    and global_step > 0
-                    and (global_step % args.grad_monitor_interval == 0)
-                    and (not grad_window_active)
-                )
-                if should_start_grad_window:
-                    grad_window_active = True
-                    grad_window_remaining = args.grad_monitor_window_steps
-                    grad_window_start_step = global_step
-                    grad_window_stats = {
-                        key: {"sum": 0.0, "sum_sq": 0.0, "count": 0}
-                        for key in grad_window_stat_keys
-                    }
-
-                should_monitor_grad = (
-                    args.grad_monitor
-                    and accelerator.sync_gradients
-                    and grad_window_active
-                    and grad_window_remaining > 0
-                )
-                if should_monitor_grad:
-                    kv_grad_stats = compute_grad_cosine(
-                        denoising_loss_mean, distill_loss, kv_probe_params
-                    )
-                    repa_grad_stats = compute_grad_cosine(
-                        denoising_loss_mean, proj_loss, repa_probe_params
-                    )
-
-                    step_metrics = {}
-                    if kv_grad_stats is not None:
-                        kv_cos, kv_main_norm, kv_aux_norm = kv_grad_stats
-                        step_metrics.update({
-                            f"grad_cos_main_kv_l{args.grad_monitor_kv_layer}": kv_cos,
-                            f"grad_norm_main_kv_l{args.grad_monitor_kv_layer}": kv_main_norm,
-                            f"grad_norm_kv_l{args.grad_monitor_kv_layer}": kv_aux_norm,
-                        })
-                    if repa_grad_stats is not None:
-                        repa_cos, repa_main_norm, repa_aux_norm = repa_grad_stats
-                        step_metrics.update({
-                            f"grad_cos_main_repa_l{args.grad_monitor_repa_layer}": repa_cos,
-                            f"grad_norm_main_repa_l{args.grad_monitor_repa_layer}": repa_main_norm,
-                            f"grad_norm_repa_l{args.grad_monitor_repa_layer}": repa_aux_norm,
-                        })
-
-                    # Aggregate metrics across all processes before window accumulation.
-                    for key in grad_window_stat_keys:
-                        value = step_metrics.get(key, None)
-                        reduced_value = reduce_scalar_mean(accelerator, value, device)
-                        if reduced_value is None:
-                            continue
-                        stat = grad_window_stats[key]
-                        stat["sum"] += reduced_value
-                        stat["sum_sq"] += reduced_value * reduced_value
-                        stat["count"] += 1
-
-                    grad_window_remaining -= 1
-                    if grad_window_remaining == 0:
-                        grad_window_active = False
-                        window_end_step = global_step
-                        grad_monitor_logs["grad_monitor_window_start"] = float(grad_window_start_step)
-                        grad_monitor_logs["grad_monitor_window_end"] = float(window_end_step)
-
-                        for key in grad_window_stat_keys:
-                            stat = grad_window_stats[key]
-                            if stat["count"] <= 0:
-                                continue
-                            mean_val = stat["sum"] / stat["count"]
-                            var_val = max(0.0, stat["sum_sq"] / stat["count"] - mean_val * mean_val)
-                            std_val = math.sqrt(var_val)
-                            grad_monitor_logs[key] = mean_val
-                            grad_monitor_logs[f"{key}_std"] = std_val
-                            grad_monitor_logs[f"{key}_n"] = float(stat["count"])
-
-                        if accelerator.is_main_process and len(grad_monitor_logs) > 0:
-                            logger.info(
-                                f"Step {window_end_step}: grad monitor window {grad_monitor_logs}"
-                            )
-                
                 # Total loss
                 loss = denoising_loss_mean + proj_loss + distill_loss
                 loss = loss.float()
@@ -845,7 +643,6 @@ def main(args):
                     "stage": current_stage,
                 }
                 logs.update(loss_dict)
-                logs.update(grad_monitor_logs)
                 progress_bar.set_postfix(**logs)
                 accelerator.log(logs, step=global_step)
 
@@ -978,17 +775,6 @@ def parse_args(input_args=None):
                         help="Absolute step to begin turning off REPA projection loss (None keeps it on)")
     parser.add_argument("--repa-stop-fade-steps", type=int, default=0,
                         help="Cosine fade length for REPA projection loss after repa-stop-step (0 = hard stop)")
-    parser.add_argument("--grad-monitor", action=argparse.BooleanOptionalAction, default=False,
-                        help="Periodically monitor gradient cosine between denoising and auxiliary losses")
-    parser.add_argument("--grad-monitor-interval", type=int, default=5000,
-                        help="Gradient monitor interval in steps")
-    parser.add_argument("--grad-monitor-window-steps", type=int, default=10,
-                        help="Number of consecutive steps to aggregate for each grad monitor window")
-    parser.add_argument("--grad-monitor-kv-layer", type=int, default=4,
-                        help="1-based SiT block index for KV-loss gradient probe")
-    parser.add_argument("--grad-monitor-repa-layer", type=int, default=10,
-                        help="1-based SiT block index for REPA-loss gradient probe")
-
     # whether to normalize spatial features
     parser.add_argument("--spnorm-method", type=str, default="zscore", choices=["none", "zscore", "zscore_token", "layernorm"])
     parser.add_argument("--cls-token-weight", type=float, default=0.2)
@@ -1039,14 +825,6 @@ def parse_args(input_args=None):
         parser.error("--kv-stop-fade-steps must be >= 0")
     if args.repa_stop_fade_steps < 0:
         parser.error("--repa-stop-fade-steps must be >= 0")
-    if args.grad_monitor_interval <= 0:
-        parser.error("--grad-monitor-interval must be > 0")
-    if args.grad_monitor_window_steps <= 0:
-        parser.error("--grad-monitor-window-steps must be > 0")
-    if args.grad_monitor_kv_layer <= 0:
-        parser.error("--grad-monitor-kv-layer must be >= 1")
-    if args.grad_monitor_repa_layer <= 0:
-        parser.error("--grad-monitor-repa-layer must be >= 1")
 
     return args
 
