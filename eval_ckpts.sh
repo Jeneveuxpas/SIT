@@ -5,13 +5,21 @@
 # 
 # 用法:
 #   # 评估指定的 steps
-#   ./eval_ckpts.sh --config configs/SiT-XL.yaml --exp-name SiT-XL --steps "0200000,0380000,0390000,0400000,0410000,0420000,0450000,0480000,0490000,0500000" --gpu 0,1,2,3 --num-gpus 4
-#
+#   ./eval_ckpts.sh --config configs/conv_3_kv_2.0.yaml --exp-name conv_3_kv_2.0 --steps "0400000"  --guidance-low 0.0 --guidance-high 1.0 --cfg-scale 4.0 --gpu 4,5,6,7 --num-gpus 4
+#   ./eval_ckpts.sh --config configs/SiT-L.yaml --exp-name SiT-L --steps "0100000,0200000" --gpu 6,7 --num-gpus 2
+#   ./eval_ckpts.sh --config configs/cosine_v_repa-6.0.yaml --exp-name cosine_v_repa-6.0 --gpu 0,1,2,3,4,5,6,7 --num-gpus 8 --steps "0400000"
+#   # 使用 guidance interval
+#   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.65
+#   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.7
+#   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.8
+#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.65 --cfg-scale 1.65
+#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.65 --cfg-scale 1.7
+#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.65 --cfg-scale 1.8
 #   # 评估所有 checkpoints
 #   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --all
 #
 #   # 评估某个范围内的 checkpoints
-#   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_500.yaml --exp-name attn_mse_repa_early_stop_500 --from 50000 --to 200000
+#   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --from 50000 --to 200000
 #
 #   # 评估最近 N 个 checkpoints
 #   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --last 5
@@ -27,13 +35,10 @@ NUM_FID_SAMPLES="${NUM_FID_SAMPLES:-50000}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-256}"
 EVAL_NUM_STEPS="${EVAL_NUM_STEPS:-250}"
 CFG_SCALE="${CFG_SCALE:-1.0}"
-MODE="${MODE:-sde}"
-GLOBAL_SEED="${GLOBAL_SEED:-0}"
 GUIDANCE_LOW="${GUIDANCE_LOW:-0.0}"
 GUIDANCE_HIGH="${GUIDANCE_HIGH:-1.0}"
+MODE="${MODE:-sde}"
 REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
-# Whether to remove stale sample folder/npz for each checkpoint before re-generation.
-CLEAN_SAMPLES="${CLEAN_SAMPLES:-true}"
 
 # 解析命令行参数
 EVAL_ALL="false"
@@ -82,14 +87,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --cfg-scale)
             CFG_SCALE="$2"
-            shift 2
-            ;;
-        --mode)
-            MODE="$2"
-            shift 2
-            ;;
-        --seed)
-            GLOBAL_SEED="$2"
             shift 2
             ;;
         --num-steps)
@@ -178,6 +175,7 @@ echo "================================================"
 echo "批量评估 Checkpoints"
 echo "实验名: ${EXP_NAME}"
 echo "GPU: ${GPU} (${NUM_GPUS} GPUs)"
+echo "Guidance interval: [${GUIDANCE_LOW}, ${GUIDANCE_HIGH}]"
 echo "待评估 checkpoints: ${CKPT_LIST[*]}"
 echo "总计: ${#CKPT_LIST[@]} 个"
 echo "================================================"
@@ -216,29 +214,9 @@ for STEP in "${CKPT_LIST[@]}"; do
     echo "[${STEP}] 开始评估..."
     echo "------------------------------------------------"
 
-    # 构建样本文件名前缀（与 generate.py 保持一致）
-    if [ "$GUIDANCE_LOW" = "0.0" ] && [ "$GUIDANCE_HIGH" = "1.0" ]; then
-        CFG_INTV=""
-    else
-        CFG_INTV="_${GUIDANCE_LOW}_${GUIDANCE_HIGH}"
-    fi
-    SAMPLE_PREFIX="${EXP_NAME}_cfg${CFG_SCALE}${CFG_INTV}-seed${GLOBAL_SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}"
-    SAMPLE_DIR="${CKPT_DIR}/${SAMPLE_PREFIX}"
-    SAMPLE_NPZ="${SAMPLE_DIR}.npz"
-
-    # 可选：清理同名旧样本，避免复用历史文件导致评估污染
-    if [ "$CLEAN_SAMPLES" = "true" ]; then
-        if [ -d "$SAMPLE_DIR" ] || [ -f "$SAMPLE_NPZ" ]; then
-            echo "[${STEP}] 清理旧样本: ${SAMPLE_DIR} / ${SAMPLE_NPZ}"
-            rm -rf "$SAMPLE_DIR"
-            rm -f "$SAMPLE_NPZ"
-        fi
-    fi
-
     # 生成样本
     torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} generate.py \
         --ckpt ${CKPT_FILE} \
-        --global-seed ${GLOBAL_SEED} \
         --num-fid-samples ${NUM_FID_SAMPLES} \
         --per-proc-batch-size ${EVAL_BATCH_SIZE} \
         --mode ${MODE} \
@@ -249,16 +227,15 @@ for STEP in "${CKPT_LIST[@]}"; do
         --guidance-high ${GUIDANCE_HIGH} \
         --sample-dir ${CKPT_DIR}
 
-    # 兼容浮点字符串格式差异（如 0 vs 0.0）
-    if [ ! -f "$SAMPLE_NPZ" ]; then
-        SAMPLE_NPZ_CANDIDATE=$(ls -t ${CKPT_DIR}/${EXP_NAME}_cfg${CFG_SCALE}*-seed${GLOBAL_SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz 2>/dev/null | head -n 1)
-        if [ -n "$SAMPLE_NPZ_CANDIDATE" ]; then
-            SAMPLE_NPZ="$SAMPLE_NPZ_CANDIDATE"
-        fi
+    # 构建样本文件名（与 generate.py 中的 cfg_intv 逻辑一致）
+    if [ "${GUIDANCE_LOW}" = "0.0" ] && [ "${GUIDANCE_HIGH}" = "1.0" ]; then
+        CFG_INTV=""
+    else
+        CFG_INTV="_${GUIDANCE_LOW}_${GUIDANCE_HIGH}"
     fi
+    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_cfg${CFG_SCALE}${CFG_INTV}-seed0-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
 
     if [ -f "$SAMPLE_NPZ" ]; then
-        echo "[${STEP}] 使用样本文件: ${SAMPLE_NPZ}"
         echo "计算 FID..."
         python evaluations/evaluator.py \
             --ref_batch ${REF_BATCH} \

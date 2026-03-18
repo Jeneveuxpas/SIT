@@ -6,6 +6,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import List, Tuple, Optional, Dict
 from utils import ZScoreNorm
 
@@ -25,7 +26,7 @@ class EncoderKVExtractor(nn.Module):
         super().__init__()
         self.encoder_model = encoder_model
         self.layer_indices = layer_indices
-        self.captured_kv: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        self.captured_kv: Dict[int, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}  # (Q, K, V)
         self.captured_feat: Dict[int, torch.Tensor] = {}
         self._hooks = []
         
@@ -44,19 +45,23 @@ class EncoderKVExtractor(nn.Module):
         self.captured_kv = {}
         self.captured_feat = {}
 
-    def get_captured_kv_list(self) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    def get_captured_kv_list(self) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """
-        Collect captured (K, V) tuples in the same order as self.layer_indices.
+        Collect captured (Q, K, V) tuples in the same order as self.layer_indices.
         """
         kv_list = []
         for idx in self.layer_indices:
             if idx not in self.captured_kv:
-                raise RuntimeError(f"K/V for layer {idx} not captured")
+                raise RuntimeError(f"Q/K/V for layer {idx} not captured")
             kv_list.append(self.captured_kv[idx])
         return kv_list
             
     def _get_model_blocks(self, model: nn.Module) -> List[nn.Module]:
         """Flatten model blocks into a list for consistent indexing."""
+        # 0. CLIP UpdatedVisionTransformer wrapper
+        if hasattr(model, "model") and hasattr(model.model, "transformer") and hasattr(model.model.transformer, "resblocks"):
+            return list(model.model.transformer.resblocks)
+
         # 1. Timm / TorchHub DINOv2
         if hasattr(model, "blocks"):
             return list(model.blocks)
@@ -99,13 +104,21 @@ class EncoderKVExtractor(nn.Module):
             # Identify attention module and Hook type
             # print(f"Inspecting block {idx} of type {type(block)}")
             
-            # Case C: SAM2 Hiera -> has 'qkv' and 'query_stride' (specific to Hiera/SAM2)
-            if hasattr(block, "attn") and hasattr(block.attn, "qkv") and hasattr(block.attn, "query_stride"):
-                # print("Selected: SAM2 (qkv) hook")
+            # Case E: CLIP -> block.attn is nn.MultiheadAttention with in_proj_weight
+            if hasattr(block, "attn") and isinstance(block.attn, nn.MultiheadAttention):
+                self._register_clip_mha_hook(block.attn, idx)
+            # Case C: SAM2 Hiera -> has 'qkv' AND is a Hiera/SAM2 block
+            # Check query_stride (transition blocks) OR class name (all Hiera blocks)
+            elif hasattr(block, "attn") and hasattr(block.attn, "qkv") and (
+                hasattr(block.attn, "query_stride") or
+                "hiera" in type(block).__name__.lower() or
+                "sam2" in type(block).__name__.lower() or
+                "hiera" in type(block.attn).__name__.lower() or
+                "sam2" in type(block.attn).__name__.lower()
+            ):
                 self._register_hf_sam2_qkv_hook(block.attn, idx)
             # Case A: Timm DINOv2 -> block.attn.qkv
             elif hasattr(block, "attn") and hasattr(block.attn, "qkv"):
-                # print("Selected: Timm hook")
                 self._register_timm_hook(block.attn, idx)
             # Case B: HF DINOv2/ViT -> block.attention.attention.query/key/value
             elif hasattr(block, "attention") and hasattr(block.attention, "attention"):
@@ -121,25 +134,32 @@ class EncoderKVExtractor(nn.Module):
                 raise NotImplementedError(f"Could not find supported attention block in {type(block)}")
     
     def get_layer_dim(self, idx: int) -> int:
-        """Get the embedding dimension of the specified layer."""
+        """Get the embedding dimension of the specified layer's K/V output."""
         if idx >= len(self.blocks):
             return 0
             
         block = self.blocks[idx]
         
-        # SAM2 Hiera
-        if hasattr(block, "attn") and hasattr(block.attn, "dim"):
-            return block.attn.dim
+        # CLIP nn.MultiheadAttention
+        if hasattr(block, "attn") and isinstance(block.attn, nn.MultiheadAttention):
+            return block.attn.embed_dim
+        # SAM2 Hiera with fused QKV — use OUTPUT dim (qkv.out_features // 3)
+        # because stage-transition blocks have qkv: Linear(dim_in, dim_out*3)
+        elif hasattr(block, "attn") and hasattr(block.attn, "qkv") and hasattr(block.attn, "query_stride"):
+            return block.attn.qkv.out_features // 3
         # Timm DINOv2
         elif hasattr(block, "attn") and hasattr(block.attn, "qkv"):
              if hasattr(block.attn, "dim"):
                  return block.attn.dim
-             elif hasattr(block.attn, "qkv") and hasattr(block.attn.qkv, "in_features"):
+             elif hasattr(block.attn.qkv, "in_features"):
                  return block.attn.qkv.in_features
         # HF ViT/DINOv2
         elif hasattr(block, "attention") and hasattr(block.attention, "attention"):
              # BERT/ViT style: attention.attention.key.in_features
              return block.attention.attention.key.in_features
+        # SAM2 Hiera with separate projections
+        elif hasattr(block, "attn") and hasattr(block.attn, "q_proj"):
+            return block.attn.q_proj.out_features
              
         # Fallback: try to find linear layers in attention
         return 0
@@ -151,8 +171,11 @@ class EncoderKVExtractor(nn.Module):
             
         block = self.blocks[idx]
         
+        # CLIP nn.MultiheadAttention
+        if hasattr(block, "attn") and isinstance(block.attn, nn.MultiheadAttention):
+            return block.attn.num_heads
         # SAM2 Hiera
-        if hasattr(block, "attn") and hasattr(block.attn, "num_attention_heads"):
+        elif hasattr(block, "attn") and hasattr(block.attn, "num_attention_heads"):
             return block.attn.num_attention_heads
         elif hasattr(block, "attn") and hasattr(block.attn, "num_heads"):
             return block.attn.num_heads
@@ -169,24 +192,63 @@ class EncoderKVExtractor(nn.Module):
         # Fallback
         return 0
                 
+    def _register_clip_mha_hook(self, attn_module, layer_idx):
+        """Hook for CLIP nn.MultiheadAttention with fused in_proj_weight."""
+        def hook_fn(module, input, output):
+            # CLIP attention input: (query, key, value) all same tensor, shape (L, B, D)
+            x = input[0]  # (L, B, D) — sequence-first format
+            L, B, D = x.shape
+
+            # Compute Q, K, V from in_proj_weight [3*D, D] and in_proj_bias [3*D]
+            w = module.in_proj_weight
+            b = module.in_proj_bias
+            # Split into Q, K, V projections
+            w_q, w_k, w_v = w[:D], w[D:2*D], w[2*D:3*D]
+            b_q, b_k, b_v = b[:D], b[D:2*D], b[2*D:3*D]
+
+            q = F.linear(x, w_q, b_q)  # (L, B, D)
+            k = F.linear(x, w_k, b_k)  # (L, B, D)
+            v = F.linear(x, w_v, b_v)  # (L, B, D)
+
+            num_heads = module.num_heads
+            head_dim = D // num_heads
+
+            # Reshape: (L, B, D) -> (B, L, num_heads, head_dim) -> (B, num_heads, L, head_dim)
+            q = q.permute(1, 0, 2).reshape(B, L, num_heads, head_dim).transpose(1, 2)
+            k = k.permute(1, 0, 2).reshape(B, L, num_heads, head_dim).transpose(1, 2)
+            v = v.permute(1, 0, 2).reshape(B, L, num_heads, head_dim).transpose(1, 2)
+
+            # Remove CLS token (first token)
+            q = q[:, :, 1:, :]
+            k = k[:, :, 1:, :]
+            v = v[:, :, 1:, :]
+
+            self.captured_kv[layer_idx] = (q.detach(), k.detach(), v.detach())
+            # Store feature in (B, L, D) format
+            self.captured_feat[layer_idx] = x.permute(1, 0, 2).detach()
+
+        hook = attn_module.register_forward_hook(hook_fn)
+        self._hooks.append(hook)
+
     def _register_timm_hook(self, attn_module, layer_idx):
         def hook_fn(module, input, output):
             # DINOv2 Attention: input is (x,) after norm
             x = input[0]
             B, N, C = x.shape
             
-            # Recompute qkv to get K, V
+            # Recompute qkv to get Q, K, V
             qkv = module.qkv(x)
             qkv = qkv.reshape(B, N, 3, module.num_heads, C // module.num_heads)
             qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, heads, N, head_dim)
             q, k, v = qkv.unbind(0)
             
             # Remove CLS token (first token) - DINO has 257 tokens, we need 256
+            q = q[:, :, 1:, :]  # Skip CLS token
             k = k[:, :, 1:, :]  # Skip CLS token
             v = v[:, :, 1:, :]  # Skip CLS token
             
-            # Store K, V (B, heads, num_patches, head_dim)
-            self.captured_kv[layer_idx] = (k.detach(), v.detach())
+            # Store Q, K, V (B, heads, num_patches, head_dim)
+            self.captured_kv[layer_idx] = (q.detach(), k.detach(), v.detach())
             self.captured_feat[layer_idx] = x.detach()
         
         hook = attn_module.register_forward_hook(hook_fn)
@@ -197,31 +259,28 @@ class EncoderKVExtractor(nn.Module):
         def hook_fn(module, input, output):
             # HF passes (hidden_states, ...)
             x = input[0]
-            # In HF, internal attention module usually does the projection inside forward
-            # But we are hooking the module that HAS .query, .key, .value
-            # We can just manually call the projection layers
             
             # Get properties from module
             head_dim = module.head_dim if hasattr(module, 'head_dim') else (module.all_head_size // module.num_attention_heads)
             num_heads = module.num_attention_heads
             B, N, C = x.shape
             
-            # Recompute K, V
+            # Recompute Q, K, V
+            query_layer = module.query(x)
             key_layer = module.key(x)
             value_layer = module.value(x)
             
             # Reshape: [B, N, heads, head_dim] -> transpose -> [B, heads, N, head_dim]
+            q = query_layer.view(B, N, num_heads, head_dim).transpose(1, 2)
             k = key_layer.view(B, N, num_heads, head_dim).transpose(1, 2)
             v = value_layer.view(B, N, num_heads, head_dim).transpose(1, 2)
             
-            # Remove CLS token logic
-            # HF ViT usually has CLS token at index 0
-            # Warning: Some models might not. We assume standard ViT behavior here.
-            # DINOv2 (WebSSL) has CLS token.
+            # Remove CLS token (HF ViT / DINOv2 has CLS at index 0)
+            q = q[:, :, 1:, :]
             k = k[:, :, 1:, :]
             v = v[:, :, 1:, :]
             
-            self.captured_kv[layer_idx] = (k.detach(), v.detach())
+            self.captured_kv[layer_idx] = (q.detach(), k.detach(), v.detach())
             self.captured_feat[layer_idx] = x.detach()
 
         hook = attn_module.register_forward_hook(hook_fn)
@@ -231,40 +290,41 @@ class EncoderKVExtractor(nn.Module):
         """Hook for SAM2 Hiera Attention"""
         def hook_fn(module, args, kwargs, output):
             # Hiera forward(x, ...). x is [B, N, C]
-            # Handle args or kwargs
             if len(args) > 0:
                 x = args[0]
             elif 'hidden_states' in kwargs:
                 x = kwargs['hidden_states']
             else:
-                # Fallback or error
-                # print("Warning: No input found in SAM2 hook")
                 return
 
             B, N, C = x.shape
-            
-            # Check structure of HieraAttention
-            # It has q_proj, k_proj, v_proj
             num_heads = module.num_heads
             head_dim = module.head_dim
             
-            # Recompute K, V using the module's projections
+            # Recompute Q, K, V using the module's projections
+            q = module.q_proj(x)
             k = module.k_proj(x)
             v = module.v_proj(x)
             
             # Reshape [B, N, heads, head_dim] -> [B, heads, N, head_dim]
+            q = q.view(B, N, num_heads, head_dim).transpose(1, 2)
             k = k.view(B, N, num_heads, head_dim).transpose(1, 2)
             v = v.view(B, N, num_heads, head_dim).transpose(1, 2)
             
-            self.captured_kv[layer_idx] = (k.detach(), v.detach())
+            self.captured_kv[layer_idx] = (q.detach(), k.detach(), v.detach())
             self.captured_feat[layer_idx] = x.detach()
 
-        # Use with_kwargs=True to capture named arguments (transformers often uses kwargs)
         hook = attn_module.register_forward_hook(hook_fn, with_kwargs=True)
         self._hooks.append(hook)
 
     def _register_hf_sam2_qkv_hook(self, attn_module, layer_idx):
-        """Hook for SAM2 Hiera Attention with Fused QKV"""
+        """Hook for SAM2 Hiera Attention with Fused QKV.
+        
+        Handles:
+        - Windowed attention (B expanded by num_windows)
+        - Stage-transition blocks (dim_in != dim_out in qkv linear)
+        - Spatial interpolation to target token count
+        """
         def hook_fn(module, args, kwargs, output):
             # Handle input
             if len(args) > 0:
@@ -277,27 +337,18 @@ class EncoderKVExtractor(nn.Module):
             if len(x.shape) == 3:
                  B, N, C = x.shape
             elif len(x.shape) == 4:
-                 # Handle 4D: (B, C, H, W) or (B, H, W, C)
-                 # Determine channel dim
                  dim_val = module.dim if hasattr(module, 'dim') else (module.qkv.in_features if hasattr(module, 'qkv') else None)
                  
-                 if dim_val and x.shape[1] == dim_val: # channels first (B, C, H, W)
-                     x = x.flatten(2).transpose(1, 2) # -> B, N, C
-                 elif dim_val and x.shape[3] == dim_val: # channels last (B, H, W, C)
-                     x = x.flatten(1, 2) # -> B, N, C
+                 if dim_val and x.shape[1] == dim_val:
+                     x = x.flatten(2).transpose(1, 2)
+                 elif dim_val and x.shape[3] == dim_val:
+                     x = x.flatten(1, 2)
                  elif dim_val is None:
-                     # Fallback assumption: (B, C, H, W) is standard for many vision models, 
-                     # but Hiera/SAM2 often uses (B, H, W, C).
-                     # Based on debug (B, H, W, 384), it is channels last.
-                     # Heuristic: smallest dim is usually channels? No, tokens are many.
-                     # Heuristic: 3 for channels usually? No, embedding dim is large.
-                     # Let's assume channels last if last dim > 3.
                      if x.shape[3] > 3:
                          x = x.flatten(1, 2)
                      else:
                          x = x.flatten(2).transpose(1, 2)
                  else:
-                     # If dim match fails or ambiguous
                      if x.shape[3] == dim_val:
                          x = x.flatten(1, 2)
                      else:
@@ -307,28 +358,103 @@ class EncoderKVExtractor(nn.Module):
             else:
                 return
 
-
-            
             # Recompute qkv
-            # SAM2 Hiera qkv: Linear(dim, 3*dim, bias=True)
-            # Output shape: [B, N, 3*dim]
             qkv = module.qkv(x)
             
-            # Reshape to [B, N, 3, heads, head_dim]
-            # Need to get num_heads. 
-            num_heads = module.num_attention_heads
-            head_dim = C // num_heads # Assuming dim_out == dim, usually true for attention blocks
+            # Get num_heads (attribute name varies across HF versions)
+            if hasattr(module, 'num_attention_heads'):
+                num_heads = module.num_attention_heads
+            elif hasattr(module, 'num_heads'):
+                num_heads = module.num_heads
+            else:
+                raise RuntimeError(f"Cannot find num_heads in {type(module)}")
+            
+            # Derive head_dim from QKV output, NOT input C.
+            # Hiera stage-transition blocks have qkv: Linear(dim_in, dim_out*3)
+            # where dim_out != dim_in (e.g. 384 -> 768*3=2304)
+            dim_out = qkv.shape[-1] // 3
+            head_dim = dim_out // num_heads
             
             qkv = qkv.reshape(B, N, 3, num_heads, head_dim)
             qkv = qkv.permute(2, 0, 3, 1, 4) # [3, B, heads, N, head_dim]
             q, k, v = qkv.unbind(0)
             
-            self.captured_kv[layer_idx] = (k.detach(), v.detach())
+            # Un-window if windowed attention is used
+            # (B will be B_orig * num_windows when windowed)
+            B_orig = getattr(self, '_batch_size', None)
+            if B_orig is not None and B > B_orig:
+                q = self._unwindow_tensor(q, B_orig)
+                k = self._unwindow_tensor(k, B_orig)
+                v = self._unwindow_tensor(v, B_orig)
+            
+            # Spatially interpolate to target token count if needed
+            target = getattr(self, '_target_num_patches', None)
+            if target is not None and q.shape[2] != target:
+                q = self._interpolate_tokens(q, target)
+                k = self._interpolate_tokens(k, target)
+                v = self._interpolate_tokens(v, target)
+            
+            self.captured_kv[layer_idx] = (q.detach(), k.detach(), v.detach())
             self.captured_feat[layer_idx] = x.detach()
 
         hook = attn_module.register_forward_hook(hook_fn, with_kwargs=True)
         self._hooks.append(hook)
-            
+    
+    @staticmethod
+    def _unwindow_tensor(tensor: torch.Tensor, B_orig: int) -> torch.Tensor:
+        """
+        Un-window: (B_orig*nH*nW, heads, ws*ws, head_dim) -> (B_orig, heads, Hp*Wp, head_dim)
+        Reconstructs the full padded spatial grid from windowed attention output.
+        """
+        B_win, heads, N_win, head_dim = tensor.shape
+        ws = int(N_win ** 0.5)
+        
+        num_windows = B_win // B_orig
+        # Assume square window grid
+        nH = nW = int(num_windows ** 0.5)
+        if nH * nW != num_windows:
+            # Non-square: try to factor
+            for i in range(int(num_windows ** 0.5), 0, -1):
+                if num_windows % i == 0:
+                    nH, nW = i, num_windows // i
+                    break
+        
+        # (B_orig*nH*nW, heads, ws, ws, head_dim)
+        tensor = tensor.reshape(B_orig, nH, nW, heads, ws, ws, head_dim)
+        # -> (B_orig, heads, nH, ws, nW, ws, head_dim)
+        tensor = tensor.permute(0, 3, 1, 4, 2, 5, 6)
+        # -> (B_orig, heads, Hp, Wp, head_dim)
+        Hp, Wp = nH * ws, nW * ws
+        tensor = tensor.reshape(B_orig, heads, Hp, Wp, head_dim)
+        # -> (B_orig, heads, Hp*Wp, head_dim)
+        tensor = tensor.reshape(B_orig, heads, Hp * Wp, head_dim)
+        return tensor
+    
+    @staticmethod
+    def _interpolate_tokens(tensor: torch.Tensor, target_tokens: int) -> torch.Tensor:
+        """
+        Spatially interpolate tokens: (B, heads, N, head_dim) -> (B, heads, target_tokens, head_dim)
+        Assumes square spatial layout.
+        """
+        B, heads, N, head_dim = tensor.shape
+        H = W = int(N ** 0.5)
+        tH = tW = int(target_tokens ** 0.5)
+        
+        if H * W != N or tH * tW != target_tokens:
+            # Non-square, skip interpolation
+            return tensor
+        
+        if H == tH and W == tW:
+            return tensor
+        
+        # (B, heads, H, W, head_dim) -> (B*heads, head_dim, H, W)
+        tensor = tensor.reshape(B, heads, H, W, head_dim)
+        tensor = tensor.reshape(B * heads, H, W, head_dim).permute(0, 3, 1, 2)
+        # Interpolate
+        tensor = F.interpolate(tensor.float(), size=(tH, tW), mode='bilinear', align_corners=False)
+        # -> (B, heads, tH, tW, head_dim) -> (B, heads, target_tokens, head_dim)
+        tensor = tensor.permute(0, 2, 3, 1).reshape(B, heads, target_tokens, head_dim)
+        return tensor
 
     
     def remove_hooks(self):
@@ -338,50 +464,38 @@ class EncoderKVExtractor(nn.Module):
         self._hooks = []
     
     @torch.no_grad()
-    def forward(self, x: torch.Tensor) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor]], torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]], torch.Tensor]:
         """
-        Forward pass through encoder to extract K/V from specified layers.
+        Forward pass through encoder to extract Q/K/V from specified layers.
         
         Args:
             x: Input image tensor (B, C, H, W) preprocessed for encoder
             
         Returns:
-            kv_list: List of (K, V) tuples for each specified layer
-                K, V shape: (B, num_heads, num_patches, head_dim)
+            kv_list: List of (Q, K, V) tuples for each specified layer
+                Q, K, V shape: (B, num_heads, num_patches, head_dim)
             cls_token: CLS token (B, enc_dim)
         """
         self.reset_cache()
+        self._batch_size = x.shape[0]  # Store for un-windowing in hooks
         
         # Forward through encoder and get CLS token
         if hasattr(self.encoder_model, "forward_features"):
             output = self.encoder_model.forward_features(x)
-            # Timm DINOv2 returns dict if our wrapper, but raw timm model returns tensor or tuple
-            # Wait, standard timm model returns tensor or (tensor, tensor).
-            # But the 'vision_encoder.py' DINOEncoder.load_model uses torch.hub.
-            # torch.hub DINOv2 has forward_features.
             if isinstance(output, dict):
                 cls_token = output.get('x_norm_clstoken')
             else:
-                # Assuming simple feature return if not dict
                 cls_token = None
         else:
-            # Fallback for HF models (forward)
             output = self.encoder_model(x)
-            # HF models return output object or tuple
-            # Attempt to extract CLS token if present (e.g. pooler_output)
             if hasattr(output, "pooler_output"):
                 cls_token = output.pooler_output
             elif hasattr(output, "last_hidden_state"):
-                # Check if it has CLS token at 0?
-                # For ViT, yes. For SAM2, no.
-                # We can try to infer from model type or just leave None
                 cls_token = None
             else:
                 cls_token = None
-
         
-        
-        # Collect K/V in order of layer_indices
+        # Collect Q/K/V in order of layer_indices
         kv_list = self.get_captured_kv_list()
         
         return kv_list, cls_token
@@ -422,9 +536,12 @@ def build_kv_mlp(in_dim: int, out_dim: int, hidden_dim: int = None):
     )
 
 
+KV_REPLACE_MODES = ["kv", "k", "v", "qkv", "qk", "q"]
+
+
 class EncoderKVProjection(nn.Module):
     """
-    Project Encoder K/V to SiT dimension.
+    Project Encoder Q/K/V to SiT dimension.
     
     Supports multiple projection types:
     - "linear": Simple linear projection (default)
@@ -434,6 +551,13 @@ class EncoderKVProjection(nn.Module):
     Supports multiple normalization types before projection.
     
     Key feature: In Stage 2, the projection output is detached (no gradient).
+    
+    kv_replace_mode controls which components are projected:
+    - "kv": Project K and V (default)
+    - "k": Project only K
+    - "v": Project only V
+    - "qkv": Project Q, K, and V
+    - "q": Project only Q
     """
     def __init__(
         self, 
@@ -446,10 +570,12 @@ class EncoderKVProjection(nn.Module):
         kv_proj_kernel_size: int = 3,
         kv_norm_type: str = "layernorm",
         kv_zscore_alpha: float = 1.0,
+        kv_replace_mode: str = "kv",
     ):
         super().__init__()
         assert kv_proj_type in KV_PROJ_TYPES, f"kv_proj_type must be one of {KV_PROJ_TYPES}, got {kv_proj_type}"
         assert kv_norm_type in KV_NORM_TYPES, f"kv_norm_type must be one of {KV_NORM_TYPES}, got {kv_norm_type}"
+        assert kv_replace_mode in KV_REPLACE_MODES, f"kv_replace_mode must be one of {KV_REPLACE_MODES}, got {kv_replace_mode}"
         
         self.enc_dim = enc_dim
         self.sit_dim = sit_dim
@@ -459,31 +585,51 @@ class EncoderKVProjection(nn.Module):
         self.sit_head_dim = sit_dim // sit_heads
         self.kv_proj_type = kv_proj_type
         self.kv_norm_type = kv_norm_type
+        self.kv_replace_mode = kv_replace_mode
         
-        # Common normalization layers
-        self.k_norm = build_kv_norm(kv_norm_type, enc_dim, alpha=kv_zscore_alpha)
-        self.v_norm = build_kv_norm(kv_norm_type, enc_dim, alpha=kv_zscore_alpha)
+        # Determine which components need projection
+        self.need_q = kv_replace_mode in ("qkv", "qk", "q")
+        self.need_k = kv_replace_mode in ("kv", "k", "qkv", "qk")
+        self.need_v = kv_replace_mode in ("kv", "v", "qkv")
+        
+        # Build normalization and projection layers for needed components
+        if self.need_q:
+            self.q_norm = build_kv_norm(kv_norm_type, enc_dim, alpha=kv_zscore_alpha)
+        if self.need_k:
+            self.k_norm = build_kv_norm(kv_norm_type, enc_dim, alpha=kv_zscore_alpha)
+        if self.need_v:
+            self.v_norm = build_kv_norm(kv_norm_type, enc_dim, alpha=kv_zscore_alpha)
 
         # Build projection layers based on type
         if kv_proj_type == "linear":
-            self.proj_k = nn.Linear(enc_dim, sit_dim, bias=False)
-            self.proj_v = nn.Linear(enc_dim, sit_dim, bias=False)
-            nn.init.normal_(self.proj_k.weight, std=0.02)
-            nn.init.normal_(self.proj_v.weight, std=0.02)
+            if self.need_q:
+                self.proj_q = nn.Linear(enc_dim, sit_dim, bias=False)
+            if self.need_k:
+                self.proj_k = nn.Linear(enc_dim, sit_dim, bias=False)
+            if self.need_v:
+                self.proj_v = nn.Linear(enc_dim, sit_dim, bias=False)
             
         elif kv_proj_type == "mlp":
             hidden_dim = kv_proj_hidden_dim or max(enc_dim, sit_dim)
-            self.proj_k = build_kv_mlp(enc_dim, sit_dim, hidden_dim)
-            self.proj_v = build_kv_mlp(enc_dim, sit_dim, hidden_dim)
+            if self.need_q:
+                self.proj_q = build_kv_mlp(enc_dim, sit_dim, hidden_dim)
+            if self.need_k:
+                self.proj_k = build_kv_mlp(enc_dim, sit_dim, hidden_dim)
+            if self.need_v:
+                self.proj_v = build_kv_mlp(enc_dim, sit_dim, hidden_dim)
             
         elif kv_proj_type == "conv":
             self.kv_proj_kernel_size = kv_proj_kernel_size
             padding = kv_proj_kernel_size // 2
-            # Norms are already initialized above
-            self.proj_k = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
-                                    stride=1, padding=padding, bias=False)
-            self.proj_v = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
-                                    stride=1, padding=padding, bias=False)
+            if self.need_q:
+                self.proj_q = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
+                                        stride=1, padding=padding, bias=False)
+            if self.need_k:
+                self.proj_k = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
+                                        stride=1, padding=padding, bias=False)
+            if self.need_v:
+                self.proj_v = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
+                                        stride=1, padding=padding, bias=False)
     
     def _project_linear_or_mlp(self, feat: torch.Tensor, proj: nn.Module) -> torch.Tensor:
         """Project using linear or MLP: (B, N, D_in) -> (B, N, D_out)"""
@@ -501,45 +647,55 @@ class EncoderKVProjection(nn.Module):
         # (B, D_out, H, W) -> (B, N, D_out)
         return out_2d.permute(0, 2, 3, 1).reshape(B, N, -1)
     
+    def _project_component(self, enc_tensor: torch.Tensor, norm: nn.Module, proj: nn.Module) -> torch.Tensor:
+        """Project a single Q/K/V component: (B, enc_heads, N, enc_head_dim) -> (B, sit_heads, N, sit_head_dim)"""
+        B, _, N, _ = enc_tensor.shape
+        flat = enc_tensor.transpose(1, 2).reshape(B, N, self.enc_dim)
+        
+        if self.kv_proj_type in ("linear", "mlp"):
+            projected = self._project_linear_or_mlp(norm(flat), proj)
+        elif self.kv_proj_type == "conv":
+            projected = self._project_conv(norm(flat), proj)
+        
+        return projected.reshape(B, N, self.sit_heads, self.sit_head_dim).transpose(1, 2)
+    
     def forward(
         self, 
-        k_enc: torch.Tensor, 
-        v_enc: torch.Tensor,
+        q_enc: Optional[torch.Tensor] = None,
+        k_enc: Optional[torch.Tensor] = None,
+        v_enc: Optional[torch.Tensor] = None,
         stage: int = 1,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
-        Project Encoder K/V to SiT dimension.
+        Project Encoder Q/K/V to SiT dimension based on kv_replace_mode.
         
         Args:
-            k_enc: (B, enc_heads, N, enc_head_dim)
-            v_enc: (B, enc_heads, N, enc_head_dim)
+            q_enc: (B, enc_heads, N, enc_head_dim) - only used when mode includes Q
+            k_enc: (B, enc_heads, N, enc_head_dim) - only used when mode includes K
+            v_enc: (B, enc_heads, N, enc_head_dim) - only used when mode includes V
             stage: Training stage. 1=trainable projection, 2=detached projection
             
         Returns:
-            k_proj: (B, sit_heads, N, sit_head_dim)
-            v_proj: (B, sit_heads, N, sit_head_dim)
+            q_proj: (B, sit_heads, N, sit_head_dim) or None
+            k_proj: (B, sit_heads, N, sit_head_dim) or None
+            v_proj: (B, sit_heads, N, sit_head_dim) or None
         """
-        B, _, N, _ = k_enc.shape
+        q_proj, k_proj, v_proj = None, None, None
         
-        # Reshape to (B, N, enc_dim) for projection
-        k_flat = k_enc.transpose(1, 2).reshape(B, N, self.enc_dim)
-        v_flat = v_enc.transpose(1, 2).reshape(B, N, self.enc_dim)
-        
-        # Project based on type
-        if self.kv_proj_type in ("linear", "mlp"):
-            k_proj = self._project_linear_or_mlp(self.k_norm(k_flat), self.proj_k)
-            v_proj = self._project_linear_or_mlp(self.v_norm(v_flat), self.proj_v)
-        elif self.kv_proj_type == "conv":
-            k_proj = self._project_conv(self.k_norm(k_flat), self.proj_k)
-            v_proj = self._project_conv(self.v_norm(v_flat), self.proj_v)
+        if self.need_q and q_enc is not None:
+            q_proj = self._project_component(q_enc, self.q_norm, self.proj_q)
+        if self.need_k and k_enc is not None:
+            k_proj = self._project_component(k_enc, self.k_norm, self.proj_k)
+        if self.need_v and v_enc is not None:
+            v_proj = self._project_component(v_enc, self.v_norm, self.proj_v)
         
         # Stage 2: Detach projection (no gradient through projection layer)
         if stage == 2:
-            k_proj = k_proj.detach()
-            v_proj = v_proj.detach()
+            if q_proj is not None:
+                q_proj = q_proj.detach()
+            if k_proj is not None:
+                k_proj = k_proj.detach()
+            if v_proj is not None:
+                v_proj = v_proj.detach()
         
-        # Reshape to (B, sit_heads, N, sit_head_dim)
-        k_proj = k_proj.reshape(B, N, self.sit_heads, self.sit_head_dim).transpose(1, 2)
-        v_proj = v_proj.reshape(B, N, self.sit_heads, self.sit_head_dim).transpose(1, 2)
-        
-        return k_proj, v_proj
+        return q_proj, k_proj, v_proj
