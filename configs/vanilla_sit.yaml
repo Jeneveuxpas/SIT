@@ -1,0 +1,65 @@
+# Vanilla SIT (disable all auxiliary losses)
+# Usage: ./launch.sh --config configs/vanilla_sit.yaml --exp-name vanilla_sit
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model: SiT-XL/2-EncoderKV
+num-classes: 1000
+encoder-depth: 14
+fused-attn: true
+qk-norm: false
+
+# ============================================================================
+# Disable KV distillation
+# ============================================================================
+use-kv: false
+distill-coeff: 0.0
+stage1-steps: 0
+
+# ============================================================================
+# Disable REPA loss
+# ============================================================================
+repa-loss: false
+proj-coeff: "0.0"
+
+# ============================================================================
+# Dataset (no raw images needed since both aux losses are off)
+# ============================================================================
+data-dir: /dev/shm/data
+resolution: 256
+batch-size: 256
+
+# ============================================================================
+# Training
+# ============================================================================
+epochs: 1400
+max-train-steps: 400000
+checkpointing-steps: 5000
+sampling-steps: 100000
+gradient-accumulation-steps: 1
+learning-rate: 1e-4
+adam-beta1: 0.9
+adam-beta2: 0.999
+adam-weight-decay: 0.0
+adam-epsilon: 1e-8
+max-grad-norm: 1.0
+ema-decay: 0.9999
+ema-update-freq: 1
+
+# ============================================================================
+# Precision & Performance
+# ============================================================================
+allow-tf32: true
+mixed-precision: fp16
+compile: true
+
+# ============================================================================
+# Misc
+# ============================================================================
+seed: 0
+num-workers: 12
+cfg-prob: 0.1
+path-type: linear
+prediction: v
+n-samples: 256
