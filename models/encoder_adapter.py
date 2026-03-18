@@ -501,7 +501,7 @@ class EncoderKVExtractor(nn.Module):
         return kv_list, cls_token
 
 
-KV_PROJ_TYPES = ["linear", "mlp", "conv"]
+KV_PROJ_TYPES = ["linear", "mlp", "conv", "head_gate"]
 KV_NORM_TYPES = ["none", "layernorm", "zscore", "zscore_token", "batchnorm"]
 
 
@@ -633,6 +633,26 @@ class EncoderKVProjection(nn.Module):
                 self.proj_v = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size,
                                         stride=1, padding=padding, bias=False)
 
+        elif kv_proj_type == "head_gate":
+            # Linear projection + t-conditioned per-head gating applied before projection.
+            # gate = 1 + linear(silu(c)), zero-init -> all ones at start (identity).
+            # Different t can emphasize different DINO heads (structural vs detail heads).
+            if self.need_q:
+                self.proj_q = nn.Linear(enc_dim, sit_dim, bias=False)
+                self.head_gate_q = nn.Linear(sit_dim, enc_heads, bias=True)
+                nn.init.zeros_(self.head_gate_q.weight)
+                nn.init.zeros_(self.head_gate_q.bias)
+            if self.need_k:
+                self.proj_k = nn.Linear(enc_dim, sit_dim, bias=False)
+                self.head_gate_k = nn.Linear(sit_dim, enc_heads, bias=True)
+                nn.init.zeros_(self.head_gate_k.weight)
+                nn.init.zeros_(self.head_gate_k.bias)
+            if self.need_v:
+                self.proj_v = nn.Linear(enc_dim, sit_dim, bias=False)
+                self.head_gate_v = nn.Linear(sit_dim, enc_heads, bias=True)
+                nn.init.zeros_(self.head_gate_v.weight)
+                nn.init.zeros_(self.head_gate_v.bias)
+
         # FiLM-style t-conditioning: scale/shift on projected features, zero-init -> identity at start
         if kv_use_adaln:
             if self.need_q:
@@ -673,6 +693,20 @@ class EncoderKVProjection(nn.Module):
         flat = flat * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
         return flat.reshape(B, N, H, D).transpose(1, 2)
 
+    def _project_component_head_gate(
+        self, enc_tensor: torch.Tensor, norm: nn.Module, proj: nn.Module,
+        head_gate: nn.Module, c: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project with t-conditioned per-head gating (before projection).
+        gate = 1 + linear(silu(c)) per DINO head, zero-init -> identity at start.
+        Allows different t to selectively emphasize structural vs detail DINO heads."""
+        B, _, N, _ = enc_tensor.shape
+        gate = 1.0 + head_gate(F.silu(c))          # (B, enc_heads)
+        enc_gated = enc_tensor * gate[:, :, None, None]  # (B, enc_heads, N, enc_head_dim)
+        flat = enc_gated.transpose(1, 2).reshape(B, N, self.enc_dim)  # (B, N, enc_dim)
+        projected = self._project_linear_or_mlp(norm(flat), proj)     # (B, N, sit_dim)
+        return projected.reshape(B, N, self.sit_heads, self.sit_head_dim).transpose(1, 2)
+
     def _project_component(self, enc_tensor: torch.Tensor, norm: nn.Module, proj: nn.Module) -> torch.Tensor:
         """Project a single Q/K/V component: (B, enc_heads, N, enc_head_dim) -> (B, sit_heads, N, sit_head_dim)"""
         B, _, N, _ = enc_tensor.shape
@@ -701,7 +735,8 @@ class EncoderKVProjection(nn.Module):
             k_enc: (B, enc_heads, N, enc_head_dim) - only used when mode includes K
             v_enc: (B, enc_heads, N, enc_head_dim) - only used when mode includes V
             stage: Training stage. 1=trainable projection, 2=detached projection
-            c: (B, sit_dim) conditioning from t_embed + y_embed for AdaLN modulation
+            c: (B, sit_dim) conditioning from t_embed + y_embed.
+               Required for kv_proj_type="head_gate"; optional for kv_use_adaln.
 
         Returns:
             q_proj: (B, sit_heads, N, sit_head_dim) or None
@@ -710,12 +745,21 @@ class EncoderKVProjection(nn.Module):
         """
         q_proj, k_proj, v_proj = None, None, None
 
-        if self.need_q and q_enc is not None:
-            q_proj = self._project_component(q_enc, self.q_norm, self.proj_q)
-        if self.need_k and k_enc is not None:
-            k_proj = self._project_component(k_enc, self.k_norm, self.proj_k)
-        if self.need_v and v_enc is not None:
-            v_proj = self._project_component(v_enc, self.v_norm, self.proj_v)
+        if self.kv_proj_type == "head_gate":
+            # t-conditioned per-head gating before projection; c is required
+            if self.need_q and q_enc is not None:
+                q_proj = self._project_component_head_gate(q_enc, self.q_norm, self.proj_q, self.head_gate_q, c)
+            if self.need_k and k_enc is not None:
+                k_proj = self._project_component_head_gate(k_enc, self.k_norm, self.proj_k, self.head_gate_k, c)
+            if self.need_v and v_enc is not None:
+                v_proj = self._project_component_head_gate(v_enc, self.v_norm, self.proj_v, self.head_gate_v, c)
+        else:
+            if self.need_q and q_enc is not None:
+                q_proj = self._project_component(q_enc, self.q_norm, self.proj_q)
+            if self.need_k and k_enc is not None:
+                k_proj = self._project_component(k_enc, self.k_norm, self.proj_k)
+            if self.need_v and v_enc is not None:
+                v_proj = self._project_component(v_enc, self.v_norm, self.proj_v)
 
         # AdaLN modulation conditioned on t (via c = t_embed + y_embed)
         if self.kv_use_adaln and c is not None:
