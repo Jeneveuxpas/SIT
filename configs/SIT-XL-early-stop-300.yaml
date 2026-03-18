@@ -30,7 +30,6 @@ kv-proj-kernel-size: 1
 kv-norm-type: none     # none, layernorm, zscore_spatial, zscore_token, batchnorm
 kv-zscore-alpha: 1.0
 kv-stop-step: 300000
-kv-stop-fade-steps: 0
 
 # ============================================================================
 # REPA Loss Configuration
@@ -41,7 +40,7 @@ projection-loss-type: cosine_v    # cosine, mse, mse_v, mse_noisy
 spnorm-method: zscore           # none, zscore, zscore_token, layernorm
 zscore-alpha: 0.6
 repa-stop-step: 300000
-repa-stop-fade-steps: 0
+
 # ============================================================================
 # Dataset
 # ============================================================================
@@ -53,8 +52,8 @@ batch-size: 256
 # Training
 # ============================================================================
 epochs: 1400
-max-train-steps: 400000
-checkpointing-steps: 100000
+max-train-steps: 500000
+checkpointing-steps: 50000
 sampling-steps: 100000
 gradient-accumulation-steps: 1
 learning-rate: 1e-4
