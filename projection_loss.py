@@ -98,6 +98,127 @@ class CosineProjectionLoss(ProjectionLoss):
 
 
 # =========================================
+# Cosine
+# =========================================
+
+@register_loss("cosine_repa")
+class CosineProjectionLoss(ProjectionLoss):
+    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-6, **kwargs):
+        self.spnorm_method = spnorm_method
+        self.zscore_alpha = zscore_alpha
+        self.eps = eps
+
+    def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
+        self._check(zs, zs_tilde)
+        # cast to float32
+        zs = zs.float()
+        zs_tilde = zs_tilde.float()
+        
+        zs = F.normalize(zs, dim=-1)
+        zs_tilde = F.normalize(zs_tilde, dim=-1)
+        
+        cos_sim = (zs * zs_tilde).sum(dim=-1)    # [B,T]
+        loss = -cos_sim
+        return loss.mean()
+
+
+@register_loss("cosine_v")
+class CosineVelocityProjectionLoss(ProjectionLoss):
+    KWARG_ALIASES = {"spnorm": "spnorm_method"}
+
+    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-6, **kwargs):
+        self.spnorm_method = spnorm_method
+        self.zscore_alpha = zscore_alpha
+        self.eps = eps
+
+    def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
+        if self.spnorm_method == "none":
+            return feat
+        elif self.spnorm_method == "zscore":
+            return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "zscore_token":
+            return zscore_norm(feat, dim=-1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "layernorm":
+            return F.layer_norm(feat, normalized_shape=(feat.shape[-1],), eps=self.eps)
+        else:
+            raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
+
+    def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
+        self._check(zs, zs_tilde)
+        # cast to float32
+        zs = zs.float()
+        zs_tilde = zs_tilde.float()
+        # Get d_alpha_t and d_sigma_t from kwargs (passed from loss function)
+        d_alpha_t = kwargs.get('d_alpha_t', None)
+        d_sigma_t = kwargs.get('d_sigma_t', None)
+
+        if d_alpha_t is None or d_sigma_t is None:
+            raise ValueError("cosine_v loss requires d_alpha_t and d_sigma_t in kwargs. "
+                             "Make sure the loss function passes these values.")
+
+        # Generate noise in feature space (same shape as zs)
+        noise_feat = torch.randn_like(zs)
+
+        # Reshape for broadcasting with (B, T, D)
+        if isinstance(d_alpha_t, torch.Tensor):
+            d_alpha_t = d_alpha_t.view(d_alpha_t.shape[0], 1, 1).float()
+            d_sigma_t = d_sigma_t.view(d_sigma_t.shape[0], 1, 1).float()
+
+        # Step 1: Spatial normalization on both encoder features and model output
+        zs_norm = self._apply_spnorm(zs)
+        zs_tilde_norm = self._apply_spnorm(zs_tilde)
+
+        # Compute velocity target in feature space: v = d_alpha_t * zs + d_sigma_t * noise
+        z_target = d_alpha_t * zs_norm + d_sigma_t * noise_feat
+
+        # Step 2: L2 normalize for cosine similarity
+        pred_normalized = F.normalize(zs_tilde_norm, dim=-1)
+        target_normalized = F.normalize(z_target, dim=-1)
+
+        # Compute cosine similarity loss
+        cos_sim = (pred_normalized * target_normalized).sum(dim=-1)    # [B,T]
+        loss = -cos_sim
+        return loss.mean()
+
+
+
+@register_loss("cosine_norm")
+class CosineProjectionLoss(ProjectionLoss):
+    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-6, **kwargs):
+        self.spnorm_method = spnorm_method
+        self.zscore_alpha = zscore_alpha
+        self.eps = eps
+
+    def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
+        if self.spnorm_method == "none":
+            return feat
+        elif self.spnorm_method == "zscore":
+            return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "zscore_token":
+            return zscore_norm(feat, dim=-1, alpha=self.zscore_alpha, eps=self.eps)
+        elif self.spnorm_method == "layernorm":
+            return F.layer_norm(feat, normalized_shape=(feat.shape[-1],), eps=self.eps)
+        else:
+            raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
+
+    def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
+        self._check(zs, zs_tilde)
+        # cast to float32
+        zs = zs.float()
+        zs_tilde = zs_tilde.float()
+        
+        # Step 1: Spatial zscore normalization (per REPA paper)
+        zs = self._apply_spnorm(zs)
+        zs_tilde = self._apply_spnorm(zs_tilde)
+        # Step 2: L2 normalize for cosine similarity
+        zs = F.normalize(zs, dim=-1)
+        zs_tilde = F.normalize(zs_tilde, dim=-1)
+        
+        # compute cosine similarity
+        cos_sim = (zs * zs_tilde).sum(dim=-1)    # [B,T]
+        loss = -cos_sim
+        return loss.mean()
+# =========================================
 # MSE with Spatial Normalization
 # =========================================
 
@@ -296,22 +417,21 @@ class MSEVelocityNormProjectionLoss(ProjectionLoss):
 
         return loss
 # =========================================
-# MSE-Noisy: Noisy interpolation loss in feature space
+# Cosine-Noisy: Noisy interpolation loss in feature space
 # =========================================
 
-@register_loss("mse_noisy")
-class MSENoisyProjectionLoss(ProjectionLoss):
+@register_loss("cosine_noisy")
+class CosineNoisyProjectionLoss(ProjectionLoss):
     """
-    MSE loss for noisy interpolation in feature space.
+    Cosine loss for noisy interpolation in feature space.
     
-    Computes: MSE(alpha_t * zs + sigma_t * noise_feat, zs_tilde)
+    Computes: Cosine(alpha_t * zs + sigma_t * noise_feat, zs_tilde)
     
     This aligns the encoder's representation for noisy states.
     Target is the interpolation between clean features and noise,
     matching the noisy latent construction in diffusion/flow matching.
     
     Requires passing alpha_t and sigma_t through kwargs.
-    
     Args:
         spnorm_method: "none" or "zscore" (default: "zscore")
         zscore_alpha: scaling factor for zscore normalization (default: 1.0)
@@ -348,7 +468,7 @@ class MSENoisyProjectionLoss(ProjectionLoss):
         sigma_t = kwargs.get('sigma_t', None)
         
         if alpha_t is None or sigma_t is None:
-            raise ValueError("mse_noisy loss requires alpha_t and sigma_t in kwargs. "
+            raise ValueError("cosine_noisy loss requires alpha_t and sigma_t in kwargs. "
                              "Make sure the loss function passes these values.")
         
         # Generate noise in feature space (same shape as zs)
@@ -362,8 +482,15 @@ class MSENoisyProjectionLoss(ProjectionLoss):
         
         # Normalize zs FIRST, then add noise (for better scale matching with gaussian noise)
         zs_norm = self._apply_spnorm(zs)
+        zs_tilde_norm = self._apply_spnorm(zs_tilde)
+
         z_noisy = alpha_t * zs_norm + sigma_t * noise_feat
         
-        # Compute MSE loss (zs_tilde not normalized - projector learns direct mapping)
-        loss = F.mse_loss(z_noisy, zs_tilde)
-        return loss
+        # L2 normalize both for cosine similarity
+        z_noisy_normalized = F.normalize(z_noisy, dim=-1)
+        zs_tilde_normalized = F.normalize(zs_tilde_norm, dim=-1)
+        
+        # compute cosine similarity
+        cos_sim = (z_noisy_normalized * zs_tilde_normalized).sum(dim=-1)    # [B,T]
+        loss = -cos_sim
+        return loss.mean()
