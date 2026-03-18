@@ -4,8 +4,8 @@
 # iREPA 统一启动脚本 - 训练 + 评估
 #
 # 用法: 
-#   ./launch.sh --config configs/path-cosine_repa-cosine_v.yaml --exp-name cosine_repa-cosine_v --gpu 2,3 --num-gpus 2
-#   ./launch.sh --config configs/conv_3_2.0_0.25.yaml --exp-name conv_3_2.0_0.25 --gpu 4,5,6,7 --num-gpus 4 
+#   ./launch.sh --config configs/SIT-10.yaml --exp-name SIT-10 --gpu 2,3 --num-gpus 2 
+#   
 # ./launch.sh --config configs/irepa_only-2.0.yaml --exp-name irepa_only-2.0 --gpu 6,7 --num-gpus 2 
 #  ./launch.sh --config configs/sam2-s-16.yaml --exp-name sam2-s-16 --gpu 2 --num-gpus 1
  

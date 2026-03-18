@@ -230,6 +230,7 @@ class SiTBlockWithEncoderKV(nn.Module):
         kv_norm_type: str = "zscore",
         kv_zscore_alpha: float = 1.0,
         kv_replace_mode: str = "kv",
+        kv_use_adaln: bool = False,
         **block_kwargs
     ):
         super().__init__()
@@ -260,6 +261,7 @@ class SiTBlockWithEncoderKV(nn.Module):
         # Encoder Q/K/V projection
         self.has_enc_kv = enc_dim is not None and enc_heads is not None
         self.kv_replace_mode = kv_replace_mode
+        self.kv_use_adaln = kv_use_adaln
         if self.has_enc_kv:
             self.kv_proj = EncoderKVProjection(
                 enc_dim, hidden_size, enc_heads, num_heads,
@@ -269,6 +271,7 @@ class SiTBlockWithEncoderKV(nn.Module):
                 kv_norm_type=kv_norm_type,
                 kv_zscore_alpha=kv_zscore_alpha,
                 kv_replace_mode=kv_replace_mode,
+                kv_use_adaln=kv_use_adaln,
             )
         
 
@@ -295,7 +298,10 @@ class SiTBlockWithEncoderKV(nn.Module):
         q_enc, k_enc, v_enc = None, None, None
         if self.has_enc_kv and enc_kv is not None and self.training:
             q_raw, k_raw, v_raw = enc_kv
-            q_enc, k_enc, v_enc = self.kv_proj(q_enc=q_raw, k_enc=k_raw, v_enc=v_raw, stage=stage)
+            q_enc, k_enc, v_enc = self.kv_proj(
+                q_enc=q_raw, k_enc=k_raw, v_enc=v_raw, stage=stage,
+                c=c if self.kv_use_adaln else None,
+            )
         
         # Attention with stage-based Q/K/V selection
         attn_out, distill_loss = self.attn(
@@ -355,6 +361,7 @@ class SiTWithEncoderKV(nn.Module):
         kv_norm_type: str = "layernorm",
         kv_zscore_alpha: float = 1.0,
         kv_replace_mode: str = "kv",
+        kv_use_adaln: bool = False,
         distill_temperature: float = 1.0,
         kv_distill_snr_gamma: float = 1.0,
         kv_distill_min_weight: float = 0.0,
@@ -408,6 +415,7 @@ class SiTWithEncoderKV(nn.Module):
                     kv_norm_type=kv_norm_type,
                     kv_zscore_alpha=kv_zscore_alpha,
                     kv_replace_mode=kv_replace_mode,
+                    kv_use_adaln=kv_use_adaln,
                     **{
                         **block_kwargs,
                         "distill_temperature": distill_temperature,
