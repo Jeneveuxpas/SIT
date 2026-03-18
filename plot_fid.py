@@ -19,7 +19,6 @@ x_labels = ['100K', '200K', '400K']
 # SiT-XL/2
 repa_fid = [19.4, 11.1, 7.9]
 irepa_fid = [16.9, 10.3, 7.52]
-haste_fid = [15.9, 9.9, 7.3]
 attn_scaffolding_fid = [11.6, 7.9, 6.8]
 
 # # SiT-L/2

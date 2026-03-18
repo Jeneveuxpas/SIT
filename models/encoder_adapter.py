@@ -560,10 +560,10 @@ class EncoderKVProjection(nn.Module):
     - "q": Project only Q
     """
     def __init__(
-        self, 
-        enc_dim: int, 
-        sit_dim: int, 
-        enc_heads: int, 
+        self,
+        enc_dim: int,
+        sit_dim: int,
+        enc_heads: int,
         sit_heads: int,
         kv_proj_type: str = "linear",
         kv_proj_hidden_dim: int = None,
@@ -571,6 +571,7 @@ class EncoderKVProjection(nn.Module):
         kv_norm_type: str = "layernorm",
         kv_zscore_alpha: float = 1.0,
         kv_replace_mode: str = "kv",
+        kv_use_adaln: bool = False,
     ):
         super().__init__()
         assert kv_proj_type in KV_PROJ_TYPES, f"kv_proj_type must be one of {KV_PROJ_TYPES}, got {kv_proj_type}"
@@ -586,6 +587,7 @@ class EncoderKVProjection(nn.Module):
         self.kv_proj_type = kv_proj_type
         self.kv_norm_type = kv_norm_type
         self.kv_replace_mode = kv_replace_mode
+        self.kv_use_adaln = kv_use_adaln
         
         # Determine which components need projection
         self.need_q = kv_replace_mode in ("qkv", "qk", "q")
@@ -608,7 +610,7 @@ class EncoderKVProjection(nn.Module):
                 self.proj_k = nn.Linear(enc_dim, sit_dim, bias=False)
             if self.need_v:
                 self.proj_v = nn.Linear(enc_dim, sit_dim, bias=False)
-            
+
         elif kv_proj_type == "mlp":
             hidden_dim = kv_proj_hidden_dim or max(enc_dim, sit_dim)
             if self.need_q:
@@ -617,19 +619,34 @@ class EncoderKVProjection(nn.Module):
                 self.proj_k = build_kv_mlp(enc_dim, sit_dim, hidden_dim)
             if self.need_v:
                 self.proj_v = build_kv_mlp(enc_dim, sit_dim, hidden_dim)
-            
+
         elif kv_proj_type == "conv":
             self.kv_proj_kernel_size = kv_proj_kernel_size
             padding = kv_proj_kernel_size // 2
             if self.need_q:
-                self.proj_q = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
+                self.proj_q = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size,
                                         stride=1, padding=padding, bias=False)
             if self.need_k:
-                self.proj_k = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
+                self.proj_k = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size,
                                         stride=1, padding=padding, bias=False)
             if self.need_v:
-                self.proj_v = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size, 
+                self.proj_v = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size,
                                         stride=1, padding=padding, bias=False)
+
+        # FiLM-style t-conditioning: scale/shift on projected features, zero-init -> identity at start
+        if kv_use_adaln:
+            if self.need_q:
+                self.adaLN_q = nn.Linear(sit_dim, 2 * sit_dim, bias=True)
+                nn.init.zeros_(self.adaLN_q.weight)
+                nn.init.zeros_(self.adaLN_q.bias)
+            if self.need_k:
+                self.adaLN_k = nn.Linear(sit_dim, 2 * sit_dim, bias=True)
+                nn.init.zeros_(self.adaLN_k.weight)
+                nn.init.zeros_(self.adaLN_k.bias)
+            if self.need_v:
+                self.adaLN_v = nn.Linear(sit_dim, 2 * sit_dim, bias=True)
+                nn.init.zeros_(self.adaLN_v.weight)
+                nn.init.zeros_(self.adaLN_v.bias)
     
     def _project_linear_or_mlp(self, feat: torch.Tensor, proj: nn.Module) -> torch.Tensor:
         """Project using linear or MLP: (B, N, D_in) -> (B, N, D_out)"""
@@ -647,6 +664,15 @@ class EncoderKVProjection(nn.Module):
         # (B, D_out, H, W) -> (B, N, D_out)
         return out_2d.permute(0, 2, 3, 1).reshape(B, N, -1)
     
+    def _modulate(self, proj_out: torch.Tensor, adaLN: nn.Module, c: torch.Tensor) -> torch.Tensor:
+        """FiLM modulation conditioned on t: zero-init -> identity at start.
+        scale=0, shift=0 at init => output = proj_out (no distribution change)."""
+        B, H, N, D = proj_out.shape
+        flat = proj_out.transpose(1, 2).reshape(B, N, H * D)  # (B, N, sit_dim)
+        scale, shift = adaLN(F.silu(c)).chunk(2, dim=-1)       # (B, sit_dim) each
+        flat = flat * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+        return flat.reshape(B, N, H, D).transpose(1, 2)
+
     def _project_component(self, enc_tensor: torch.Tensor, norm: nn.Module, proj: nn.Module) -> torch.Tensor:
         """Project a single Q/K/V component: (B, enc_heads, N, enc_head_dim) -> (B, sit_heads, N, sit_head_dim)"""
         B, _, N, _ = enc_tensor.shape
@@ -660,35 +686,46 @@ class EncoderKVProjection(nn.Module):
         return projected.reshape(B, N, self.sit_heads, self.sit_head_dim).transpose(1, 2)
     
     def forward(
-        self, 
+        self,
         q_enc: Optional[torch.Tensor] = None,
         k_enc: Optional[torch.Tensor] = None,
         v_enc: Optional[torch.Tensor] = None,
         stage: int = 1,
+        c: Optional[torch.Tensor] = None,
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Project Encoder Q/K/V to SiT dimension based on kv_replace_mode.
-        
+
         Args:
             q_enc: (B, enc_heads, N, enc_head_dim) - only used when mode includes Q
             k_enc: (B, enc_heads, N, enc_head_dim) - only used when mode includes K
             v_enc: (B, enc_heads, N, enc_head_dim) - only used when mode includes V
             stage: Training stage. 1=trainable projection, 2=detached projection
-            
+            c: (B, sit_dim) conditioning from t_embed + y_embed for AdaLN modulation
+
         Returns:
             q_proj: (B, sit_heads, N, sit_head_dim) or None
             k_proj: (B, sit_heads, N, sit_head_dim) or None
             v_proj: (B, sit_heads, N, sit_head_dim) or None
         """
         q_proj, k_proj, v_proj = None, None, None
-        
+
         if self.need_q and q_enc is not None:
             q_proj = self._project_component(q_enc, self.q_norm, self.proj_q)
         if self.need_k and k_enc is not None:
             k_proj = self._project_component(k_enc, self.k_norm, self.proj_k)
         if self.need_v and v_enc is not None:
             v_proj = self._project_component(v_enc, self.v_norm, self.proj_v)
-        
+
+        # AdaLN modulation conditioned on t (via c = t_embed + y_embed)
+        if self.kv_use_adaln and c is not None:
+            if q_proj is not None:
+                q_proj = self._modulate(q_proj, self.adaLN_q, c)
+            if k_proj is not None:
+                k_proj = self._modulate(k_proj, self.adaLN_k, c)
+            if v_proj is not None:
+                v_proj = self._modulate(v_proj, self.adaLN_v, c)
+
         # Stage 2: Detach projection (no gradient through projection layer)
         if stage == 2:
             if q_proj is not None:
@@ -697,5 +734,5 @@ class EncoderKVProjection(nn.Module):
                 k_proj = k_proj.detach()
             if v_proj is not None:
                 v_proj = v_proj.detach()
-        
+
         return q_proj, k_proj, v_proj

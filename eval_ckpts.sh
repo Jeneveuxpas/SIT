@@ -5,8 +5,8 @@
 # 
 # 用法:
 #   # 评估指定的 steps
-#   ./eval_ckpts.sh --config configs/conv_3_kv_2.0.yaml --exp-name conv_3_kv_2.0 --steps "0400000"  --guidance-low 0.0 --guidance-high 1.0 --cfg-scale 4.0 --gpu 4,5,6,7 --num-gpus 4
-#   ./eval_ckpts.sh --config configs/SiT-L.yaml --exp-name SiT-L --steps "0100000,0200000" --gpu 6,7 --num-gpus 2
+#   ./eval_ckpts.sh --config configs/512.yaml --exp-name 512 --steps "0100000" --cfg-scale 1.0 --gpu 0,1,2,3 --num-gpus 4 --ref-batch /workspace/SIT/VIRTUAL_imagenet512.npz
+#   ./eval_ckpts.sh --config configs/SIT-6.yaml --exp-name SIT-6 --steps "0100000" --gpu 0,1,2,3,4,5,6,7 --num-gpus 8
 #   ./eval_ckpts.sh --config configs/cosine_v_repa-6.0.yaml --exp-name cosine_v_repa-6.0 --gpu 0,1,2,3,4,5,6,7 --num-gpus 8 --steps "0400000"
 #   # 使用 guidance interval
 #   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.65
@@ -101,6 +101,10 @@ while [[ $# -gt 0 ]]; do
             GUIDANCE_HIGH="$2"
             shift 2
             ;;
+        --ref-batch)
+            REF_BATCH="$2"
+            shift 2
+            ;;
         *)
             echo "未知参数: $1"
             exit 1
@@ -186,10 +190,13 @@ echo "================================================"
 if [ -n "$CONFIG" ]; then
     MODEL=$(grep "^model:" $CONFIG | awk '{print $2}')
     MODEL=${MODEL%-EncoderKV}
-    echo "从配置中检测到模型: ${MODEL}"
+    RESOLUTION=$(grep "^resolution:" $CONFIG | awk '{print $2}')
+    RESOLUTION=${RESOLUTION:-256}
+    echo "从配置中检测到模型: ${MODEL}, 分辨率: ${RESOLUTION}"
 else
     MODEL="SiT-B/2"
-    echo "使用默认模型: ${MODEL}"
+    RESOLUTION=256
+    echo "使用默认模型: ${MODEL}, 分辨率: ${RESOLUTION}"
 fi
 
 # ============================================================================
@@ -225,6 +232,7 @@ for STEP in "${CKPT_LIST[@]}"; do
         --cfg-scale ${CFG_SCALE} \
         --guidance-low ${GUIDANCE_LOW} \
         --guidance-high ${GUIDANCE_HIGH} \
+        --resolution ${RESOLUTION} \
         --sample-dir ${CKPT_DIR}
 
     # 构建样本文件名（与 generate.py 中的 cfg_intv 逻辑一致）

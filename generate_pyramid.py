@@ -127,7 +127,7 @@ def generate_batch(model, vae, latents_scale, latents_bias,
 # ── pyramid layout ────────────────────────────────────────────────────────────
 
 ROWS = [4, 8]                   # row 0: 4 large, row 1: 8 half-size
-GAP  = 2                        # pixel gap between images
+GAP  = 0                        # no gap between images
 
 
 def build_pyramid(images, base_size=256, gap=GAP, bg_color=(255, 255, 255)):
@@ -203,7 +203,7 @@ def main():
     path_type = args.path_type if args.path_type is not None else ckpt_path_type
     print(f"Using path_type={path_type}")
 
-    print(f"Generating {args.num_seeds} images for class {args.class_label} ...")
+    print(f"Generating {len(seeds)} images for class {args.class_label} ...")
     images = generate_batch(
         model=model, vae=vae,
         latents_scale=latents_scale, latents_bias=latents_bias,
@@ -225,7 +225,10 @@ def main():
         bg_color=tuple(args.bg_color),
     )
 
-    # Save as PDF (vector-quality, 300 DPI metadata)
+    # Upsample 2× for print-quality PDF (effective ~427 DPI at ECCV text width)
+    canvas = canvas.resize((canvas.width * 2, canvas.height * 2), Image.LANCZOS)
+
+    # Save as PDF (300 DPI metadata)
     out = args.out if args.out.lower().endswith(".pdf") else args.out + ".pdf"
     canvas.save(out, "PDF", resolution=300)
     print(f"Saved → {out}  ({canvas.width}×{canvas.height} px)")

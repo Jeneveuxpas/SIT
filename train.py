@@ -247,6 +247,7 @@ def main(args):
         kv_norm_type=args.kv_norm_type,
         kv_zscore_alpha=args.kv_zscore_alpha,
         kv_replace_mode=args.kv_replace_mode,
+        kv_use_adaln=args.kv_use_adaln,
         distill_temperature=args.distill_temperature,
         kv_distill_snr_gamma=args.kv_distill_snr_gamma,
         kv_distill_min_weight=args.kv_distill_min_weight,
@@ -728,6 +729,8 @@ def parse_args(input_args=None):
                         choices=["kv", "k", "v", "qkv", "qk", "q"],
                         help="Which attention components to replace from encoder in Stage 1: "
                              "kv (default), k-only, v-only, qkv (all), qk, q-only")
+    parser.add_argument("--kv-use-adaln", action=argparse.BooleanOptionalAction, default=False,
+                        help="Apply AdaLN t-conditioning to KV projection output (default: False)")
     # enc-dim and enc-heads are now auto-detected from encoder
     # dataset
     parser.add_argument("--data-dir", type=str, default="../data")
