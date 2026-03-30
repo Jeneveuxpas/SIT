@@ -351,6 +351,7 @@ class SiTWithEncoderKV(nn.Module):
         # Encoder KV specific params
         enc_layer_indices: List[int] = [8],
         sit_layer_indices: List[int] = [8],
+        sit_layer_loss_weights: Optional[List[float]] = None,
         enc_dim: int = 768,
         enc_heads: int = 12,
         # K/V projection config
@@ -389,6 +390,24 @@ class SiTWithEncoderKV(nn.Module):
         self.sit_layer_indices = sit_layer_indices
         self.enc_dim = enc_dim
         self.enc_heads = enc_heads
+        if sit_layer_loss_weights is None:
+            num_distill_layers = max(1, len(sit_layer_indices))
+            sit_layer_loss_weights = [1.0 / num_distill_layers] * num_distill_layers
+        elif len(sit_layer_loss_weights) != len(sit_layer_indices):
+            raise ValueError(
+                "sit_layer_loss_weights must have the same length as sit_layer_indices"
+            )
+        total_layer_weight = float(sum(sit_layer_loss_weights))
+        if total_layer_weight <= 0:
+            raise ValueError("sit_layer_loss_weights must sum to a positive value")
+        normalized_layer_weights = [
+            float(weight) / total_layer_weight for weight in sit_layer_loss_weights
+        ]
+        self.register_buffer(
+            "sit_layer_loss_weights",
+            torch.tensor(normalized_layer_weights, dtype=torch.float32),
+            persistent=False,
+        )
         
         # Mapping: SiT layer idx -> Encoder K/V list idx
         self.sit_to_enc_idx = {sit_idx: i for i, sit_idx in enumerate(sit_layer_indices)}
@@ -510,15 +529,12 @@ class SiTWithEncoderKV(nn.Module):
         accumulated_distill_loss = torch.tensor(0.0, device=x.device, dtype=torch.float32)
         
         
-        # Track current index in enc_kv_list
-        enc_list_idx = 0
-        
         for i, block in enumerate(self.blocks):
             enc_kv = None
             if i in self.sit_to_enc_idx and enc_kv_list is not None:
-                if enc_list_idx < len(enc_kv_list):
-                    enc_kv = enc_kv_list[enc_list_idx]
-                    enc_list_idx += 1
+                enc_idx = self.sit_to_enc_idx[i]
+                if enc_idx < len(enc_kv_list):
+                    enc_kv = enc_kv_list[enc_idx]
             
             x, block_distill_loss = block(
                 x, c, enc_kv=enc_kv, stage=stage, align_mode=align_mode,
@@ -526,7 +542,11 @@ class SiTWithEncoderKV(nn.Module):
             )
             
             if block_distill_loss is not None:
-                accumulated_distill_loss = accumulated_distill_loss + block_distill_loss
+                layer_weight = self.sit_layer_loss_weights[self.sit_to_enc_idx[i]].to(
+                    device=accumulated_distill_loss.device,
+                    dtype=accumulated_distill_loss.dtype,
+                )
+                accumulated_distill_loss = accumulated_distill_loss + layer_weight * block_distill_loss
             
             if (i + 1) == self.encoder_depth and not self.eval_mode:
                 for projector in self.projectors:
