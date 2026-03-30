@@ -110,6 +110,21 @@ def parse_layer_indices(indices_str: str) -> list:
     return [int(x.strip()) - 1 for x in indices_str.split(',')]
 
 
+def parse_layer_weights(weights_str: str, expected_len: int) -> list:
+    """Parse and normalize comma-separated per-layer weights."""
+    weights = [float(x.strip()) for x in weights_str.split(',') if x.strip()]
+    if len(weights) != expected_len:
+        raise ValueError(
+            f"Expected {expected_len} layer weights, but got {len(weights)} from '{weights_str}'"
+        )
+    if any(weight < 0 for weight in weights):
+        raise ValueError("Layer weights must be non-negative")
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        raise ValueError("At least one layer weight must be positive")
+    return [weight / total_weight for weight in weights]
+
+
 def get_loss_stop_multiplier(step: int, stop_step: int = None, fade_steps: int = 0) -> float:
     """
     Compute loss multiplier for stage-wise termination.
@@ -179,6 +194,12 @@ def main(args):
     # Parse layer indices
     enc_layer_indices = parse_layer_indices(args.enc_layer_indices)
     sit_layer_indices = parse_layer_indices(args.sit_layer_indices)
+    sit_layer_loss_weights = None
+    if args.sit_layer_loss_weights is not None:
+        sit_layer_loss_weights = parse_layer_weights(
+            args.sit_layer_loss_weights,
+            expected_len=len(sit_layer_indices),
+        )
     assert len(enc_layer_indices) == len(sit_layer_indices), \
         "Encoder and SiT layer indices must have same length"
 
@@ -239,6 +260,7 @@ def main(args):
         proj_kwargs_kernel_size=args.proj_kwargs_kernel_size,
         enc_layer_indices=enc_layer_indices,
         sit_layer_indices=sit_layer_indices,
+        sit_layer_loss_weights=sit_layer_loss_weights,
         enc_dim=enc_dim,
         enc_heads=enc_heads,
         kv_proj_type=args.kv_proj_type,
@@ -289,6 +311,8 @@ def main(args):
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
         logger.info(f"Encoder KV: {len(enc_layer_indices)} layer pairs, replace_mode={args.kv_replace_mode}")
         logger.info(f"Encoder layers: {enc_layer_indices} -> SiT layers: {sit_layer_indices}")
+        if sit_layer_loss_weights is not None:
+            logger.info(f"Stage-2 per-layer distill weights (normalized): {sit_layer_loss_weights}")
     
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     if args.allow_tf32:
@@ -692,6 +716,9 @@ def parse_args(input_args=None):
                         help="Comma-separated Encoder layer indices for K/V extraction (1-based, e.g. 1-12)")
     parser.add_argument("--sit-layer-indices", type=str, default="10",
                         help="Comma-separated SiT layer indices for K/V injection (1-based, e.g. 1-12)")
+    parser.add_argument("--sit-layer-loss-weights", type=str, default=None,
+                        help="Comma-separated Stage-2 distillation weights for sit-layer-indices; "
+                             "weights are normalized to sum to 1")
     parser.add_argument("--stage1-steps", type=int, default=30000,
                         help="Number of steps for Stage 1 (e.g., 30000 for 100k total)")
     parser.add_argument("--distill-coeff", type=float, default=1.0,
@@ -819,6 +846,16 @@ def parse_args(input_args=None):
         args = parser.parse_args(input_args)
     else:
         args = parser.parse_args()
+
+    enc_layer_indices = parse_layer_indices(args.enc_layer_indices)
+    sit_layer_indices = parse_layer_indices(args.sit_layer_indices)
+    if len(enc_layer_indices) != len(sit_layer_indices):
+        parser.error("Encoder and SiT layer indices must have same length")
+    if args.sit_layer_loss_weights is not None:
+        try:
+            parse_layer_weights(args.sit_layer_loss_weights, expected_len=len(sit_layer_indices))
+        except ValueError as exc:
+            parser.error(str(exc))
 
     if args.kv_distill_snr_gamma <= 0:
         parser.error("--kv-distill-snr-gamma must be > 0")
