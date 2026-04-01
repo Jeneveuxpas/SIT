@@ -4,13 +4,13 @@
 # iREPA 统一启动脚本 - 训练 + 评估
 #
 # 用法: 
-#   ./launch.sh --config configs/SIT-10.yaml --exp-name SIT-10 --gpu 2,3 --num-gpus 2 
+#   ./launch.sh --config configs/DINO-8.yaml --exp-name DINO-8 --gpu 7 --num-gpus 1 
 #   
 # ./launch.sh --config configs/irepa_only-2.0.yaml --exp-name irepa_only-2.0 --gpu 6,7 --num-gpus 2 
 #  ./launch.sh --config configs/sam2-s-16.yaml --exp-name sam2-s-16 --gpu 2 --num-gpus 1
  
 # ./launch.sh --config configs/cosine_1.yaml --exp-name cosine_1 --gpu 6,7 --num-gpus 2 
-#  ./launch.sh --config configs/conv_3_kv_2.0-20-400k.yaml --exp-name conv_3_kv_2.0-20-400k --gpu 4,5,6,7 --num-gpus 4 --resume-step 040000
+#  ./launch.sh --config configs/SIT-XL-early-stop-330.yaml --exp-name SIT-XL-early-stop-330 --gpu 4,5,6,7 --num-gpus 4 --resume-step 300000
 #  ./launch.sh --config configs/attn_mse_repa_early_stop_600.yaml --exp-name attn_mse_repa_early_stop_600 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0600000
 
 # ============================================================================
@@ -25,6 +25,7 @@ EVAL_ONLY="${EVAL_ONLY:-false}"
 SKIP_EVAL="${SKIP_EVAL:-false}"
 REINIT_SIT="${REINIT_SIT:-false}"
 REINIT_KV_PROJ="${REINIT_KV_PROJ:-false}"
+SEED="${SEED:-0}"
 
 # FID 评估参数
 NUM_FID_SAMPLES="${NUM_FID_SAMPLES:-50000}"
@@ -73,6 +74,10 @@ while [[ $# -gt 0 ]]; do
             RESUME_STEP="$2"
             shift 2
             ;;
+        --seed)
+            SEED="$2"
+            shift 2
+            ;;
         --reinit-sit)
             REINIT_SIT="true"
             shift
@@ -96,6 +101,7 @@ fi
 
 SAVE_PATH="exps/${EXP_NAME}"
 export CUDA_VISIBLE_DEVICES="${GPU}"
+MASTER_PORT=$((29500 + RANDOM % 1000))
 
 # +
 # ============================================================================
@@ -106,14 +112,14 @@ if [ "$EVAL_ONLY" = "false" ]; then
     echo "开始训练..."
     echo "实验名: ${EXP_NAME}"
     echo "GPU: ${GPU} (${NUM_GPUS} GPUs)"
+    echo "Seed: ${SEED}"
     if [ -n "$CONFIG" ]; then
         echo "配置文件: ${CONFIG}"
     fi
     echo "================================================"
 
     # 构建训练命令
-    MASTER_PORT=$((29500 + RANDOM % 1000))
-    TRAIN_CMD="accelerate launch --main_process_port ${MASTER_PORT} --num_processes ${NUM_GPUS} train.py --exp-name ${EXP_NAME}"
+    TRAIN_CMD="accelerate launch --main_process_port ${MASTER_PORT} --num_processes ${NUM_GPUS} train.py --exp-name ${EXP_NAME} --seed ${SEED}"
 
     if [ -n "$CONFIG" ]; then
         TRAIN_CMD="${TRAIN_CMD} --config ${CONFIG}"
@@ -168,6 +174,7 @@ fi
 if [ "$SKIP_EVAL" = "false" ]; then
     echo "================================================"
     echo "开始评估..."
+    echo "Seed: ${SEED}"
     echo "================================================"
 
     # 确定要评估的 checkpoints
@@ -199,10 +206,11 @@ if [ "$SKIP_EVAL" = "false" ]; then
             --model ${MODEL} \
             --num-steps ${EVAL_NUM_STEPS} \
             --cfg-scale ${CFG_SCALE} \
+            --global-seed ${SEED} \
             --sample-dir ${SAVE_PATH}/checkpoints
 
         # 构建样本文件名
-        SAMPLE_NPZ="${SAVE_PATH}/checkpoints/${EXP_NAME}_cfg${CFG_SCALE}-seed0-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
+        SAMPLE_NPZ="${SAVE_PATH}/checkpoints/${EXP_NAME}_cfg${CFG_SCALE}-seed${SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
 
         if [ -f "$SAMPLE_NPZ" ]; then
             echo "计算 FID..."
