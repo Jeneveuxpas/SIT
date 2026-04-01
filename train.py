@@ -150,6 +150,37 @@ def get_loss_stop_multiplier(step: int, stop_step: int = None, fade_steps: int =
     return 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
+def get_three_stage_loss_multiplier(
+    step: int,
+    decay_start_step: int = None,
+    decay_end_step: int = None,
+    decay_end_scale: float = 1.0,
+    final_scale: float = None,
+) -> float:
+    """
+    Compute a 3-stage scalar multiplier:
+
+    1) [0, decay_start_step): multiplier = 1.0
+    2) [decay_start_step, decay_end_step): linearly decay 1.0 -> decay_end_scale
+    3) [decay_end_step, end): multiplier = final_scale (or decay_end_scale if omitted)
+
+    Passing None or negative steps disables this schedule and returns 1.0.
+    """
+    if (
+        decay_start_step is None or decay_end_step is None
+        or decay_start_step < 0 or decay_end_step < 0
+    ):
+        return 1.0
+    if step < decay_start_step:
+        return 1.0
+    if step < decay_end_step:
+        progress = (step - decay_start_step) / max(1, decay_end_step - decay_start_step)
+        return 1.0 + progress * (decay_end_scale - 1.0)
+    if final_scale is None:
+        return decay_end_scale
+    return final_scale
+
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -207,11 +238,15 @@ def main(args):
     assert args.resolution % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.resolution // 8
     in_channels = 4
-    # Load encoders (generic)
-    # We use the first encoder for K/V distillation if available
-    encoders = load_encoders(
-        args.enc_type, device, args.resolution, accelerator=accelerator
-    )
+    # Load encoders only when a raw-image branch is active.
+    # KV distillation and REPA both require encoder features from raw images.
+    needs_raw_images = args.use_kv or args.repa_loss
+    if needs_raw_images:
+        encoders = load_encoders(
+            args.enc_type, device, args.resolution, accelerator=accelerator
+        )
+    else:
+        encoders = []
     
     # Create Encoder K/V extractor first to detect dimension and heads (only if KV distillation enabled)
     encoder_kv_extractor = None
@@ -313,6 +348,20 @@ def main(args):
         logger.info(f"Encoder layers: {enc_layer_indices} -> SiT layers: {sit_layer_indices}")
         if sit_layer_loss_weights is not None:
             logger.info(f"Stage-2 per-layer distill weights (normalized): {sit_layer_loss_weights}")
+        if args.repa_decay_start_step is not None and args.repa_decay_start_step >= 0:
+            logger.info(
+                "REPA 3-stage schedule: "
+                f"{args.repa_decay_start_step}->{args.repa_decay_end_step}, "
+                f"end_scale={args.repa_decay_end_scale}, final_scale="
+                f"{args.repa_final_scale if args.repa_final_scale is not None else args.repa_decay_end_scale}"
+            )
+        if args.kv_decay_start_step is not None and args.kv_decay_start_step >= 0:
+            logger.info(
+                "KV/distill 3-stage schedule: "
+                f"{args.kv_decay_start_step}->{args.kv_decay_end_step}, "
+                f"end_scale={args.kv_decay_end_scale}, final_scale="
+                f"{args.kv_final_scale if args.kv_final_scale is not None else args.kv_decay_end_scale}"
+            )
     
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     if args.allow_tf32:
@@ -327,18 +376,24 @@ def main(args):
         eps=args.adam_epsilon,
     )    
     
-    # Setup data: try HF format first, then edm2/REPA format, then ImageFolder fallback
-    try:
-        train_dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
-    except Exception as e:
-        print(f"Error loading HFImgLatentDataset: {e}")
+    # Setup data:
+    # - If KV or REPA is active, we need raw images + latents.
+    # - Otherwise, latent-only training can use the lighter HFLatentDataset path.
+    if needs_raw_images:
         try:
-            print("Trying EDM2ImgLatentDataset (REPA preprocessing format)...")
-            train_dataset = EDM2ImgLatentDataset(args.data_dir)
-        except Exception as e2:
-            print(f"Error loading EDM2ImgLatentDataset: {e2}")
-            print("Falling back to ImageFolderLatentDataset")
-            train_dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, resolution=args.resolution, split="train")
+            train_dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
+        except Exception as e:
+            print(f"Error loading HFImgLatentDataset: {e}")
+            try:
+                print("Trying EDM2ImgLatentDataset (REPA preprocessing format)...")
+                train_dataset = EDM2ImgLatentDataset(args.data_dir)
+            except Exception as e2:
+                print(f"Error loading EDM2ImgLatentDataset: {e2}")
+                print("Falling back to ImageFolderLatentDataset")
+                train_dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, resolution=args.resolution, split="train")
+    else:
+        print("Raw-image branches disabled; using HFLatentDataset")
+        train_dataset = HFLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
     print(train_dataset)
 
     local_batch_size = int(args.batch_size // accelerator.num_processes)
@@ -489,17 +544,33 @@ def main(args):
 
             # Stage-wise termination gates
             # REPA: controls projection loss branch
-            repa_gate = get_loss_stop_multiplier(
+            repa_stop_gate = get_loss_stop_multiplier(
                 step=global_step,
                 stop_step=args.repa_stop_step,
                 fade_steps=args.repa_stop_fade_steps,
             )
+            repa_decay_gate = get_three_stage_loss_multiplier(
+                step=global_step,
+                decay_start_step=args.repa_decay_start_step,
+                decay_end_step=args.repa_decay_end_step,
+                decay_end_scale=args.repa_decay_end_scale,
+                final_scale=args.repa_final_scale,
+            )
+            repa_gate = repa_stop_gate * repa_decay_gate
             # KV gate only affects Stage 2 distillation; Stage 1 KV guidance stays enabled.
-            kv_gate = get_loss_stop_multiplier(
+            kv_stop_gate = get_loss_stop_multiplier(
                 step=global_step,
                 stop_step=args.kv_stop_step,
                 fade_steps=args.kv_stop_fade_steps,
             )
+            kv_decay_gate = get_three_stage_loss_multiplier(
+                step=global_step,
+                decay_start_step=args.kv_decay_start_step,
+                decay_end_step=args.kv_decay_end_step,
+                decay_end_scale=args.kv_decay_end_scale,
+                final_scale=args.kv_final_scale,
+            )
+            kv_gate = kv_stop_gate * kv_decay_gate
             repa_active = args.repa_loss and repa_gate > 0.0
             kv_active = args.use_kv and (current_stage == 1 or kv_gate > 0.0)
 
@@ -526,7 +597,7 @@ def main(args):
 
                 if single_encoder_joint_path:
                     if raw_image is None:
-                        raise ValueError("active REPA/KV requires raw images, but dataset did not return them.")
+                        raise ValueError("Active REPA/KV branch requires raw images, but the dataset returned latents only.")
                     raw_image_enc = encoders[0].preprocess(raw_image)
                     with accelerator.autocast():
                         encoder_kv_extractor.reset_cache()
@@ -542,7 +613,7 @@ def main(args):
                 else:
                     if kv_active:
                         if raw_image is None:
-                             raise ValueError("use_kv requires raw images, but dataset did not return them (check repa_loss arg).")
+                             raise ValueError("use_kv requires raw images, but the dataset returned latents only.")
                         raw_image_enc = encoders[0].preprocess(raw_image)
                         with accelerator.autocast():
                             enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
@@ -663,7 +734,9 @@ def main(args):
                     # "distill_coeff": current_distill_coeff,
                     # "distill_coeff_base": base_distill_coeff,
                     "repa_gate": repa_gate,
+                    "repa_decay_gate": repa_decay_gate,
                     "kv_gate": kv_gate,
+                    "kv_decay_gate": kv_decay_gate,
                     "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "stage": current_stage,
                 }
@@ -740,6 +813,14 @@ def parse_args(input_args=None):
                         help="Absolute step to begin turning off Stage-2 KV distillation (None keeps it on)")
     parser.add_argument("--kv-stop-fade-steps", type=int, default=0,
                         help="Cosine fade length for KV distillation after kv-stop-step (0 = hard stop)")
+    parser.add_argument("--kv-decay-start-step", type=int, default=None,
+                        help="Start step for optional 3-stage Stage-2 KV/distill multiplier")
+    parser.add_argument("--kv-decay-end-step", type=int, default=None,
+                        help="End step for optional 3-stage Stage-2 KV/distill multiplier")
+    parser.add_argument("--kv-decay-end-scale", type=float, default=1.0,
+                        help="Multiplier reached at kv-decay-end-step during 3-stage KV/distill decay")
+    parser.add_argument("--kv-final-scale", type=float, default=None,
+                        help="Multiplier used after kv-decay-end-step (defaults to kv-decay-end-scale)")
     parser.add_argument("--kv-proj-type", type=str, default="linear",
                         choices=["linear", "mlp", "conv", "head_gate"],
                         help="Projection type for Encoder K/V: linear, mlp, conv, or head_gate")
@@ -805,6 +886,14 @@ def parse_args(input_args=None):
                         help="Absolute step to begin turning off REPA projection loss (None keeps it on)")
     parser.add_argument("--repa-stop-fade-steps", type=int, default=0,
                         help="Cosine fade length for REPA projection loss after repa-stop-step (0 = hard stop)")
+    parser.add_argument("--repa-decay-start-step", type=int, default=None,
+                        help="Start step for optional 3-stage REPA multiplier")
+    parser.add_argument("--repa-decay-end-step", type=int, default=None,
+                        help="End step for optional 3-stage REPA multiplier")
+    parser.add_argument("--repa-decay-end-scale", type=float, default=1.0,
+                        help="Multiplier reached at repa-decay-end-step during 3-stage REPA decay")
+    parser.add_argument("--repa-final-scale", type=float, default=None,
+                        help="Multiplier used after repa-decay-end-step (defaults to repa-decay-end-scale)")
     # whether to normalize spatial features
     parser.add_argument("--spnorm-method", type=str, default="zscore", choices=["none", "zscore", "zscore_token", "layernorm"])
     parser.add_argument("--cls-token-weight", type=float, default=0.2)
@@ -865,6 +954,26 @@ def parse_args(input_args=None):
         parser.error("--kv-stop-fade-steps must be >= 0")
     if args.repa_stop_fade_steps < 0:
         parser.error("--repa-stop-fade-steps must be >= 0")
+
+    for prefix in ("kv", "repa"):
+        decay_start = getattr(args, f"{prefix}_decay_start_step")
+        decay_end = getattr(args, f"{prefix}_decay_end_step")
+        decay_end_scale = getattr(args, f"{prefix}_decay_end_scale")
+        final_scale = getattr(args, f"{prefix}_final_scale")
+
+        decay_start_set = decay_start is not None and decay_start >= 0
+        decay_end_set = decay_end is not None and decay_end >= 0
+        if decay_start_set != decay_end_set:
+            parser.error(
+                f"--{prefix}-decay-start-step and --{prefix}-decay-end-step must both be set "
+                "for the 3-stage schedule"
+            )
+        if decay_start_set and decay_end <= decay_start:
+            parser.error(f"--{prefix}-decay-end-step must be greater than --{prefix}-decay-start-step")
+        if decay_end_scale < 0:
+            parser.error(f"--{prefix}-decay-end-scale must be >= 0")
+        if final_scale is not None and final_scale < 0:
+            parser.error(f"--{prefix}-final-scale must be >= 0")
 
     return args
 
