@@ -107,15 +107,16 @@ def main(args):
     # Setup DDP
     dist.init_process_group("nccl", timeout=datetime.timedelta(minutes=30))
     rank = dist.get_rank()
-    device = rank % torch.cuda.device_count()
+    device_id = rank % torch.cuda.device_count()
+    device = torch.device(f"cuda:{device_id}")
     seed = args.global_seed * dist.get_world_size() + rank
     torch.manual_seed(seed)
-    torch.cuda.set_device(device)
+    torch.cuda.set_device(device_id)
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
     # Load checkpoint and extract saved args for auto-config
     ckpt_path = args.ckpt
-    ckpt = torch.load(ckpt_path, map_location=f'cuda:{device}', weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     ckpt_args = ckpt.get('args', None)
     
     # Auto-detect parameters from checkpoint if not explicitly provided.
