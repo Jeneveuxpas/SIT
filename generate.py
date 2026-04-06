@@ -19,6 +19,7 @@ import numpy as np
 import math
 import argparse
 import datetime
+from diffusers.models import AutoencoderKL
 from models.autoencoder import VAE_F8D4
 from samplers import euler_sampler, euler_maruyama_sampler
 
@@ -40,21 +41,10 @@ def create_npz_from_sample_folder(sample_dir, num=50_000):
     return npz_path
 
 
-def load_vae(device, vae_name: str):
+def load_latent_stats(device, vae_name: str):
     base = os.path.join(os.path.dirname(__file__), "pretrained_models")
-    vae_ckpt_path = os.path.join(base, f"sdvae-ft-{vae_name}-f8d4.pt")
     stats_path = os.path.join(base, f"sdvae-ft-{vae_name}-f8d4-latents-stats.pt")
     fallback_stats_path = os.path.join(base, "sdvae-ft-mse-f8d4-latents-stats.pt")
-
-    if not os.path.exists(vae_ckpt_path):
-        raise FileNotFoundError(
-            f"VAE checkpoint not found: {vae_ckpt_path}. "
-            f"Expected a local converted {vae_name} VAE checkpoint."
-        )
-
-    vae = VAE_F8D4().to(device).eval()
-    vae_ckpt = torch.load(vae_ckpt_path, map_location=device, weights_only=False)
-    vae.load_state_dict(vae_ckpt)
 
     if not os.path.exists(stats_path):
         if vae_name != "mse" and os.path.exists(fallback_stats_path):
@@ -68,6 +58,43 @@ def load_vae(device, vae_name: str):
     latents_stats = torch.load(stats_path, map_location=device, weights_only=False)
     latents_scale = latents_stats["latents_scale"].to(device).view(1, -1, 1, 1)
     latents_bias = latents_stats["latents_bias"].to(device).view(1, -1, 1, 1)
+    return latents_scale, latents_bias
+
+
+def load_local_converted_vae(device, vae_name: str):
+    base = os.path.join(os.path.dirname(__file__), "pretrained_models")
+    vae_ckpt_path = os.path.join(base, f"sdvae-ft-{vae_name}-f8d4.pt")
+    if not os.path.exists(vae_ckpt_path):
+        return None
+
+    vae = VAE_F8D4().to(device).eval()
+    vae_ckpt = torch.load(vae_ckpt_path, map_location=device, weights_only=False)
+    vae.load_state_dict(vae_ckpt)
+    print(f"[info] Loaded local converted VAE checkpoint: {vae_ckpt_path}")
+    return vae
+
+
+def load_vae(device, vae_name: str):
+    latents_scale, latents_bias = load_latent_stats(device=device, vae_name=vae_name)
+    hf_repo = f"stabilityai/sd-vae-ft-{vae_name}"
+
+    try:
+        vae = AutoencoderKL.from_pretrained(hf_repo).to(device).eval()
+        vae.requires_grad_(False)
+        print(f"[info] Loaded Hugging Face VAE: {hf_repo}")
+        return vae, latents_scale, latents_bias
+    except Exception as exc:
+        print(f"[warn] Failed to load Hugging Face VAE '{hf_repo}': {exc}")
+
+    vae = load_local_converted_vae(device=device, vae_name=vae_name)
+    if vae is None:
+        base = os.path.join(os.path.dirname(__file__), "pretrained_models")
+        vae_ckpt_path = os.path.join(base, f"sdvae-ft-{vae_name}-f8d4.pt")
+        raise FileNotFoundError(
+            f"Could not load VAE '{vae_name}' from Hugging Face repo '{hf_repo}' "
+            f"or local checkpoint '{vae_ckpt_path}'."
+        )
+
     return vae, latents_scale, latents_bias
 
 
