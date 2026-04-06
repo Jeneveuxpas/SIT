@@ -255,7 +255,7 @@ for STEP in "${CKPT_LIST[@]}"; do
     else
         CFG_INTV="_${GUIDANCE_LOW}_${GUIDANCE_HIGH}"
     fi
-    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_vae${VAE}_cfg${CFG_SCALE}${CFG_INTV}-seed${SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
+    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_vae${VAE}-cfg${CFG_SCALE}${CFG_INTV}-seed${SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
 
     if [ -f "$SAMPLE_NPZ" ]; then
         echo "计算 FID..."
