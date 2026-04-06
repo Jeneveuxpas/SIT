@@ -30,12 +30,45 @@ def create_npz_from_sample_folder(sample_dir, num=50_000):
         sample_pil = Image.open(f"{sample_dir}/{i:06d}.png")
         sample_np = np.asarray(sample_pil).astype(np.uint8)
         samples.append(sample_np)
+    print("Stacking samples into a single numpy array...")
     samples = np.stack(samples)
     assert samples.shape == (num, samples.shape[1], samples.shape[2], 3)
     npz_path = f"{sample_dir}.npz"
+    print(f"Writing .npz file to {npz_path}...")
     np.savez(npz_path, arr_0=samples)
     print(f"Saved .npz file to {npz_path} [shape={samples.shape}].")
     return npz_path
+
+
+def load_vae(device, vae_name: str):
+    base = os.path.join(os.path.dirname(__file__), "pretrained_models")
+    vae_ckpt_path = os.path.join(base, f"sdvae-ft-{vae_name}-f8d4.pt")
+    stats_path = os.path.join(base, f"sdvae-ft-{vae_name}-f8d4-latents-stats.pt")
+    fallback_stats_path = os.path.join(base, "sdvae-ft-mse-f8d4-latents-stats.pt")
+
+    if not os.path.exists(vae_ckpt_path):
+        raise FileNotFoundError(
+            f"VAE checkpoint not found: {vae_ckpt_path}. "
+            f"Expected a local converted {vae_name} VAE checkpoint."
+        )
+
+    vae = VAE_F8D4().to(device).eval()
+    vae_ckpt = torch.load(vae_ckpt_path, map_location=device, weights_only=False)
+    vae.load_state_dict(vae_ckpt)
+
+    if not os.path.exists(stats_path):
+        if vae_name != "mse" and os.path.exists(fallback_stats_path):
+            stats_path = fallback_stats_path
+            print(f"[info] Stats for VAE '{vae_name}' not found. Falling back to mse stats: {stats_path}")
+        else:
+            raise FileNotFoundError(
+                f"Latent stats file not found: {stats_path}."
+            )
+
+    latents_stats = torch.load(stats_path, map_location=device, weights_only=False)
+    latents_scale = latents_stats["latents_scale"].to(device).view(1, -1, 1, 1)
+    latents_bias = latents_stats["latents_bias"].to(device).view(1, -1, 1, 1)
+    return vae, latents_scale, latents_bias
 
 
 def main(args):
@@ -122,19 +155,14 @@ def main(args):
     model.eval()
 
     # Load VAE
-    vae = VAE_F8D4().to(device).eval()
-    vae_ckpt = torch.load("pretrained_models/sdvae-ft-mse-f8d4.pt", map_location=f'cuda:{device}', weights_only=False)
-    vae.load_state_dict(vae_ckpt)
-    latents_stats = torch.load("pretrained_models/sdvae-ft-mse-f8d4-latents-stats.pt", map_location=f'cuda:{device}', weights_only=False)
-    latents_scale = latents_stats["latents_scale"].to(device).view(1, -1, 1, 1)
-    latents_bias = latents_stats["latents_bias"].to(device).view(1, -1, 1, 1)
+    vae, latents_scale, latents_bias = load_vae(device=device, vae_name=args.vae)
 
     assert args.cfg_scale >= 1.0, "cfg_scale should be >= 1.0"
 
     # Create output folder
     ckpt_string_name = os.path.basename(args.ckpt).replace(".pt", "") if args.ckpt else "pretrained"
     cfg_intv = "" if args.guidance_low == 0. and args.guidance_high == 1. else f"_{args.guidance_low}_{args.guidance_high}"
-    hparams = f"cfg{args.cfg_scale}{cfg_intv}-seed{args.global_seed}-mode{args.mode}-steps{args.num_steps}_{ckpt_string_name}"
+    hparams = f"vae{args.vae}-cfg{args.cfg_scale}{cfg_intv}-seed{args.global_seed}-mode{args.mode}-steps{args.num_steps}_{ckpt_string_name}"
     exp_name = os.path.basename(os.path.normpath(args.ckpt.rsplit("checkpoints")[0]))
     sample_folder_dir = f"{args.sample_dir}/{exp_name}_{hparams}"
     if rank == 0:
@@ -191,11 +219,11 @@ def main(args):
         total_generated += n
 
     dist.barrier()
+    dist.destroy_process_group()
+
     if rank == 0:
         create_npz_from_sample_folder(sample_folder_dir, args.num_fid_samples)
         print("Done.")
-    dist.barrier()
-    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
@@ -216,6 +244,7 @@ if __name__ == "__main__":
     parser.add_argument("--per-proc-batch-size", type=int, default=256)
     parser.add_argument("--num-fid-samples", type=int, default=50_000)
     parser.add_argument("--mode", type=str, default="sde")
+    parser.add_argument("--vae", type=str, choices=["mse", "ema"], default="mse")
     parser.add_argument("--cfg-scale", type=float, default=1.0)
     parser.add_argument("--path-type", type=str, default="linear", choices=["linear", "cosine"])
     parser.add_argument("--num-steps", type=int, default=250)
