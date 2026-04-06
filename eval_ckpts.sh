@@ -5,9 +5,9 @@
 # 
 # 用法:
 #   # 评估指定的 steps
-#   ./eval_ckpts.sh --config configs/512.yaml --exp-name 512 --steps "0100000" --cfg-scale 1.0 --gpu 0,1,2,3 --num-gpus 4 --ref-batch /workspace/SIT/VIRTUAL_imagenet512.npz
+#   ./eval_ckpts.sh --config configs/SIT-XL-early-stop-320.yaml --exp-name SIT-XL-early-stop-320 --steps "0490000,0500000,0510000,0520000,0530000,0540000,0550000" --gpu 6,7 --num-gpus 2 
 #   ./eval_ckpts.sh --config configs/SIT-6.yaml --exp-name SIT-6 --steps "0100000" --gpu 0,1,2,3,4,5,6,7 --num-gpus 8
-#   ./eval_ckpts.sh --config configs/cosine_v_repa-6.0.yaml --exp-name cosine_v_repa-6.0 --gpu 0,1,2,3,4,5,6,7 --num-gpus 8 --steps "0400000"
+#   ./eval_ckpts.sh --config configs/SIT-XL-early-stop-300.yaml --exp-name SIT-XL-early-stop-300 --gpu 0,1,2,3,4,5,6,7 --num-gpus 8 --steps "0700000"
 #   # 使用 guidance interval
 #   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.65
 #   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.7
@@ -29,6 +29,7 @@ set -e
 # 默认参数
 GPU="${GPU:-0,1,2,3,4,5,6,7}"
 NUM_GPUS="${NUM_GPUS:-8}"
+SEED="${SEED:-0}"
 
 # FID 评估参数
 NUM_FID_SAMPLES="${NUM_FID_SAMPLES:-50000}"
@@ -38,6 +39,7 @@ CFG_SCALE="${CFG_SCALE:-1.0}"
 GUIDANCE_LOW="${GUIDANCE_LOW:-0.0}"
 GUIDANCE_HIGH="${GUIDANCE_HIGH:-1.0}"
 MODE="${MODE:-sde}"
+VAE="${VAE:-mse}"
 REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
 
 # 解析命令行参数
@@ -63,6 +65,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --num-gpus)
             NUM_GPUS="$2"
+            shift 2
+            ;;
+        --seed)
+            SEED="$2"
             shift 2
             ;;
         --steps)
@@ -99,6 +105,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --guidance-high)
             GUIDANCE_HIGH="$2"
+            shift 2
+            ;;
+        --vae)
+            VAE="$2"
             shift 2
             ;;
         --ref-batch)
@@ -179,6 +189,8 @@ echo "================================================"
 echo "批量评估 Checkpoints"
 echo "实验名: ${EXP_NAME}"
 echo "GPU: ${GPU} (${NUM_GPUS} GPUs)"
+echo "Seed: ${SEED}"
+echo "VAE: ${VAE}"
 echo "Guidance interval: [${GUIDANCE_LOW}, ${GUIDANCE_HIGH}]"
 echo "待评估 checkpoints: ${CKPT_LIST[*]}"
 echo "总计: ${#CKPT_LIST[@]} 个"
@@ -227,9 +239,11 @@ for STEP in "${CKPT_LIST[@]}"; do
         --num-fid-samples ${NUM_FID_SAMPLES} \
         --per-proc-batch-size ${EVAL_BATCH_SIZE} \
         --mode ${MODE} \
+        --vae ${VAE} \
         --model ${MODEL} \
         --num-steps ${EVAL_NUM_STEPS} \
         --cfg-scale ${CFG_SCALE} \
+        --global-seed ${SEED} \
         --guidance-low ${GUIDANCE_LOW} \
         --guidance-high ${GUIDANCE_HIGH} \
         --resolution ${RESOLUTION} \
@@ -241,7 +255,7 @@ for STEP in "${CKPT_LIST[@]}"; do
     else
         CFG_INTV="_${GUIDANCE_LOW}_${GUIDANCE_HIGH}"
     fi
-    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_cfg${CFG_SCALE}${CFG_INTV}-seed0-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
+    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_vae${VAE}_cfg${CFG_SCALE}${CFG_INTV}-seed${SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
 
     if [ -f "$SAMPLE_NPZ" ]; then
         echo "计算 FID..."
