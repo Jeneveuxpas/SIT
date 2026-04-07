@@ -74,11 +74,16 @@ def main():
     print("Precision:", prec)
     print("Recall:", recall)
 
-    if args.cfg_cond:
-        file_path = args.save_path + str(args.num_steps) + str(args.step) + str(args.cfg) + str(args.gh) + str(args.cls_cfg)+ "cfg_cond_true.txt"
-    else:
-        file_path = args.save_path + str(args.num_steps) + str(args.step) + str(args.cfg) + str(args.gh) + str(args.cls_cfg)+ "cfg_cond_false.txt"
+    sample_name = os.path.splitext(os.path.basename(args.sample_batch))[0]
+    cfg_cond_suffix = "cfg_cond_true" if args.cfg_cond else "cfg_cond_false"
+    file_path = os.path.join(args.save_path, f"{sample_name}.{cfg_cond_suffix}.txt")
     with open(file_path, "w") as file:
+        file.write("sample_batch: {}\n".format(args.sample_batch))
+        file.write("num_steps: {}\n".format(args.num_steps))
+        file.write("step: {}\n".format(args.step))
+        file.write("cfg: {}\n".format(args.cfg))
+        file.write("gh: {}\n".format(args.gh))
+        file.write("cls_cfg: {}\n".format(args.cls_cfg))
         file.write("Inception Score: {}\n".format(Inception_Score))
         file.write("FID: {}\n".format(FID))
         file.write("sFID: {}\n".format(sFID))

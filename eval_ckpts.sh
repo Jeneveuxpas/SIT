@@ -265,7 +265,8 @@ for STEP in "${CKPT_LIST[@]}"; do
             --save_path ${CKPT_DIR} \
             --step ${STEP} \
             --num_steps ${EVAL_NUM_STEPS} \
-            --cfg ${CFG_SCALE}
+            --cfg ${CFG_SCALE} \
+            --gh ${GUIDANCE_HIGH}
         
         echo "[${STEP}] 评估完成" | tee -a ${RESULTS_FILE}
     else
