@@ -26,6 +26,8 @@
 # ============================================================================
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # 默认参数
 GPU="${GPU:-0,1,2,3,4,5,6,7}"
 NUM_GPUS="${NUM_GPUS:-8}"
@@ -132,6 +134,10 @@ if [ -z "$EXP_NAME" ]; then
     exit 1
 fi
 
+if [ -n "$CONFIG" ] && [ ! -f "$CONFIG" ] && [ -f "${SCRIPT_DIR}/${CONFIG}" ]; then
+    CONFIG="${SCRIPT_DIR}/${CONFIG}"
+fi
+
 SAVE_PATH="exps/${EXP_NAME}"
 CKPT_DIR="${SAVE_PATH}/checkpoints"
 export CUDA_VISIBLE_DEVICES="${GPU}"
@@ -204,10 +210,21 @@ echo "================================================"
 # 解析模型参数
 # ============================================================================
 if [ -n "$CONFIG" ]; then
-    MODEL=$(grep "^model:" $CONFIG | awk '{print $2}')
+    if [ ! -f "$CONFIG" ]; then
+        echo "配置文件不存在: ${CONFIG}"
+        exit 1
+    fi
+
+    MODEL=$(awk '/^model:/ {print $2; exit}' "$CONFIG")
     MODEL=${MODEL%-EncoderKV}
-    RESOLUTION=$(grep "^resolution:" $CONFIG | awk '{print $2}')
+    RESOLUTION=$(awk '/^resolution:/ {print $2; exit}' "$CONFIG")
     RESOLUTION=${RESOLUTION:-256}
+
+    if [ -z "$MODEL" ]; then
+        echo "无法从配置文件解析 model: ${CONFIG}"
+        exit 1
+    fi
+
     echo "从配置中检测到模型: ${MODEL}, 分辨率: ${RESOLUTION}"
 else
     MODEL="SiT-B/2"
@@ -238,7 +255,7 @@ for STEP in "${CKPT_LIST[@]}"; do
     echo "------------------------------------------------"
 
     # 生成样本
-    torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} generate.py \
+    torchrun --nproc_per_node=${NUM_GPUS} --master_port=${MASTER_PORT} "${SCRIPT_DIR}/generate.py" \
         --ckpt ${CKPT_FILE} \
         --num-fid-samples ${NUM_FID_SAMPLES} \
         --per-proc-batch-size ${EVAL_BATCH_SIZE} \
@@ -263,7 +280,7 @@ for STEP in "${CKPT_LIST[@]}"; do
 
     if [ -f "$SAMPLE_NPZ" ]; then
         echo "计算 FID..."
-        python evaluations/evaluator.py \
+        python "${SCRIPT_DIR}/evaluations/evaluator.py" \
             --ref_batch ${REF_BATCH} \
             --sample_batch ${SAMPLE_NPZ} \
             --save_path ${CKPT_DIR} \

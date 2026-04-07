@@ -12,6 +12,8 @@
 # ============================================================================
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # 默认参数
 CONFIG="configs/SIT-XL.yaml"
 EXP_NAME="SIT-XL"
@@ -148,7 +150,7 @@ for GH in "${GUIDANCE_HIGHS[@]}"; do
         echo "============ [${JOB_ID}/${TOTAL_JOBS}] cfg=${CFG}, gh=${GH} ============"
 
         CMD=(
-            ./eval_ckpts.sh
+            "${SCRIPT_DIR}/eval_ckpts.sh"
             --config "${CONFIG}"
             --exp-name "${EXP_NAME}"
             --steps "${STEPS}"
