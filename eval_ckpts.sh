@@ -99,6 +99,10 @@ while [[ $# -gt 0 ]]; do
             EVAL_NUM_STEPS="$2"
             shift 2
             ;;
+        --mode)
+            MODE="$2"
+            shift 2
+            ;;
         --guidance-low)
             GUIDANCE_LOW="$2"
             shift 2
