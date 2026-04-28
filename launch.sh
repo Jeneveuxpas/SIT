@@ -10,7 +10,7 @@
 #  ./launch.sh --config configs/sam2-s-16.yaml --exp-name sam2-s-16 --gpu 2 --num-gpus 1
  
 # ./launch.sh --config configs/cosine_1.yaml --exp-name cosine_1 --gpu 6,7 --num-gpus 2 
-#  ./launch.sh --config configs/SIT-XL-early-stop-330.yaml --exp-name SIT-XL-early-stop-330 --gpu 4,5,6,7 --num-gpus 4 --resume-step 300000
+#  ./launch.sh --config configs/SIT-XL-early-stop-370.yaml --exp-name  SIT-XL-early-stop-370 --gpu 4,5,6,7 --num-gpus 4 --resume-step 450000
 #  ./launch.sh --config configs/attn_mse_repa_early_stop_600.yaml --exp-name attn_mse_repa_early_stop_600 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0600000
 
 # ============================================================================
@@ -33,6 +33,7 @@ EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-256}"
 EVAL_NUM_STEPS="${EVAL_NUM_STEPS:-250}"
 CFG_SCALE="${CFG_SCALE:-1.0}"
 MODE="${MODE:-sde}"
+VAE="${VAE:-mse}"
 REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
 
 # 解析命令行参数
@@ -68,6 +69,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --cfg-scale)
             CFG_SCALE="$2"
+            shift 2
+            ;;
+        --vae)
+            VAE="$2"
             shift 2
             ;;
         --resume-step)
@@ -119,7 +124,11 @@ if [ "$EVAL_ONLY" = "false" ]; then
     echo "================================================"
 
     # 构建训练命令
-    TRAIN_CMD="accelerate launch --main_process_port ${MASTER_PORT} --num_processes ${NUM_GPUS} train.py --exp-name ${EXP_NAME} --seed ${SEED}"
+    if [ "${NUM_GPUS}" -gt 1 ]; then
+        TRAIN_CMD="accelerate launch --multi_gpu --main_process_port ${MASTER_PORT} --num_processes ${NUM_GPUS} train.py --exp-name ${EXP_NAME} --seed ${SEED}"
+    else
+        TRAIN_CMD="accelerate launch --main_process_port ${MASTER_PORT} --num_processes 1 train.py --exp-name ${EXP_NAME} --seed ${SEED}"
+    fi
 
     if [ -n "$CONFIG" ]; then
         TRAIN_CMD="${TRAIN_CMD} --config ${CONFIG}"
@@ -140,6 +149,8 @@ if [ "$EVAL_ONLY" = "false" ]; then
         TRAIN_CMD="${TRAIN_CMD} --reinit-kv-proj"
         echo "[Ablation] 进入 Stage 2 时重新初始化 KV projection"
     fi
+
+    echo "训练命令: ${TRAIN_CMD}"
 
     # 执行训练
     eval ${TRAIN_CMD}
@@ -175,6 +186,7 @@ if [ "$SKIP_EVAL" = "false" ]; then
     echo "================================================"
     echo "开始评估..."
     echo "Seed: ${SEED}"
+    echo "VAE: ${VAE}"
     echo "================================================"
 
     # 确定要评估的 checkpoints
@@ -203,6 +215,7 @@ if [ "$SKIP_EVAL" = "false" ]; then
             --num-fid-samples ${NUM_FID_SAMPLES} \
             --per-proc-batch-size ${EVAL_BATCH_SIZE} \
             --mode ${MODE} \
+            --vae ${VAE} \
             --model ${MODEL} \
             --num-steps ${EVAL_NUM_STEPS} \
             --cfg-scale ${CFG_SCALE} \
@@ -210,7 +223,7 @@ if [ "$SKIP_EVAL" = "false" ]; then
             --sample-dir ${SAVE_PATH}/checkpoints
 
         # 构建样本文件名
-        SAMPLE_NPZ="${SAVE_PATH}/checkpoints/${EXP_NAME}_cfg${CFG_SCALE}-seed${SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
+        SAMPLE_NPZ="${SAVE_PATH}/checkpoints/${EXP_NAME}_vae${VAE}-cfg${CFG_SCALE}-seed${SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
 
         if [ -f "$SAMPLE_NPZ" ]; then
             echo "计算 FID..."

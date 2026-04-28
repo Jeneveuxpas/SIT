@@ -502,7 +502,20 @@ class EncoderKVExtractor(nn.Module):
 
 
 KV_PROJ_TYPES = ["linear", "mlp", "conv", "head_gate"]
-KV_NORM_TYPES = ["none", "layernorm", "zscore", "zscore_token", "batchnorm"]
+KV_NORM_TYPES = ["none", "layernorm", "rmsnorm", "zscore", "zscore_token", "batchnorm", "k_rms_v_layer"]
+
+
+class TokenRMSNorm(nn.Module):
+    """RMS-normalize each token without subtracting the feature mean."""
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dtype = x.dtype
+        x = x.float()
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
+        return (x / rms).to(dtype=dtype)
 
 
 def build_kv_norm(norm_type: str, dim: int, num_patches: int = 256, alpha: float = 1.0):
@@ -513,6 +526,8 @@ def build_kv_norm(norm_type: str, dim: int, num_patches: int = 256, alpha: float
         return nn.Identity()
     elif norm_type == "layernorm":
         return nn.LayerNorm(dim)
+    elif norm_type == "rmsnorm":
+        return TokenRMSNorm()
     elif norm_type == "zscore":
         return ZScoreNorm(dim=1, alpha=alpha)   # per-feature spatial normalization
     elif norm_type == "zscore_token":
@@ -593,14 +608,20 @@ class EncoderKVProjection(nn.Module):
         self.need_q = kv_replace_mode in ("qkv", "qk", "q")
         self.need_k = kv_replace_mode in ("kv", "k", "qkv", "qk")
         self.need_v = kv_replace_mode in ("kv", "v", "qkv")
+
+        def component_norm(component: str) -> nn.Module:
+            norm_type = kv_norm_type
+            if kv_norm_type == "k_rms_v_layer":
+                norm_type = "layernorm" if component == "v" else "rmsnorm"
+            return build_kv_norm(norm_type, enc_dim, alpha=kv_zscore_alpha)
         
         # Build normalization and projection layers for needed components
         if self.need_q:
-            self.q_norm = build_kv_norm(kv_norm_type, enc_dim, alpha=kv_zscore_alpha)
+            self.q_norm = component_norm("q")
         if self.need_k:
-            self.k_norm = build_kv_norm(kv_norm_type, enc_dim, alpha=kv_zscore_alpha)
+            self.k_norm = component_norm("k")
         if self.need_v:
-            self.v_norm = build_kv_norm(kv_norm_type, enc_dim, alpha=kv_zscore_alpha)
+            self.v_norm = component_norm("v")
 
         # Build projection layers based on type
         if kv_proj_type == "linear":
