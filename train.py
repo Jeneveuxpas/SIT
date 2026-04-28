@@ -829,8 +829,8 @@ def parse_args(input_args=None):
     parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
                         help="Kernel size for conv projection (default: 1)")
     parser.add_argument("--kv-norm-type", type=str, default="none",
-                        choices=["none", "layernorm", "zscore", "zscore_token", "batchnorm"],
-                        help="Normalization type for K/V: zscore=per-spatial, zscore_token=per-token")
+                        choices=["none", "layernorm", "rmsnorm", "zscore", "zscore_token", "batchnorm", "k_rms_v_layer"],
+                        help="Normalization type for K/V: zscore=per-spatial, zscore_token=per-token, k_rms_v_layer=K RMSNorm + V LayerNorm")
     parser.add_argument("--kv-zscore-alpha", type=float, default=1.0, 
                         help="Alpha for z-score normalization: (x - alpha * mean) / std")
     parser.add_argument("--kv-replace-mode", type=str, default="kv",
