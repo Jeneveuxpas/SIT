@@ -10,7 +10,7 @@
 #  ./launch.sh --config configs/sam2-s-16.yaml --exp-name sam2-s-16 --gpu 2 --num-gpus 1
  
 # ./launch.sh --config configs/cosine_1.yaml --exp-name cosine_1 --gpu 6,7 --num-gpus 2 
-#  ./launch.sh --config configs/SIT-XL-early-stop-370.yaml --exp-name  SIT-XL-early-stop-370 --gpu 4,5,6,7 --num-gpus 4 --resume-step 450000
+#  ./launch.sh --config configs/SIT-XL-without-kv-loss.yaml --exp-name  SIT-XL-without-kv-loss --gpu 4,5,6,7 --num-gpus 4 --resume-step 0100000
 #  ./launch.sh --config configs/attn_mse_repa_early_stop_600.yaml --exp-name attn_mse_repa_early_stop_600 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0600000
 
 # ============================================================================
