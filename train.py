@@ -305,6 +305,7 @@ def main(args):
         kv_zscore_alpha=args.kv_zscore_alpha,
         kv_replace_mode=args.kv_replace_mode,
         kv_use_adaln=args.kv_use_adaln,
+        train_kv_proj_in_stage2=args.train_kv_proj_stage2,
         distill_temperature=args.distill_temperature,
         kv_distill_snr_gamma=args.kv_distill_snr_gamma,
         kv_distill_min_weight=args.kv_distill_min_weight,
@@ -355,6 +356,8 @@ def main(args):
                 f"end_scale={args.repa_decay_end_scale}, final_scale="
                 f"{args.repa_final_scale if args.repa_final_scale is not None else args.repa_decay_end_scale}"
             )
+        if args.train_kv_proj_stage2:
+            logger.info("KV projection trainable in Stage 2 (no-Teacher-detach mode)")
         if args.kv_decay_start_step is not None and args.kv_decay_start_step >= 0:
             logger.info(
                 "KV/distill 3-stage schedule: "
@@ -839,6 +842,8 @@ def parse_args(input_args=None):
                              "kv (default), k-only, v-only, qkv (all), qk, q-only")
     parser.add_argument("--kv-use-adaln", action=argparse.BooleanOptionalAction, default=False,
                         help="Apply AdaLN t-conditioning to KV projection output (default: False)")
+    parser.add_argument("--train-kv-proj-stage2", action=argparse.BooleanOptionalAction, default=False,
+                        help="Allow gradient flow through kv_proj during Stage 2 (use for no-Stage-1 ablation)")
     # enc-dim and enc-heads are now auto-detected from encoder
     # dataset
     parser.add_argument("--data-dir", type=str, default="../data")

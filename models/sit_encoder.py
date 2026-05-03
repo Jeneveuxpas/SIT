@@ -30,9 +30,9 @@ class AttentionWithEncoderKV(nn.Module):
     Stage 2: Q_sit @ K_sit^T -> Softmax -> V_sit (with logits distillation loss)
     """
     def __init__(
-        self, 
-        dim: int, 
-        num_heads: int = 8, 
+        self,
+        dim: int,
+        num_heads: int = 8,
         qkv_bias: bool = True,
         qk_norm: bool = False,
         fused_attn: bool = True,
@@ -41,6 +41,7 @@ class AttentionWithEncoderKV(nn.Module):
         kv_distill_min_weight: float = 0.0,
         attn_loss_weight: float = 1.0,
         kv_loss_weight: float = 1.0,
+        train_kv_proj_in_stage2: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -53,6 +54,7 @@ class AttentionWithEncoderKV(nn.Module):
         self.kv_distill_min_weight = kv_distill_min_weight
         self.attn_loss_weight = attn_loss_weight
         self.kv_loss_weight = kv_loss_weight
+        self.train_kv_proj_in_stage2 = train_kv_proj_in_stage2
         
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim)
@@ -166,16 +168,18 @@ class AttentionWithEncoderKV(nn.Module):
             if align_mode == 'attn_mse':
                 attn_enc = self._compute_attn_output(q_teacher, k_teacher, v_teacher)
                 attn_sit = self._compute_attn_output(q_sit, k_sit, v_sit)
-                distill_loss = F.mse_loss(attn_sit, attn_enc.detach())
+                teacher_target = attn_enc if self.train_kv_proj_in_stage2 else attn_enc.detach()
+                distill_loss = F.mse_loss(attn_sit, teacher_target)
             elif align_mode == 'kv_mse':
                 # For kv_mse, compare the components that are being replaced
                 loss_components = []
+                _detach = lambda t: t if self.train_kv_proj_in_stage2 else t.detach()
                 if k_enc is not None and kv_replace_mode in ('kv', 'k', 'qkv', 'qk'):
-                    loss_components.append(self._per_sample_mse(k_sit.float(), k_enc.float().detach()))
+                    loss_components.append(self._per_sample_mse(k_sit.float(), _detach(k_enc.float())))
                 if v_enc is not None and kv_replace_mode in ('kv', 'v', 'qkv'):
-                    loss_components.append(self._per_sample_mse(v_sit.float(), v_enc.float().detach()))
+                    loss_components.append(self._per_sample_mse(v_sit.float(), _detach(v_enc.float())))
                 if q_enc is not None and kv_replace_mode in ('qkv', 'qk', 'q'):
-                    loss_components.append(self._per_sample_mse(q_sit.float(), q_enc.float().detach()))
+                    loss_components.append(self._per_sample_mse(q_sit.float(), _detach(q_enc.float())))
                 if loss_components:
                     combined = sum(loss_components)
                     kv_weight = self._snr_weight(
@@ -218,9 +222,9 @@ class SiTBlockWithEncoderKV(nn.Module):
     SiT block with optional Encoder Q/K/V injection.
     """
     def __init__(
-        self, 
-        hidden_size: int, 
-        num_heads: int, 
+        self,
+        hidden_size: int,
+        num_heads: int,
         mlp_ratio: float = 4.0,
         enc_dim: Optional[int] = None,
         enc_heads: Optional[int] = None,
@@ -231,14 +235,15 @@ class SiTBlockWithEncoderKV(nn.Module):
         kv_zscore_alpha: float = 1.0,
         kv_replace_mode: str = "kv",
         kv_use_adaln: bool = False,
+        train_kv_proj_in_stage2: bool = False,
         **block_kwargs
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = AttentionWithEncoderKV(
-            hidden_size, 
-            num_heads=num_heads, 
-            qkv_bias=True, 
+            hidden_size,
+            num_heads=num_heads,
+            qkv_bias=True,
             qk_norm=block_kwargs.get("qk_norm", False),
             fused_attn=block_kwargs.get("fused_attn", True),
             distill_temperature=block_kwargs.get("distill_temperature", 1.0),
@@ -246,6 +251,7 @@ class SiTBlockWithEncoderKV(nn.Module):
             kv_distill_min_weight=block_kwargs.get("kv_distill_min_weight", 0.0),
             attn_loss_weight=block_kwargs.get("attn_loss_weight", 1.0),
             kv_loss_weight=block_kwargs.get("kv_loss_weight", 1.0),
+            train_kv_proj_in_stage2=train_kv_proj_in_stage2,
         )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
@@ -367,6 +373,7 @@ class SiTWithEncoderKV(nn.Module):
         kv_distill_min_weight: float = 0.0,
         attn_loss_weight: float = 1.0,
         kv_loss_weight: float = 1.0,
+        train_kv_proj_in_stage2: bool = False,
         **block_kwargs
     ):
         super().__init__()
@@ -434,6 +441,7 @@ class SiTWithEncoderKV(nn.Module):
                     kv_zscore_alpha=kv_zscore_alpha,
                     kv_replace_mode=kv_replace_mode,
                     kv_use_adaln=kv_use_adaln,
+                    train_kv_proj_in_stage2=train_kv_proj_in_stage2,
                     **{
                         **block_kwargs,
                         "distill_temperature": distill_temperature,
@@ -447,6 +455,7 @@ class SiTWithEncoderKV(nn.Module):
                 block = SiTBlockWithEncoderKV(
                     hidden_size, num_heads, mlp_ratio=mlp_ratio,
                     enc_dim=None, enc_heads=None,
+                    train_kv_proj_in_stage2=train_kv_proj_in_stage2,
                     **block_kwargs
                 )
             self.blocks.append(block)
