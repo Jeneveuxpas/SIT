@@ -26,8 +26,9 @@ align-mode: kv_mse
 
 kv-proj-type: linear
 kv-proj-kernel-size: 1
-kv-norm-type: none
+kv-norm-type: k_rms_v_layer
 kv-zscore-alpha: 1.0
+kv-stop-step: -1
 kv-replace-mode: kv
 
 # ============================================================================
@@ -38,6 +39,7 @@ proj-coeff: "0.5"
 projection-loss-type: cosine_v
 spnorm-method: zscore
 zscore-alpha: 0.6
+repa-stop-step: -1
 
 # ============================================================================
 # Dataset
