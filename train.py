@@ -181,6 +181,39 @@ def get_three_stage_loss_multiplier(
     return final_scale
 
 
+def get_stage1_transition_alpha(
+    step: int,
+    stage1_steps: int,
+    transition_steps: int = 0,
+    schedule: str = "cosine",
+) -> float:
+    """
+    Smoothly hand off Stage-1 encoder-guided attention to native SiT attention.
+
+    Returns alpha in [0, 1], where:
+      0 -> pure encoder-guided attention
+      1 -> pure SiT self-attention
+    """
+    if stage1_steps <= 0:
+        return 1.0
+    if transition_steps <= 0:
+        return 0.0 if step < stage1_steps else 1.0
+    if step >= stage1_steps:
+        return 1.0
+
+    transition_start = max(0, stage1_steps - transition_steps)
+    if step < transition_start:
+        return 0.0
+
+    progress = (step - transition_start) / max(1, stage1_steps - transition_start)
+    progress = min(1.0, max(0.0, progress))
+    if schedule == "linear":
+        return progress
+    if schedule == "cosine":
+        return 0.5 * (1.0 - math.cos(math.pi * progress))
+    raise ValueError(f"Unknown transition schedule: {schedule}")
+
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -347,6 +380,11 @@ def main(args):
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
         logger.info(f"Encoder KV: {len(enc_layer_indices)} layer pairs, replace_mode={args.kv_replace_mode}")
         logger.info(f"Encoder layers: {enc_layer_indices} -> SiT layers: {sit_layer_indices}")
+        if args.stage1_steps > 0 and args.transition_steps > 0:
+            logger.info(
+                "Stage-1 attention handoff: "
+                f"last {args.transition_steps} steps with {args.transition_schedule} schedule"
+            )
         if sit_layer_loss_weights is not None:
             logger.info(f"Stage-2 per-layer distill weights (normalized): {sit_layer_loss_weights}")
         if args.repa_decay_start_step is not None and args.repa_decay_start_step >= 0:
@@ -514,6 +552,12 @@ def main(args):
             # Auto-stage switching (by step count)
             current_stage = 1 if global_step < args.stage1_steps else 2
             current_align_mode = args.align_mode
+            transition_alpha = get_stage1_transition_alpha(
+                step=global_step,
+                stage1_steps=args.stage1_steps,
+                transition_steps=args.transition_steps,
+                schedule=args.transition_schedule,
+            )
 
             # ── Ablation: re-initialize SiT body at Stage 1→2 transition ──
             if (current_stage == 2 and not _stage_reinit_done
@@ -581,7 +625,8 @@ def main(args):
             if accelerator.is_main_process and global_step % 1000 == 0:
                 logger.info(
                     f"Step {global_step}: stage = {current_stage} (switch at step {args.stage1_steps}), "
-                    f"align_mode = {current_align_mode}, repa_gate = {repa_gate:.3f}, kv_gate = {kv_gate:.3f}"
+                    f"align_mode = {current_align_mode}, transition_alpha = {transition_alpha:.3f}, "
+                    f"repa_gate = {repa_gate:.3f}, kv_gate = {kv_gate:.3f}"
                 )
 
             labels = y
@@ -646,6 +691,7 @@ def main(args):
                     enc_kv_list=enc_kv_list if kv_active else None,
                     stage=current_stage if kv_active else 2,  # Skip stage 1 if KV branch is off
                     align_mode=current_align_mode,
+                    transition_alpha=transition_alpha if kv_active else 1.0,
                 )
                 
                 denoising_loss, proj_loss_raw, distill_loss_raw, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
@@ -740,6 +786,7 @@ def main(args):
                     "repa_decay_gate": repa_decay_gate,
                     "kv_gate": kv_gate,
                     "kv_decay_gate": kv_decay_gate,
+                    "transition_alpha": transition_alpha,
                     "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "stage": current_stage,
                 }
@@ -797,6 +844,13 @@ def parse_args(input_args=None):
                              "weights are normalized to sum to 1")
     parser.add_argument("--stage1-steps", type=int, default=30000,
                         help="Number of steps for Stage 1 (e.g., 30000 for 100k total)")
+    parser.add_argument("--transition-steps", type=int, default=5000,
+                        help="Number of final Stage-1 steps used to cosine hand off "
+                             "encoder-guided attention to native SiT attention. "
+                             "Use 0 to keep a hard stage switch.")
+    parser.add_argument("--transition-schedule", type=str, default="cosine",
+                        choices=["cosine", "linear"],
+                        help="Schedule for the Stage-1 attention handoff.")
     parser.add_argument("--distill-coeff", type=float, default=1.0,
                         help="Coefficient for distillation loss (0 in Stage 1, this value in Stage 2)")
     parser.add_argument("--align-mode", type=str, default="attn_mse",
@@ -959,6 +1013,8 @@ def parse_args(input_args=None):
         parser.error("--kv-stop-fade-steps must be >= 0")
     if args.repa_stop_fade_steps < 0:
         parser.error("--repa-stop-fade-steps must be >= 0")
+    if args.transition_steps < 0:
+        parser.error("--transition-steps must be >= 0")
 
     for prefix in ("kv", "repa"):
         decay_start = getattr(args, f"{prefix}_decay_start_step")
