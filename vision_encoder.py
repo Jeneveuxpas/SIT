@@ -402,11 +402,21 @@ class DeiTIIIEncoder(VisionEncoder):
                 "Use deit3-b, deit3-b-in1k, or deit3-b-in22k."
             )
 
-        self.input_size = 224
         self.patch_size = 16
+        self.input_size = self.patch_size * (self.resolution // 16)
         model_name = model_map[self.model_config]
         self.model = timm.create_model(model_name, pretrained=True, num_classes=0).to(self.device)
         self.model.eval()
+
+        grid_size = self.input_size // self.patch_size
+        if hasattr(self.model, "pos_embed"):
+            self.model.pos_embed.data = timm.layers.pos_embed.resample_abs_pos_embed(
+                self.model.pos_embed.data, [grid_size, grid_size],
+            )
+        if hasattr(self.model, "patch_embed"):
+            self.model.patch_embed.img_size = (self.input_size, self.input_size)
+            self.model.patch_embed.grid_size = (grid_size, grid_size)
+            self.model.patch_embed.num_patches = grid_size * grid_size
 
         data_config = timm.data.resolve_model_data_config(self.model)
         self.mean = data_config.get("mean", IMAGENET_DEFAULT_MEAN)
