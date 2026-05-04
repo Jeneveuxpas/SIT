@@ -622,25 +622,52 @@ class MAEEncoder(VisionEncoder):
     """MAE encoder implementation"""
     
     def load_model(self):
-        from models.mae_vit import vit_large_patch16
+        from models.mae_vit import vit_base_patch16, vit_large_patch16, vit_huge_patch14
         import timm
 
         assert self.resolution == 256, "MAE only supports 256 resolution"
 
-        kwargs = dict(img_size=256)
-        self.model = vit_large_patch16(**kwargs).to(self.device)
+        model_config = self.model_config or "l"
+        if model_config in {"b", "base"}:
+            self.patch_size = 16
+            self.input_size = 256
+            self.model = vit_base_patch16(img_size=self.input_size).to(self.device)
+        elif model_config in {"l", "large"}:
+            self.patch_size = 16
+            self.input_size = 256
+            self.model = vit_large_patch16(img_size=self.input_size).to(self.device)
+        elif model_config in {"h", "huge"}:
+            self.patch_size = 14
+            self.input_size = 224
+            self.model = vit_huge_patch14(img_size=self.input_size).to(self.device)
+        else:
+            raise ValueError(f"Unknown MAE model config: {self.model_config}. Use mae-b, mae-l, or mae-h.")
         
-        with open(PRETRAINED_DIR / f"mae_vit{self.model_config}.pth", "rb") as f:
-            state_dict = torch.load(f, weights_only=False)
+        ckpt_config = {"base": "b", "large": "l", "huge": "h"}.get(model_config, model_config)
+        ckpt_path = PRETRAINED_DIR / f"mae_vit{ckpt_config}.pth"
+        if not ckpt_path.exists():
+            raise FileNotFoundError(
+                f"MAE checkpoint not found: {ckpt_path}. "
+                f"Place the MAE encoder checkpoint there or choose another --enc-type."
+            )
+        with open(ckpt_path, "rb") as f:
+            ckpt = torch.load(f, map_location="cpu", weights_only=False)
+
+        state_dict = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+        state_dict = {
+            k: v for k, v in state_dict.items()
+            if not k.startswith(("decoder_", "mask_token"))
+        }
         
-        if 'pos_embed' in state_dict["model"].keys():
-            state_dict["model"]['pos_embed'] = timm.layers.pos_embed.resample_abs_pos_embed(
-                state_dict["model"]['pos_embed'], [16, 16],
+        grid_size = self.input_size // self.patch_size
+        if 'pos_embed' in state_dict:
+            state_dict['pos_embed'] = timm.layers.pos_embed.resample_abs_pos_embed(
+                state_dict['pos_embed'], [grid_size, grid_size],
             )
         
-        self.model.load_state_dict(state_dict["model"])
+        self.model.load_state_dict(state_dict, strict=False)
         self.model.pos_embed.data = timm.layers.pos_embed.resample_abs_pos_embed(
-            self.model.pos_embed.data, [16, 16],
+            self.model.pos_embed.data, [grid_size, grid_size],
         )
         
         self._embed_dim = self.model.embed_dim
@@ -648,6 +675,7 @@ class MAEEncoder(VisionEncoder):
         
     def preprocess(self, x: torch.Tensor) -> torch.Tensor:
         x = x / 255.
+        x = torch.nn.functional.interpolate(x, self.input_size, mode='bicubic')
         x = Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)(x)
         return x
     

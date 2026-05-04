@@ -844,7 +844,7 @@ def parse_args(input_args=None):
                              "weights are normalized to sum to 1")
     parser.add_argument("--stage1-steps", type=int, default=30000,
                         help="Number of steps for Stage 1 (e.g., 30000 for 100k total)")
-    parser.add_argument("--transition-steps", type=int, default=5000,
+    parser.add_argument("--transition-steps", type=int, default=0,
                         help="Number of final Stage-1 steps used to cosine hand off "
                              "encoder-guided attention to native SiT attention. "
                              "Use 0 to keep a hard stage switch.")
