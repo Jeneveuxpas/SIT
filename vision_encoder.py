@@ -17,13 +17,26 @@ _LEGACY_PRETRAINED_DIR = _FILE_DIR.parent / "pretrained_models"
 PRETRAINED_DIR = _PRETRAINED_DIR if _PRETRAINED_DIR.exists() else _LEGACY_PRETRAINED_DIR
 
 
-def resample_vit_pos_embed_with_cls(pos_embed: torch.Tensor, new_grid_size: int) -> torch.Tensor:
-    """Resize ViT absolute pos embed while preserving the leading CLS token."""
-    cls_pos = pos_embed[:, :1]
-    patch_pos = pos_embed[:, 1:]
+def infer_vit_pos_embed_prefix_tokens(pos_embed: torch.Tensor) -> int:
+    """Infer whether a ViT pos embed is patch-only or has one leading CLS token."""
+    num_tokens = pos_embed.shape[1]
+    grid_size = int(num_tokens ** 0.5)
+    if grid_size * grid_size == num_tokens:
+        return 0
+
+    grid_size = int((num_tokens - 1) ** 0.5)
+    if grid_size * grid_size == num_tokens - 1:
+        return 1
+
+    raise ValueError(f"Cannot infer square pos_embed grid from shape {pos_embed.shape}")
+
+
+def resample_vit_pos_embed(pos_embed: torch.Tensor, new_grid_size: int) -> torch.Tensor:
+    """Resize ViT absolute pos embed, preserving an optional leading CLS token."""
+    num_prefix_tokens = infer_vit_pos_embed_prefix_tokens(pos_embed)
+    prefix_pos = pos_embed[:, :num_prefix_tokens]
+    patch_pos = pos_embed[:, num_prefix_tokens:]
     old_grid_size = int(patch_pos.shape[1] ** 0.5)
-    if old_grid_size * old_grid_size != patch_pos.shape[1]:
-        raise ValueError(f"Cannot infer square pos_embed grid from shape {pos_embed.shape}")
     if old_grid_size == new_grid_size:
         return pos_embed
 
@@ -35,7 +48,10 @@ def resample_vit_pos_embed_with_cls(pos_embed: torch.Tensor, new_grid_size: int)
         align_corners=False,
     )
     patch_pos = patch_pos.permute(0, 2, 3, 1).reshape(1, new_grid_size * new_grid_size, -1)
-    return torch.cat([cls_pos, patch_pos.to(dtype=cls_pos.dtype)], dim=1)
+    patch_pos = patch_pos.to(dtype=pos_embed.dtype)
+    if num_prefix_tokens == 0:
+        return patch_pos
+    return torch.cat([prefix_pos, patch_pos], dim=1)
 
 
 def fix_mocov3_state_dict(state_dict):
@@ -431,9 +447,13 @@ class DeiTIIIEncoder(VisionEncoder):
 
         grid_size = self.input_size // self.patch_size
         if hasattr(self.model, "pos_embed"):
-            self.model.pos_embed.data = resample_vit_pos_embed_with_cls(
+            self.num_prefix_tokens = infer_vit_pos_embed_prefix_tokens(self.model.pos_embed.data)
+            self.model.num_prefix_tokens = self.num_prefix_tokens
+            self.model.pos_embed.data = resample_vit_pos_embed(
                 self.model.pos_embed.data, grid_size
             )
+        else:
+            self.num_prefix_tokens = getattr(self.model, "num_prefix_tokens", 0)
         if hasattr(self.model, "patch_embed"):
             self.model.patch_embed.img_size = (self.input_size, self.input_size)
             self.model.patch_embed.grid_size = (grid_size, grid_size)
@@ -452,8 +472,17 @@ class DeiTIIIEncoder(VisionEncoder):
 
     def forward_features(self, x: torch.Tensor) -> Dict[str, Optional[torch.Tensor]]:
         out = self.model.forward_features(x)
-        cls_token = out[:, 0]
-        patch_tokens = out[:, 1:]
+        expected_patches = (self.input_size // self.patch_size) ** 2
+        if out.shape[1] == expected_patches + 1:
+            cls_token = out[:, 0]
+            patch_tokens = out[:, 1:]
+        elif out.shape[1] == expected_patches:
+            cls_token = None
+            patch_tokens = out
+        else:
+            num_prefix_tokens = getattr(self, "num_prefix_tokens", 0)
+            cls_token = out[:, 0] if num_prefix_tokens > 0 else None
+            patch_tokens = out[:, num_prefix_tokens:]
         return {
             'x_norm_clstoken': cls_token,
             'x_norm_patchtokens': patch_tokens,
