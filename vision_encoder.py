@@ -12,7 +12,9 @@ CLIP_DEFAULT_STD = (0.26862954, 0.26130258, 0.27577711)
 
 # Compute pretrained models directory relative to this file
 _FILE_DIR = Path(__file__).resolve().parent
-PRETRAINED_DIR = _FILE_DIR.parent / "pretrained_models"
+_PRETRAINED_DIR = _FILE_DIR / "pretrained_models"
+_LEGACY_PRETRAINED_DIR = _FILE_DIR.parent / "pretrained_models"
+PRETRAINED_DIR = _PRETRAINED_DIR if _PRETRAINED_DIR.exists() else _LEGACY_PRETRAINED_DIR
 
 
 def fix_mocov3_state_dict(state_dict):
