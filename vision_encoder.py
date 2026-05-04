@@ -411,7 +411,7 @@ class DeiTIIIEncoder(VisionEncoder):
         grid_size = self.input_size // self.patch_size
         if hasattr(self.model, "pos_embed"):
             self.model.pos_embed.data = timm.layers.pos_embed.resample_abs_pos_embed(
-                self.model.pos_embed.data, [grid_size, grid_size],
+                self.model.pos_embed.data, [grid_size, grid_size], num_prefix_tokens=1,
             )
         if hasattr(self.model, "patch_embed"):
             self.model.patch_embed.img_size = (self.input_size, self.input_size)
