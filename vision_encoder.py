@@ -17,6 +17,27 @@ _LEGACY_PRETRAINED_DIR = _FILE_DIR.parent / "pretrained_models"
 PRETRAINED_DIR = _PRETRAINED_DIR if _PRETRAINED_DIR.exists() else _LEGACY_PRETRAINED_DIR
 
 
+def resample_vit_pos_embed_with_cls(pos_embed: torch.Tensor, new_grid_size: int) -> torch.Tensor:
+    """Resize ViT absolute pos embed while preserving the leading CLS token."""
+    cls_pos = pos_embed[:, :1]
+    patch_pos = pos_embed[:, 1:]
+    old_grid_size = int(patch_pos.shape[1] ** 0.5)
+    if old_grid_size * old_grid_size != patch_pos.shape[1]:
+        raise ValueError(f"Cannot infer square pos_embed grid from shape {pos_embed.shape}")
+    if old_grid_size == new_grid_size:
+        return pos_embed
+
+    patch_pos = patch_pos.reshape(1, old_grid_size, old_grid_size, -1).permute(0, 3, 1, 2)
+    patch_pos = torch.nn.functional.interpolate(
+        patch_pos.float(),
+        size=(new_grid_size, new_grid_size),
+        mode="bicubic",
+        align_corners=False,
+    )
+    patch_pos = patch_pos.permute(0, 2, 3, 1).reshape(1, new_grid_size * new_grid_size, -1)
+    return torch.cat([cls_pos, patch_pos.to(dtype=cls_pos.dtype)], dim=1)
+
+
 def fix_mocov3_state_dict(state_dict):
     for k in list(state_dict.keys()):
         # retain only base_encoder up to before the embedding layer
@@ -410,8 +431,8 @@ class DeiTIIIEncoder(VisionEncoder):
 
         grid_size = self.input_size // self.patch_size
         if hasattr(self.model, "pos_embed"):
-            self.model.pos_embed.data = timm.layers.pos_embed.resample_abs_pos_embed(
-                self.model.pos_embed.data, [grid_size, grid_size], num_prefix_tokens=1,
+            self.model.pos_embed.data = resample_vit_pos_embed_with_cls(
+                self.model.pos_embed.data, grid_size
             )
         if hasattr(self.model, "patch_embed"):
             self.model.patch_embed.img_size = (self.input_size, self.input_size)
