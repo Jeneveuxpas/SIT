@@ -382,6 +382,51 @@ class CLIPEncoder(VisionEncoder):
         }
 
 
+class DeiTIIIEncoder(VisionEncoder):
+    """DeiT-III supervised ViT encoder implemented via timm."""
+
+    def load_model(self):
+        model_map = {
+            "b": "deit3_base_patch16_224.fb_in1k",
+            "base": "deit3_base_patch16_224.fb_in1k",
+            "b-in1k": "deit3_base_patch16_224.fb_in1k",
+            "base-in1k": "deit3_base_patch16_224.fb_in1k",
+            "b-in22k": "deit3_base_patch16_224.fb_in22k_ft_in1k",
+            "base-in22k": "deit3_base_patch16_224.fb_in22k_ft_in1k",
+        }
+        if self.model_config not in model_map:
+            raise ValueError(
+                f"Unknown DeiT-III model config: {self.model_config}. "
+                "Use deit3-b, deit3-b-in1k, or deit3-b-in22k."
+            )
+
+        self.input_size = 224
+        self.patch_size = 16
+        model_name = model_map[self.model_config]
+        self.model = timm.create_model(model_name, pretrained=True, num_classes=0).to(self.device)
+        self.model.eval()
+
+        data_config = timm.data.resolve_model_data_config(self.model)
+        self.mean = data_config.get("mean", IMAGENET_DEFAULT_MEAN)
+        self.std = data_config.get("std", IMAGENET_DEFAULT_STD)
+        self._embed_dim = getattr(self.model, "embed_dim", self.model.num_features)
+
+    def preprocess(self, x: torch.Tensor) -> torch.Tensor:
+        x = x / 255.
+        x = torch.nn.functional.interpolate(x, self.input_size, mode='bicubic')
+        x = Normalize(self.mean, self.std)(x)
+        return x
+
+    def forward_features(self, x: torch.Tensor) -> Dict[str, Optional[torch.Tensor]]:
+        out = self.model.forward_features(x)
+        cls_token = out[:, 0]
+        patch_tokens = out[:, 1:]
+        return {
+            'x_norm_clstoken': cls_token,
+            'x_norm_patchtokens': patch_tokens,
+        }
+
+
 class MoCoV3Encoder(VisionEncoder):
     """MoCoV3 encoder implementation"""
     
@@ -1178,6 +1223,7 @@ ENCODER_REGISTRY = {
     'siglip': SigLIPEncoder,
     'siglip2': SigLIP2Encoder,
     'clip': CLIPEncoder,
+    'deit3': DeiTIIIEncoder,
     'mocov3': MoCoV3Encoder,
     'mae': MAEEncoder,
     'jepa': JEPAEncoder,
