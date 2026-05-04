@@ -132,6 +132,15 @@ class EncoderKVExtractor(nn.Module):
             else:
                 # Try to find something that looks like attention
                 raise NotImplementedError(f"Could not find supported attention block in {type(block)}")
+
+    def _get_prefix_token_count(self) -> int:
+        prefix_tokens = getattr(self.encoder_model, "num_prefix_tokens", None)
+        if prefix_tokens is not None:
+            return int(prefix_tokens)
+        cls_token = getattr(self.encoder_model, "cls_token", None)
+        if cls_token is not None:
+            return 1
+        return 0
     
     def get_layer_dim(self, idx: int) -> int:
         """Get the embedding dimension of the specified layer's K/V output."""
@@ -242,10 +251,12 @@ class EncoderKVExtractor(nn.Module):
             qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, heads, N, head_dim)
             q, k, v = qkv.unbind(0)
             
-            # Remove CLS token (first token) - DINO has 257 tokens, we need 256
-            q = q[:, :, 1:, :]  # Skip CLS token
-            k = k[:, :, 1:, :]  # Skip CLS token
-            v = v[:, :, 1:, :]  # Skip CLS token
+            # Remove prefix tokens if present (CLS/register tokens). Some supervised ViTs are patch-only.
+            prefix_tokens = self._get_prefix_token_count()
+            if prefix_tokens > 0:
+                q = q[:, :, prefix_tokens:, :]
+                k = k[:, :, prefix_tokens:, :]
+                v = v[:, :, prefix_tokens:, :]
             
             # Store Q, K, V (B, heads, num_patches, head_dim)
             self.captured_kv[layer_idx] = (q.detach(), k.detach(), v.detach())
