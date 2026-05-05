@@ -122,7 +122,8 @@ class AttentionWithEncoderKV(nn.Module):
         time_input: Optional[torch.Tensor] = None,
         path_type: str = "linear",
         kv_replace_mode: str = "kv",
-        transition_alpha: float = 0.0,
+        transition_alpha: Optional[torch.Tensor] = None,
+        transition_active: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward attention with staged Encoder-KV training.
@@ -162,10 +163,10 @@ class AttentionWithEncoderKV(nn.Module):
         
         if stage == 1 and has_enc:
             q_teacher, k_teacher, v_teacher = _select_qkv(q_enc, k_enc, v_enc)
-            if transition_alpha > 0.0:
-                alpha = float(max(0.0, min(1.0, transition_alpha)))
+            if transition_active:
                 attn_enc = self._compute_attn_output(q_teacher, k_teacher, v_teacher)
                 attn_sit = self._compute_attn_output(q_sit, k_sit, v_sit)
+                alpha = transition_alpha.to(device=attn_sit.device, dtype=attn_sit.dtype)
                 attn_out = (1.0 - alpha) * attn_enc + alpha * attn_sit
             else:
                 q, k, v = q_teacher, k_teacher, v_teacher
@@ -302,7 +303,8 @@ class SiTBlockWithEncoderKV(nn.Module):
         align_mode: str = 'attn_mse',
         time_input: Optional[torch.Tensor] = None,
         path_type: str = "linear",
-        transition_alpha: float = 0.0,
+        transition_alpha: Optional[torch.Tensor] = None,
+        transition_active: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass.
@@ -333,6 +335,7 @@ class SiTBlockWithEncoderKV(nn.Module):
             path_type=path_type,
             kv_replace_mode=self.kv_replace_mode,
             transition_alpha=transition_alpha,
+            transition_active=transition_active,
         )
         x = x + gate_msa.unsqueeze(1) * attn_out
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
@@ -533,7 +536,8 @@ class SiTWithEncoderKV(nn.Module):
         enc_kv_list: Optional[List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = None,
         stage: int = 2,
         align_mode: str = 'attn_mse',
-        transition_alpha: float = 0.0,
+        transition_alpha: Optional[torch.Tensor] = None,
+        transition_active: bool = False,
         return_logvar: bool = False,
     ):
         """
@@ -564,6 +568,7 @@ class SiTWithEncoderKV(nn.Module):
                 x, c, enc_kv=enc_kv, stage=stage, align_mode=align_mode,
                 time_input=t, path_type=self.path_type,
                 transition_alpha=transition_alpha,
+                transition_active=transition_active,
             )
             
             if block_distill_loss is not None:

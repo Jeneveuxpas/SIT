@@ -686,12 +686,19 @@ def main(args):
                                 zs.append(z)
 
             with accelerator.accumulate(model):
+                transition_active = kv_active and current_stage == 1 and transition_alpha > 0.0
+                transition_alpha_tensor = torch.tensor(
+                    transition_alpha if kv_active else 1.0,
+                    device=device,
+                    dtype=x.dtype,
+                )
                 model_kwargs = dict(
                     y=labels,
                     enc_kv_list=enc_kv_list if kv_active else None,
                     stage=current_stage if kv_active else 2,  # Skip stage 1 if KV branch is off
                     align_mode=current_align_mode,
-                    transition_alpha=transition_alpha if kv_active else 1.0,
+                    transition_alpha=transition_alpha_tensor,
+                    transition_active=transition_active,
                 )
                 
                 denoising_loss, proj_loss_raw, distill_loss_raw, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
