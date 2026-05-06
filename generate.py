@@ -114,6 +114,15 @@ def main(args):
     torch.cuda.set_device(device_id)
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
+    if args.inference_dtype == "fp32":
+        inference_dtype = torch.float32
+    elif args.inference_dtype == "bf16":
+        inference_dtype = torch.bfloat16
+    elif args.inference_dtype == "fp16":
+        inference_dtype = torch.float16
+    else:
+        raise ValueError(f"Unknown inference dtype: {args.inference_dtype}")
+
     # Load checkpoint and extract saved args for auto-config
     ckpt_path = args.ckpt
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
@@ -157,7 +166,7 @@ def main(args):
         use_cfg=True,
         eval_mode=True,
         **block_kwargs,
-    ).to(device)
+    ).to(device=device, dtype=inference_dtype)
     
     # Load DINOKV checkpoint with strict=False (ignores DINO-KV specific weights)
     state_dict = ckpt['ema']
@@ -181,6 +190,8 @@ def main(args):
         if unexpected:
             print(f"Unexpected keys: {unexpected}")
     model.eval()
+    if rank == 0:
+        print(f"Inference dtype: {args.inference_dtype}")
 
     # Load VAE
     vae, latents_scale, latents_bias = load_vae(device=device, vae_name=args.vae)
@@ -190,7 +201,8 @@ def main(args):
     # Create output folder
     ckpt_string_name = os.path.basename(args.ckpt).replace(".pt", "") if args.ckpt else "pretrained"
     cfg_intv = "" if args.guidance_low == 0. and args.guidance_high == 1. else f"_{args.guidance_low}_{args.guidance_high}"
-    hparams = f"vae{args.vae}-cfg{args.cfg_scale}{cfg_intv}-seed{args.global_seed}-mode{args.mode}-steps{args.num_steps}_{ckpt_string_name}"
+    dtype_suffix = "" if args.inference_dtype == "fp32" else f"-{args.inference_dtype}"
+    hparams = f"vae{args.vae}-cfg{args.cfg_scale}{cfg_intv}-seed{args.global_seed}-mode{args.mode}{dtype_suffix}-steps{args.num_steps}_{ckpt_string_name}"
     exp_name = os.path.basename(os.path.normpath(args.ckpt.rsplit("checkpoints")[0]))
     sample_folder_dir = f"{args.sample_dir}/{exp_name}_{hparams}"
     if rank == 0:
@@ -213,7 +225,7 @@ def main(args):
     total_generated = 0
 
     for _ in pbar:
-        z = torch.randn(n, model.in_channels, latent_size, latent_size, device=device)
+        z = torch.randn(n, model.in_channels, latent_size, latent_size, device=device, dtype=inference_dtype)
         y = torch.randint(0, args.num_classes, (n,), device=device)
 
         sampling_kwargs = dict(
@@ -258,6 +270,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--inference-dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16"])
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--sample-dir", type=str, default="samples")
     

@@ -43,6 +43,7 @@ GUIDANCE_HIGH="${GUIDANCE_HIGH:-1.0}"
 MODE="${MODE:-sde}"
 VAE="${VAE:-mse}"
 REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
+INFERENCE_DTYPE="${INFERENCE_DTYPE:-fp32}"
 
 # 解析命令行参数
 EVAL_ALL="false"
@@ -119,6 +120,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --ref-batch)
             REF_BATCH="$2"
+            shift 2
+            ;;
+        --inference-dtype)
+            INFERENCE_DTYPE="$2"
             shift 2
             ;;
         *)
@@ -201,6 +206,7 @@ echo "实验名: ${EXP_NAME}"
 echo "GPU: ${GPU} (${NUM_GPUS} GPUs)"
 echo "Seed: ${SEED}"
 echo "VAE: ${VAE}"
+echo "Inference dtype: ${INFERENCE_DTYPE}"
 echo "Guidance interval: [${GUIDANCE_LOW}, ${GUIDANCE_HIGH}]"
 echo "待评估 checkpoints: ${CKPT_LIST[*]}"
 echo "总计: ${#CKPT_LIST[@]} 个"
@@ -267,6 +273,7 @@ for STEP in "${CKPT_LIST[@]}"; do
         --global-seed ${SEED} \
         --guidance-low ${GUIDANCE_LOW} \
         --guidance-high ${GUIDANCE_HIGH} \
+        --inference-dtype ${INFERENCE_DTYPE} \
         --resolution ${RESOLUTION} \
         --sample-dir ${CKPT_DIR}
 
@@ -276,7 +283,12 @@ for STEP in "${CKPT_LIST[@]}"; do
     else
         CFG_INTV="_${GUIDANCE_LOW}_${GUIDANCE_HIGH}"
     fi
-    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_vae${VAE}-cfg${CFG_SCALE}${CFG_INTV}-seed${SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
+    if [ "${INFERENCE_DTYPE}" = "fp32" ]; then
+        DTYPE_SUFFIX=""
+    else
+        DTYPE_SUFFIX="-${INFERENCE_DTYPE}"
+    fi
+    SAMPLE_NPZ="${CKPT_DIR}/${EXP_NAME}_vae${VAE}-cfg${CFG_SCALE}${CFG_INTV}-seed${SEED}-mode${MODE}${DTYPE_SUFFIX}-steps${EVAL_NUM_STEPS}_${STEP}.npz"
 
     if [ -f "$SAMPLE_NPZ" ]; then
         echo "计算 FID..."
