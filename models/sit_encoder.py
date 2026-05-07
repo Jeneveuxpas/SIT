@@ -319,8 +319,9 @@ class SiTBlockWithEncoderKV(nn.Module):
         q_enc, k_enc, v_enc = None, None, None
         if self.has_enc_kv and enc_kv is not None and self.training:
             q_raw, k_raw, v_raw = enc_kv
+            proj_stage = 1 if (stage == 2 and self.attn.train_kv_proj_in_stage2) else stage
             q_enc, k_enc, v_enc = self.kv_proj(
-                q_enc=q_raw, k_enc=k_raw, v_enc=v_raw, stage=stage, c=c,
+                q_enc=q_raw, k_enc=k_raw, v_enc=v_raw, stage=proj_stage, c=c,
             )
         
         # Attention with stage-based Q/K/V selection
@@ -590,6 +591,15 @@ class SiTWithEncoderKV(nn.Module):
         return x, zs, zs_original, accumulated_distill_loss
 
 
+def SiT_H_2_EncoderKV(**kwargs):
+    return SiTWithEncoderKV(depth=32, hidden_size=1280, decoder_hidden_size=1280, patch_size=2, num_heads=16, **kwargs)
+
+def SiT_H_4_EncoderKV(**kwargs):
+    return SiTWithEncoderKV(depth=32, hidden_size=1280, decoder_hidden_size=1280, patch_size=4, num_heads=16, **kwargs)
+
+def SiT_H_8_EncoderKV(**kwargs):
+    return SiTWithEncoderKV(depth=32, hidden_size=1280, decoder_hidden_size=1280, patch_size=8, num_heads=16, **kwargs)
+
 def SiT_XL_2_EncoderKV(**kwargs):
     return SiTWithEncoderKV(depth=28, hidden_size=1152, decoder_hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
 
@@ -628,6 +638,7 @@ def SiT_S_8_EncoderKV(**kwargs):
 
 
 SiT_EncoderKV_models = {
+    'SiT-H/2-EncoderKV':  SiT_H_2_EncoderKV,   'SiT-H/4-EncoderKV':  SiT_H_4_EncoderKV,   'SiT-H/8-EncoderKV':  SiT_H_8_EncoderKV,
     'SiT-XL/2-EncoderKV': SiT_XL_2_EncoderKV,  'SiT-XL/4-EncoderKV': SiT_XL_4_EncoderKV,  'SiT-XL/8-EncoderKV': SiT_XL_8_EncoderKV,
     'SiT-L/2-EncoderKV':  SiT_L_2_EncoderKV,   'SiT-L/4-EncoderKV':  SiT_L_4_EncoderKV,   'SiT-L/8-EncoderKV':  SiT_L_8_EncoderKV,
     'SiT-B/2-EncoderKV':  SiT_B_2_EncoderKV,   'SiT-B/4-EncoderKV':  SiT_B_4_EncoderKV,   'SiT-B/8-EncoderKV':  SiT_B_8_EncoderKV,
