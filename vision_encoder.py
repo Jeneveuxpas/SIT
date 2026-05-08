@@ -389,11 +389,25 @@ class CLIPEncoder(VisionEncoder):
         import clip
         from models.clip_vit import UpdatedVisionTransformer
         import timm
-        
-        encoder_ = clip.load(f"ViT-{self.model_config}/14", device='cpu')[0].visual
+
+        model_config = self.model_config.lower()
+        model_map = {
+            "b": "ViT-B/16",
+            "base": "ViT-B/16",
+            "b16": "ViT-B/16",
+            "b32": "ViT-B/32",
+            "l": "ViT-L/14",
+            "large": "ViT-L/14",
+            "l14": "ViT-L/14",
+            "l14@336px": "ViT-L/14@336px",
+        }
+        model_name = model_map.get(model_config, self.model_config)
+        encoder_ = clip.load(model_name, device='cpu')[0].visual
         self.model = UpdatedVisionTransformer(encoder_).to(self.device)
 
-        patch_resolution = 16 * (self.resolution // 256)
+        patch_size = self.model.model.conv1.kernel_size[0]
+        patch_resolution = self.resolution // 16
+        self.input_size = patch_resolution * patch_size
         self.model.model.positional_embedding.data = timm.layers.pos_embed.resample_abs_pos_embed(
             self.model.model.positional_embedding.data.unsqueeze(0), [patch_resolution, patch_resolution],
         ).squeeze(0)
@@ -404,8 +418,7 @@ class CLIPEncoder(VisionEncoder):
         # Normalize to [0, 1]
         x = x / 255.
         # Interpolate for CLIP
-        resolution = x.shape[-1]
-        x = torch.nn.functional.interpolate(x, 224 * (resolution // 256), mode='bicubic')
+        x = torch.nn.functional.interpolate(x, self.input_size, mode='bicubic')
         # Apply CLIP normalization
         x = Normalize(CLIP_DEFAULT_MEAN, CLIP_DEFAULT_STD)(x)
         return x
