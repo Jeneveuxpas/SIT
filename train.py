@@ -214,6 +214,32 @@ def get_stage1_transition_alpha(
     raise ValueError(f"Unknown transition schedule: {schedule}")
 
 
+def get_distill_warmup_multiplier(
+    step: int,
+    stage1_steps: int,
+    warmup_steps: int = 0,
+    schedule: str = "linear",
+) -> float:
+    """
+    Ramp Stage-2 distillation from 0 to 1 after the Stage-1/2 boundary.
+
+    This only gates the distillation loss coefficient; it does not change the
+    attention path itself.
+    """
+    if step < stage1_steps:
+        return 0.0
+    if warmup_steps <= 0:
+        return 1.0
+
+    progress = (step - stage1_steps) / max(1, warmup_steps)
+    progress = min(1.0, max(0.0, progress))
+    if schedule == "linear":
+        return progress
+    if schedule == "cosine":
+        return 0.5 * (1.0 - math.cos(math.pi * progress))
+    raise ValueError(f"Unknown distill warmup schedule: {schedule}")
+
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -384,6 +410,11 @@ def main(args):
             logger.info(
                 "Stage-1 attention handoff: "
                 f"last {args.transition_steps} steps with {args.transition_schedule} schedule"
+            )
+        if args.distill_warmup_steps > 0:
+            logger.info(
+                "Stage-2 distillation warmup: "
+                f"{args.distill_warmup_steps} steps with {args.distill_warmup_schedule} schedule"
             )
         if sit_layer_loss_weights is not None:
             logger.info(f"Stage-2 per-layer distill weights (normalized): {sit_layer_loss_weights}")
@@ -618,6 +649,12 @@ def main(args):
                 final_scale=args.kv_final_scale,
             )
             kv_gate = kv_stop_gate * kv_decay_gate
+            distill_warmup_gate = get_distill_warmup_multiplier(
+                step=global_step,
+                stage1_steps=args.stage1_steps,
+                warmup_steps=args.distill_warmup_steps,
+                schedule=args.distill_warmup_schedule,
+            )
             repa_active = args.repa_loss and repa_gate > 0.0
             kv_active = args.use_kv and (current_stage == 1 or kv_gate > 0.0)
 
@@ -626,7 +663,8 @@ def main(args):
                 logger.info(
                     f"Step {global_step}: stage = {current_stage} (switch at step {args.stage1_steps}), "
                     f"align_mode = {current_align_mode}, transition_alpha = {transition_alpha:.3f}, "
-                    f"repa_gate = {repa_gate:.3f}, kv_gate = {kv_gate:.3f}"
+                    f"repa_gate = {repa_gate:.3f}, kv_gate = {kv_gate:.3f}, "
+                    f"distill_warmup_gate = {distill_warmup_gate:.3f}"
                 )
 
             labels = y
@@ -705,9 +743,9 @@ def main(args):
                 denoising_loss_mean = denoising_loss.mean()
                 proj_loss = proj_loss_raw * repa_gate
                 
-                # Distillation coefficient: 0 in Stage 1, fixed coefficient in Stage 2.
+                # Distillation coefficient: 0 in Stage 1, optionally warmed up in Stage 2.
                 base_distill_coeff = args.distill_coeff if current_stage == 2 else 0.0
-                current_distill_coeff = base_distill_coeff * kv_gate
+                current_distill_coeff = base_distill_coeff * kv_gate * distill_warmup_gate
                 distill_loss = distill_loss_raw * current_distill_coeff
 
                 # Total loss
@@ -793,6 +831,8 @@ def main(args):
                     "repa_decay_gate": repa_decay_gate,
                     "kv_gate": kv_gate,
                     "kv_decay_gate": kv_decay_gate,
+                    "distill_warmup_gate": distill_warmup_gate,
+                    "distill_coeff": current_distill_coeff,
                     "transition_alpha": transition_alpha,
                     "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "stage": current_stage,
@@ -860,6 +900,12 @@ def parse_args(input_args=None):
                         help="Schedule for the Stage-1 attention handoff.")
     parser.add_argument("--distill-coeff", type=float, default=1.0,
                         help="Coefficient for distillation loss (0 in Stage 1, this value in Stage 2)")
+    parser.add_argument("--distill-warmup-steps", type=int, default=0,
+                        help="Number of Stage-2 steps used to ramp distillation loss "
+                             "from 0 to distill-coeff. Use 0 for hard switch.")
+    parser.add_argument("--distill-warmup-schedule", type=str, default="linear",
+                        choices=["linear", "cosine"],
+                        help="Schedule for Stage-2 distillation warmup.")
     parser.add_argument("--align-mode", type=str, default="attn_mse",
                         choices=["logits", "attn_mse", "attn_cosine", "snr_attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
                         help="Alignment mode: logits, attn_mse, attn_cosine, snr_attn_mse, attn_kl, kv_mse, attn_hybrid")
@@ -1022,6 +1068,8 @@ def parse_args(input_args=None):
         parser.error("--repa-stop-fade-steps must be >= 0")
     if args.transition_steps < 0:
         parser.error("--transition-steps must be >= 0")
+    if args.distill_warmup_steps < 0:
+        parser.error("--distill-warmup-steps must be >= 0")
 
     for prefix in ("kv", "repa"):
         decay_start = getattr(args, f"{prefix}_decay_start_step")
