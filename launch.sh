@@ -4,7 +4,7 @@
 # iREPA 统一启动脚本 - 训练 + 评估
 #
 # 用法: 
-#   ./launch.sh --config configs/SIT-XL-kv-2.0-repa-0.5.yaml --exp-name SIT-XL-kv-2.0-repa-0.5 --gpu 0,1,2,3,4,5,6,7 --num-gpus 8
+#   ./launch.sh --config configs/sit-xl-routing-stage1-stage2-irepa.yaml --exp-name sit-xl-routing-stage1-stage2-irepa --gpu 0,1,2,3,4,5,6,7 --num-gpus 8
 #   
 # Historical configs are under configs_legacy/.
 

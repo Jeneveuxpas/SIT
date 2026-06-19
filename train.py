@@ -1039,7 +1039,7 @@ def parse_args(input_args=None):
 
     # config file (YAML)
     parser.add_argument("--config", type=str, default=None,
-        help="Path to YAML config file (e.g., configs/SIT-XL-kv-2.0-repa-0.5.yaml)")
+        help="Path to YAML config file (e.g., configs/sit-xl-routing-stage1-stage2-irepa.yaml)")
 
     # First parse to get config file path
     if input_args is not None:
