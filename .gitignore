@@ -1,0 +1,33 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.class
+
+# Jupyter/editor scratch files
+.ipynb_checkpoints/
+*.swp
+*.swo
+
+# Experiment tracking and outputs
+exps/
+exps_old/
+wandb/
+runs/
+outputs/
+samples/
+**/checkpoints/
+
+# Model weights, generated sample batches, and large binary artifacts
+pretrained_models/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.npz
+*.npy
+*.pb
+
+# Local reference/evaluation artifacts
+VIRTUAL_imagenet*_labeled.npz
+VIRTUAL_imagenet*.npz
+classify_image_graph_def.pb
