@@ -540,7 +540,7 @@ def main(args):
     if accelerator.is_main_process:
         tracker_config = vars(copy.deepcopy(args))
         accelerator.init_trackers(
-            project_name="iREPA-ENCODERKV", 
+            project_name=args.wandb_project,
             config=tracker_config,
             init_kwargs={
                 "wandb": {"name": f"{args.exp_name}"}
@@ -884,6 +884,7 @@ def parse_args(input_args=None):
     parser.add_argument("--exp-name", type=str, required=True)
     parser.add_argument("--logging-dir", type=str, default="logs")
     parser.add_argument("--report-to", type=str, default="wandb")
+    parser.add_argument("--wandb-project", type=str, default="attnscaf")
     parser.add_argument("--sampling-steps", type=int, default=10000)
     parser.add_argument("--resume-step", type=int, default=0)
     parser.add_argument("--n-samples", type=int, default=256)
