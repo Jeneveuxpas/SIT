@@ -1,5 +1,8 @@
-# iREPA with Encoder KV Distillation - Default Configuration
-# Usage: python train.py --config configs/default.yaml --exp-name my_experiment
+# iREPA with MAE Encoder KV Distillation - Default Configuration
+# Usage: python train.py --config configs/SIT-XL-MAE-B.yaml --exp-name SIT-XL-MAE-B
+#
+# Requires local checkpoint:
+#   pretrained_models/mae_vitl.pth
 
 # ============================================================================
 # Model Configuration
@@ -15,19 +18,20 @@ proj-kwargs-kernel-size: 3
 # ============================================================================
 # Encoder KV Configuration
 # ============================================================================
-enc-type: dinov2-b
-enc-layer-indices: "12"     # Encoder layer for K/V extraction (1-based)
-sit-layer-indices: "4"     # SiT layer for K/V injection (1-based)
-stage1-steps: 30000          # Number of steps for Stage 1
+enc-type: mae-b
+enc-layer-indices: "12"     # MAE-L encoder layer for Q/K/V extraction (1-based)
+sit-layer-indices: "4"      # SiT layer for Q/K/V injection (1-based)
+stage1-steps: 30000         # Number of steps for Stage 1
+transition-steps: 0         # Set to 5000 to enable final-Stage-1 cosine handoff
 distill-coeff: 2.0          # Coefficient for attention distillation loss
 
-# Alignment mode: logits, attn_mse, kv_mse
+# Alignment mode: attn_mse, kv_mse
 align-mode: attn_mse
 
 # K/V projection: linear, mlp, conv
 kv-proj-type: linear
 kv-proj-kernel-size: 1
-kv-norm-type: none     # none, layernorm, zscore_spatial, zscore_token, batchnorm
+kv-norm-type: none          # none, layernorm, rmsnorm, zscore, zscore_token, batchnorm
 kv-zscore-alpha: 1.0
 
 # ============================================================================
@@ -36,7 +40,7 @@ kv-zscore-alpha: 1.0
 repa-loss: true
 proj-coeff: "0.5"
 projection-loss-type: cosine_v    # cosine, mse, mse_v, mse_noisy
-spnorm-method: zscore           # none, zscore, zscore_token, layernorm
+spnorm-method: zscore             # none, zscore, zscore_token, layernorm
 zscore-alpha: 0.6
 
 # ============================================================================

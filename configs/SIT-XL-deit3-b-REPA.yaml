@@ -1,5 +1,5 @@
-# iREPA with Encoder KV Distillation - Default Configuration
-# Usage: python train.py --config configs/default.yaml --exp-name my_experiment
+# Pure REPA (no KV distillation, no 2-stage)
+# Usage: ./launch.sh --config configs/repa_only.yaml --exp-name repa_only
 
 # ============================================================================
 # Model Configuration
@@ -9,38 +9,30 @@ num-classes: 1000
 encoder-depth: 10
 fused-attn: true
 qk-norm: false
-projection-layer-type: conv
+projection-layer-type: mlp
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
-# Encoder KV Configuration
+# Disable KV distillation (no 2-stage)
 # ============================================================================
-enc-type: dinov2-b
-enc-layer-indices: "12"     # Encoder layer for K/V extraction (1-based)
-sit-layer-indices: "4"     # SiT layer for K/V injection (1-based)
-stage1-steps: 30000          # Number of steps for Stage 1
-distill-coeff: 2.0          # Coefficient for attention distillation loss
-
-# Alignment mode: logits, attn_mse, kv_mse
-align-mode: attn_mse
-
-# K/V projection: linear, mlp, conv
-kv-proj-type: linear
-kv-proj-kernel-size: 1
-kv-norm-type: none     # none, layernorm, zscore_spatial, zscore_token, batchnorm
-kv-zscore-alpha: 1.0
+use-kv: false
+distill-coeff: 0.0
+stage1-steps: 0
 
 # ============================================================================
-# REPA Loss Configuration
+# REPA Loss Configuration (enabled)
 # ============================================================================
+enc-type: deit3-b
 repa-loss: true
 proj-coeff: "0.5"
-projection-loss-type: cosine_v    # cosine, mse, mse_v, mse_noisy
-spnorm-method: zscore           # none, zscore, zscore_token, layernorm
+projection-loss-type: cosine  
+spnorm-method: none
 zscore-alpha: 0.6
+repa-stop-step: -1
+repa-stop-fade-steps: 0
 
 # ============================================================================
-# Dataset
+# Dataset (needs raw images for REPA)
 # ============================================================================
 data-dir: /dev/shm/data
 resolution: 256

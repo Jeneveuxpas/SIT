@@ -10,13 +10,13 @@ encoder-depth: 10
 fused-attn: true
 qk-norm: false
 projection-layer-type: conv
-proj-kwargs-kernel-size: 3
+proj-kwargs-kernel-size: 1
 
 # ============================================================================
 # Encoder KV Configuration
 # ============================================================================
-enc-type: dinov2-b
-enc-layer-indices: "12"     # Encoder layer for K/V extraction (1-based)
+enc-type: clip-l
+enc-layer-indices: "24"     # Encoder layer for K/V extraction (1-based)
 sit-layer-indices: "4"     # SiT layer for K/V injection (1-based)
 stage1-steps: 30000          # Number of steps for Stage 1
 distill-coeff: 2.0          # Coefficient for attention distillation loss
@@ -71,7 +71,7 @@ mixed-precision: fp16
 compile: true
 
 # ============================================================================
-# Misc
+# MiscSIT/configs/DINO-11.yaml
 # ============================================================================
 seed: 0
 num-workers: 12

@@ -16,11 +16,11 @@ proj-kwargs-kernel-size: 3
 # Encoder KV Configuration
 # ============================================================================
 enc-type: dinov2-b
-enc-layer-indices: "12"     # Encoder layer for K/V extraction (1-based)
-sit-layer-indices: "4"     # SiT layer for K/V injection (1-based)
+enc-layer-indices: "11,12"     # Encoder layer for K/V extraction (1-based)
+sit-layer-indices: "4,8"     # SiT layer for K/V injection (1-based)
 stage1-steps: 30000          # Number of steps for Stage 1
 distill-coeff: 2.0          # Coefficient for attention distillation loss
-
+sit-layer-loss-weights: "0.3,0.7"
 # Alignment mode: logits, attn_mse, kv_mse
 align-mode: attn_mse
 

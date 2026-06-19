@@ -4,7 +4,7 @@
 # ============================================================================
 # Model Configuration
 # ============================================================================
-model: SiT-XL/2-EncoderKV
+model: SiT-H/2-EncoderKV
 num-classes: 1000
 encoder-depth: 10
 fused-attn: true
