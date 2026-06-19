@@ -146,11 +146,9 @@ class SILossWithEncoderKV:
         for proj_loss_name, proj_loss_fn, coeff in zip(self.projection_loss_type, self.projection_loss, self.proj_coeff):
             # Initialize with float32
             proj_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
-            if len(zs) > 0 and zs_tilde is not None and len(zs_tilde) > 0:
+            if coeff != 0.0 and len(zs) > 0 and zs_tilde is not None and len(zs_tilde) > 0:
                 for z, z_tilde, z_tilde_original in zip(zs, zs_tilde, zs_tilde_original):
-                    proj_loss = proj_loss + proj_loss_fn(z, z_tilde, z_tilde_original, 
-                                                         alpha_t=alpha_t, sigma_t=sigma_t,
-                                                         d_alpha_t=d_alpha_t, d_sigma_t=d_sigma_t)
+                    proj_loss = proj_loss + proj_loss_fn(z, z_tilde, z_tilde_original)
                 proj_loss /= len(zs)
 
             proj_loss_dict[proj_loss_name] = proj_loss.detach().item()

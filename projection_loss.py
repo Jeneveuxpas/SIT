@@ -61,37 +61,15 @@ class ProjectionLoss:
 
 @register_loss("cosine")
 class CosineProjectionLoss(ProjectionLoss):
-    def __init__(self, spnorm_method: str = "zscore", zscore_alpha: float = 1.0, eps: float = 1e-6, **kwargs):
-        self.spnorm_method = spnorm_method
-        self.zscore_alpha = zscore_alpha
-        self.eps = eps
-
-    def _apply_spnorm(self, feat: torch.Tensor) -> torch.Tensor:
-        if self.spnorm_method == "none":
-            return feat
-        elif self.spnorm_method == "zscore":
-            return zscore_norm(feat, dim=1, alpha=self.zscore_alpha, eps=self.eps)
-        elif self.spnorm_method == "zscore_token":
-            return zscore_norm(feat, dim=-1, alpha=self.zscore_alpha, eps=self.eps)
-        elif self.spnorm_method == "layernorm":
-            return F.layer_norm(feat, normalized_shape=(feat.shape[-1],), eps=self.eps)
-        else:
-            raise ValueError(f"Unknown spnorm_method: {self.spnorm_method}")
+    def __init__(self, **kwargs):
+        pass
 
     def __call__(self, zs, zs_tilde, zs_tilde_original=None, **kwargs):
         self._check(zs, zs_tilde)
-        # cast to float32
         zs = zs.float()
         zs_tilde = zs_tilde.float()
-        
-        # Step 1: Spatial zscore normalization (per REPA paper)
-        zs = self._apply_spnorm(zs)
-        
-        # Step 2: L2 normalize for cosine similarity
         zs = F.normalize(zs, dim=-1)
         zs_tilde = F.normalize(zs_tilde, dim=-1)
-        
-        # compute cosine similarity
         cos_sim = (zs * zs_tilde).sum(dim=-1)    # [B,T]
         loss = -cos_sim
         return loss.mean()

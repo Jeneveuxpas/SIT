@@ -4,14 +4,9 @@
 # iREPA 统一启动脚本 - 训练 + 评估
 #
 # 用法: 
-#   ./launch.sh --config configs/DINO-8.yaml --exp-name DINO-8 --gpu 7 --num-gpus 1 
+#   ./launch.sh --config configs/SIT-XL-kv-2.0-repa-0.5.yaml --exp-name SIT-XL-kv-2.0-repa-0.5 --gpu 0,1,2,3,4,5,6,7 --num-gpus 8
 #   
-# ./launch.sh --config configs/irepa_only-2.0.yaml --exp-name irepa_only-2.0 --gpu 6,7 --num-gpus 2 
-#  ./launch.sh --config configs/sam2-s-16.yaml --exp-name sam2-s-16 --gpu 2 --num-gpus 1
- 
-# ./launch.sh --config configs/cosine_1.yaml --exp-name cosine_1 --gpu 6,7 --num-gpus 2 
-#  ./launch.sh --config configs/SIT-XL-without-kv-loss.yaml --exp-name  SIT-XL-without-kv-loss --gpu 4,5,6,7 --num-gpus 4 --resume-step 0100000
-#  ./launch.sh --config configs/attn_mse_repa_early_stop_600.yaml --exp-name attn_mse_repa_early_stop_600 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0600000
+# Historical configs are under configs_legacy/.
 
 # ============================================================================
 set -e

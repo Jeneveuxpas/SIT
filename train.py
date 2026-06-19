@@ -36,7 +36,7 @@ from vision_encoder import load_encoders
 from dataset import HFImgLatentDataset, HFLatentDataset, ImageFolderLatentDataset, EDM2ImgLatentDataset
 import wandb
 from torchvision.utils import make_grid
-from utils import ALL_SPNORM_METHODS
+from utils import ALL_SPNORM_METHODS, zscore_norm
     
 #################################################################################
 #                                  Utils                                       #
@@ -104,6 +104,19 @@ def safe_unwrap_model(model):
     while hasattr(model, '_orig_mod'):
         model = model._orig_mod
     return model
+
+
+def normalize_repa_target(feat: torch.Tensor, method: str, zscore_alpha: float) -> torch.Tensor:
+    """Match iREPA target preprocessing before the projection loss."""
+    if method == "none":
+        return feat
+    if method == "zscore":
+        return zscore_norm(feat, dim=1, alpha=zscore_alpha)
+    if method == "zscore_token":
+        return zscore_norm(feat, dim=-1, alpha=zscore_alpha)
+    if method == "layernorm":
+        return F.layer_norm(feat, normalized_shape=(feat.shape[-1],), eps=1e-6)
+    raise ValueError(f"Unknown spnorm_method: {method}")
 
 def parse_layer_indices(indices_str: str) -> list:
     """Parse comma-separated layer indices string to list of ints (1-based -> 0-based)."""
@@ -689,7 +702,11 @@ def main(args):
                         encoder_kv_extractor.reset_cache()
                         encoder_kv_extractor._batch_size = raw_image_enc.shape[0]  # For SAM2 un-windowing
                         features = encoders[0].forward_features(raw_image_enc)
-                        z = features['x_norm_patchtokens']
+                        z = normalize_repa_target(
+                            features['x_norm_patchtokens'],
+                            args.spnorm_method,
+                            args.zscore_alpha,
+                        )
                         zs.append(z)
                         try:
                             enc_kv_list = encoder_kv_extractor.get_captured_kv_list()
@@ -714,11 +731,11 @@ def main(args):
                                 # outputs dictionary with keys: 'x_norm_patchtokens' and 'x_norm_clstoken'
                                 features = encoder.forward_features(raw_image_) 
 
-                                # normalize spatial features
-                                # normalize spatial features (handled in loss now)
-                                # Legacy Note: args.cls_token_weight was previously passed but ignored by SpatialNormalization.
-                                # We keep it ignored here to match original behavior.
-                                z = features['x_norm_patchtokens']
+                                z = normalize_repa_target(
+                                    features['x_norm_patchtokens'],
+                                    args.spnorm_method,
+                                    args.zscore_alpha,
+                                )
 
                                 # append to list
                                 zs.append(z)
@@ -1007,7 +1024,7 @@ def parse_args(input_args=None):
     parser.add_argument("--repa-final-scale", type=float, default=None,
                         help="Multiplier used after repa-decay-end-step (defaults to repa-decay-end-scale)")
     # whether to normalize spatial features
-    parser.add_argument("--spnorm-method", type=str, default="zscore", choices=["none", "zscore", "zscore_token", "layernorm"])
+    parser.add_argument("--spnorm-method", type=str, default="zscore", choices=ALL_SPNORM_METHODS)
     parser.add_argument("--cls-token-weight", type=float, default=0.2)
     parser.add_argument("--zscore-alpha", type=float, default=0.6)
     parser.add_argument("--zscore-proj-skip-std", action=argparse.BooleanOptionalAction, default=False)
@@ -1022,7 +1039,7 @@ def parse_args(input_args=None):
 
     # config file (YAML)
     parser.add_argument("--config", type=str, default=None,
-        help="Path to YAML config file (e.g., configs/irepa.yaml)")
+        help="Path to YAML config file (e.g., configs/SIT-XL-kv-2.0-repa-0.5.yaml)")
 
     # First parse to get config file path
     if input_args is not None:
@@ -1070,6 +1087,20 @@ def parse_args(input_args=None):
         parser.error("--transition-steps must be >= 0")
     if args.distill_warmup_steps < 0:
         parser.error("--distill-warmup-steps must be >= 0")
+    time_dependent_proj_losses = {"cosine_v", "mse_v", "mse_v_norm", "cosine_noisy"}
+    selected_proj_losses = [
+        elem.strip() for elem in args.projection_loss_type.split(",") if elem.strip()
+    ]
+    proj_coeffs = [float(elem.strip()) for elem in args.proj_coeff.split(",") if elem.strip()]
+    active_disabled_proj_losses = sorted(
+        name for name, coeff in zip(selected_proj_losses, proj_coeffs)
+        if coeff != 0.0 and name in time_dependent_proj_losses
+    )
+    if args.repa_loss and active_disabled_proj_losses:
+        parser.error(
+            "VR/noisy projection losses are disabled for iREPA-style REPA; "
+            f"use --projection-loss-type cosine instead of {active_disabled_proj_losses}"
+        )
 
     for prefix in ("kv", "repa"):
         decay_start = getattr(args, f"{prefix}_decay_start_step")

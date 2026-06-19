@@ -7,7 +7,7 @@
 #   ./sweep_cfg.sh
 #   ./sweep_cfg.sh --steps "0600000,0700000,0800000"
 #   ./sweep_cfg.sh --cfg-scales "1.7" --guidance-highs "0.7"
-#   ./sweep_cfg.sh --config configs/SIT-XL-early-stop-370.yaml --exp-name SIT-XL-early-stop-370 \
+#   ./sweep_cfg.sh --config configs/SIT-XL-kv-2.0-repa-0.5.yaml --exp-name SIT-XL-kv-2.0-repa-0.5 \
 #       --steps "2000000" --vae ema --gpu 4,5,6,7 --num-gpus 4
 # ============================================================================
 set -e
@@ -15,8 +15,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 默认参数
-CONFIG="configs/SIT-XL.yaml"
-EXP_NAME="SIT-XL"
+CONFIG="configs/SIT-XL-kv-2.0-repa-0.5.yaml"
+EXP_NAME="SIT-XL-kv-2.0-repa-0.5"
 STEPS="2000000"
 
 GPU="0,1,2,3,4,5,6,7"

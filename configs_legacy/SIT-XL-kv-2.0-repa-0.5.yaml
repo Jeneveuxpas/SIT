@@ -1,5 +1,5 @@
 # iREPA with Encoder KV Distillation - Default Configuration
-# Usage: python train.py --config configs/SIT-XL-kv-2.0-repa-0.5.yaml --exp-name my_experiment
+# Usage: python train.py --config configs/default.yaml --exp-name my_experiment
 
 # ============================================================================
 # Model Configuration
@@ -35,7 +35,7 @@ kv-zscore-alpha: 1.0
 # ============================================================================
 repa-loss: true
 proj-coeff: "0.5"
-projection-loss-type: cosine      # iREPA clean-feature cosine alignment
+projection-loss-type: cosine_v    # cosine, mse, mse_v, mse_noisy
 spnorm-method: zscore           # none, zscore, zscore_token, layernorm
 zscore-alpha: 0.6
 
