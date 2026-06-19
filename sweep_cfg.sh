@@ -6,9 +6,9 @@
 # 用法:
 #   ./sweep_cfg.sh
 #   ./sweep_cfg.sh --steps "0600000,0700000,0800000"
-#   ./sweep_cfg.sh --cfg-scales "1.2,1.4,1.6,1.8" --guidance-highs "1.0,0.8,0.72,0.65"
-#   ./sweep_cfg.sh --config configs/SiT-XL-early-stop-300.yaml --exp-name SIT-XL-early-stop-300 \
-#       --steps "0600000,0700000,0800000" --vae ema --gpu 4,5,6,7 --num-gpus 4
+#   ./sweep_cfg.sh --cfg-scales "1.7" --guidance-highs "0.7"
+#   ./sweep_cfg.sh --config configs/SIT-XL-early-stop-370.yaml --exp-name SIT-XL-early-stop-370 \
+#       --steps "2000000" --vae ema --gpu 4,5,6,7 --num-gpus 4
 # ============================================================================
 set -e
 
