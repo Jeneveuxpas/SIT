@@ -513,7 +513,16 @@ class EncoderKVExtractor(nn.Module):
 
 
 KV_PROJ_TYPES = ["linear", "mlp", "conv", "head_gate"]
-KV_NORM_TYPES = ["none", "layernorm", "rmsnorm", "zscore", "zscore_token", "batchnorm", "k_rms_v_layer"]
+KV_NORM_TYPES = [
+    "none",
+    "layernorm",
+    "rmsnorm",
+    "zscore",
+    "zscore_token",
+    "batchnorm",
+    "k_rms_v_layer",
+    "k_layer_v_rms",
+]
 
 
 class TokenRMSNorm(nn.Module):
@@ -624,6 +633,8 @@ class EncoderKVProjection(nn.Module):
             norm_type = kv_norm_type
             if kv_norm_type == "k_rms_v_layer":
                 norm_type = "layernorm" if component == "v" else "rmsnorm"
+            elif kv_norm_type == "k_layer_v_rms":
+                norm_type = "rmsnorm" if component == "v" else "layernorm"
             return build_kv_norm(norm_type, enc_dim, alpha=kv_zscore_alpha)
         
         # Build normalization and projection layers for needed components

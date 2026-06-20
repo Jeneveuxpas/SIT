@@ -957,8 +957,10 @@ def parse_args(input_args=None):
     parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
                         help="Kernel size for conv projection (default: 1)")
     parser.add_argument("--kv-norm-type", type=str, default="none",
-                        choices=["none", "layernorm", "rmsnorm", "zscore", "zscore_token", "batchnorm", "k_rms_v_layer"],
-                        help="Normalization type for K/V: zscore=per-spatial, zscore_token=per-token, k_rms_v_layer=K RMSNorm + V LayerNorm")
+                        choices=["none", "layernorm", "rmsnorm", "zscore", "zscore_token", "batchnorm", "k_rms_v_layer", "k_layer_v_rms"],
+                        help="Normalization type for K/V: zscore=per-spatial, zscore_token=per-token, "
+                             "k_rms_v_layer=K RMSNorm + V LayerNorm, "
+                             "k_layer_v_rms=K LayerNorm + V RMSNorm")
     parser.add_argument("--kv-zscore-alpha", type=float, default=1.0, 
                         help="Alpha for z-score normalization: (x - alpha * mean) / std")
     parser.add_argument("--kv-replace-mode", type=str, default="kv",
@@ -1040,7 +1042,7 @@ def parse_args(input_args=None):
 
     # config file (YAML)
     parser.add_argument("--config", type=str, default=None,
-        help="Path to YAML config file (e.g., configs/sit-xl-routing-stage1-stage2-irepa.yaml)")
+        help="Path to YAML config file (e.g., configs/sit-xl-attnscaf-s1s2-irepa-kvnorm-k-layer-v-rms.yaml)")
 
     # First parse to get config file path
     if input_args is not None:
