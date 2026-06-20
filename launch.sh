@@ -28,7 +28,7 @@ EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-256}"
 EVAL_NUM_STEPS="${EVAL_NUM_STEPS:-250}"
 CFG_SCALE="${CFG_SCALE:-1.0}"
 MODE="${MODE:-sde}"
-VAE="${VAE:-mse}"
+VAE="${VAE:-ema}"
 REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
 
 # 解析命令行参数
@@ -148,7 +148,7 @@ if [ "$EVAL_ONLY" = "false" ]; then
     echo "训练命令: ${TRAIN_CMD}"
 
     # 执行训练
-    eval ${TRAIN_CMD}
+#     eval ${TRAIN_CMD}
 
     echo "================================================"
     echo "训练完成！"
