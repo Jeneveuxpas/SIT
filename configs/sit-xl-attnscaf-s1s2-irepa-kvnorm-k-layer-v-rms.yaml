@@ -1,6 +1,6 @@
-# AttnScaf main experiment: Stage1 attention warmup + Stage2 distillation + iREPA.
+# AttnScaf main experiment: Stage1 attention warmup + iREPA, no Stage2 distillation.
 # KV norm ablation: K LayerNorm + V RMSNorm. Current code applies kv-norm-type before KV projection.
-# Usage: python train.py --config configs/sit-xl-attnscaf-s1s2-irepa-kvnorm-k-layer-v-rms.yaml --exp-name attnscaf-s1s2-irepa-kvnorm-k-layer-v-rms
+# Usage: python train.py --config configs/sit-xl-attnscaf-s1s2-irepa-kvnorm-k-layer-v-rms.yaml --exp-name attnscaf-stage1-irepa-kvnorm-k-layer-v-rms
 
 # Model
 model: SiT-XL/2-EncoderKV
@@ -11,7 +11,7 @@ qk-norm: false
 projection-layer-type: conv
 proj-kwargs-kernel-size: 3
 
-# Encoder KV warmup and Stage2 distillation
+# Encoder KV warmup; Stage2 distillation is disabled.
 use-kv: true
 enc-type: dinov2-b
 enc-layer-indices: "12"
@@ -19,8 +19,10 @@ sit-layer-indices: "4"
 stage1-steps: 30000
 transition-steps: 0
 align-mode: attn_mse
-distill-coeff: 2.0
+distill-coeff: 0.0
 distill-warmup-steps: 0
+kv-stop-step: 30000
+kv-stop-fade-steps: 0
 kv-proj-type: linear
 kv-proj-kernel-size: 1
 kv-norm-type: k_layer_v_rms

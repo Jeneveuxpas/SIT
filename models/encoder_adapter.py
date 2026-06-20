@@ -33,8 +33,7 @@ class EncoderKVExtractor(nn.Module):
         # Flatten blocks to allow index-based access
         self.blocks = self._get_model_blocks(encoder_model)
         
-        # Register hooks
-        self._register_hooks()
+        # Hooks are installed lazily only for forwards that actually need K/V.
         
         # Freeze encoder
         for param in self.encoder_model.parameters():
@@ -44,6 +43,11 @@ class EncoderKVExtractor(nn.Module):
         """Reset captured hook outputs before a new encoder forward."""
         self.captured_kv = {}
         self.captured_feat = {}
+
+    def ensure_hooks(self):
+        """Register hooks if they are not currently installed."""
+        if not self._hooks:
+            self._register_hooks()
 
     def get_captured_kv_list(self) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """
@@ -487,27 +491,30 @@ class EncoderKVExtractor(nn.Module):
                 Q, K, V shape: (B, num_heads, num_patches, head_dim)
             cls_token: CLS token (B, enc_dim)
         """
+        self.ensure_hooks()
         self.reset_cache()
         self._batch_size = x.shape[0]  # Store for un-windowing in hooks
-        
-        # Forward through encoder and get CLS token
-        if hasattr(self.encoder_model, "forward_features"):
-            output = self.encoder_model.forward_features(x)
-            if isinstance(output, dict):
-                cls_token = output.get('x_norm_clstoken')
+        try:
+            # Forward through encoder and get CLS token
+            if hasattr(self.encoder_model, "forward_features"):
+                output = self.encoder_model.forward_features(x)
+                if isinstance(output, dict):
+                    cls_token = output.get('x_norm_clstoken')
+                else:
+                    cls_token = None
             else:
-                cls_token = None
-        else:
-            output = self.encoder_model(x)
-            if hasattr(output, "pooler_output"):
-                cls_token = output.pooler_output
-            elif hasattr(output, "last_hidden_state"):
-                cls_token = None
-            else:
-                cls_token = None
-        
-        # Collect Q/K/V in order of layer_indices
-        kv_list = self.get_captured_kv_list()
+                output = self.encoder_model(x)
+                if hasattr(output, "pooler_output"):
+                    cls_token = output.pooler_output
+                elif hasattr(output, "last_hidden_state"):
+                    cls_token = None
+                else:
+                    cls_token = None
+            
+            # Collect Q/K/V in order of layer_indices
+            kv_list = self.get_captured_kv_list()
+        finally:
+            self.remove_hooks()
         
         return kv_list, cls_token
 

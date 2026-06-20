@@ -311,8 +311,10 @@ def main(args):
     latent_size = args.resolution // 8
     in_channels = 4
     # Load encoders only when a raw-image branch is active.
-    # KV distillation and REPA both require encoder features from raw images.
-    needs_raw_images = args.use_kv or args.repa_loss
+    # Stage 1 KV warmup and REPA both require encoder features from raw images.
+    stage2_distill_enabled = args.use_kv and args.distill_coeff > 0.0
+    needs_kv_branch = args.use_kv and (args.stage1_steps > 0 or stage2_distill_enabled)
+    needs_raw_images = needs_kv_branch or args.repa_loss
     if needs_raw_images:
         encoders = load_encoders(
             args.enc_type, device, args.resolution, accelerator=accelerator
@@ -320,11 +322,11 @@ def main(args):
     else:
         encoders = []
     
-    # Create Encoder K/V extractor first to detect dimension and heads (only if KV distillation enabled)
+    # Create Encoder K/V extractor first to detect dimension and heads (only if KV branch is enabled)
     encoder_kv_extractor = None
     enc_dim = None
     enc_heads = None
-    if args.use_kv and len(encoders) > 0:
+    if needs_kv_branch and len(encoders) > 0:
         encoder_kv_extractor = EncoderKVExtractor(encoders[0].model, enc_layer_indices)
         encoder_kv_extractor.eval()
         # Set target token count for spatial interpolation (SAM2 windowed attention etc.)
@@ -424,12 +426,14 @@ def main(args):
                 "Stage-1 attention handoff: "
                 f"last {args.transition_steps} steps with {args.transition_schedule} schedule"
             )
-        if args.distill_warmup_steps > 0:
+        if stage2_distill_enabled and args.distill_warmup_steps > 0:
             logger.info(
                 "Stage-2 distillation warmup: "
                 f"{args.distill_warmup_steps} steps with {args.distill_warmup_schedule} schedule"
             )
-        if sit_layer_loss_weights is not None:
+        if args.use_kv and not stage2_distill_enabled:
+            logger.info("Stage-2 distillation disabled; encoder KV is used only for Stage-1 warmup.")
+        if stage2_distill_enabled and sit_layer_loss_weights is not None:
             logger.info(f"Stage-2 per-layer distill weights (normalized): {sit_layer_loss_weights}")
         if args.repa_decay_start_step is not None and args.repa_decay_start_step >= 0:
             logger.info(
@@ -668,8 +672,11 @@ def main(args):
                 warmup_steps=args.distill_warmup_steps,
                 schedule=args.distill_warmup_schedule,
             )
+            # Distillation coefficient: 0 in Stage 1, optionally active in Stage 2.
+            base_distill_coeff = args.distill_coeff if current_stage == 2 else 0.0
+            current_distill_coeff = base_distill_coeff * kv_gate * distill_warmup_gate
             repa_active = args.repa_loss and repa_gate > 0.0
-            kv_active = args.use_kv and (current_stage == 1 or kv_gate > 0.0)
+            kv_active = args.use_kv and (current_stage == 1 or current_distill_coeff > 0.0)
 
             # Log stage periodically
             if accelerator.is_main_process and global_step % 1000 == 0:
@@ -684,7 +691,7 @@ def main(args):
             with torch.no_grad():
                 x = sample_posterior(x, latents_scale=latents_scale, latents_bias=latents_bias)
                 
-                # Extract Encoder K/V and CLS token (only if KV distillation is enabled)
+                # Extract Encoder K/V and CLS token only when the KV branch is active.
                 enc_kv_list = None
                 # Extract encoder features for REPA projection loss
                 zs = []
@@ -699,18 +706,25 @@ def main(args):
                         raise ValueError("Active REPA/KV branch requires raw images, but the dataset returned latents only.")
                     raw_image_enc = encoders[0].preprocess(raw_image)
                     with accelerator.autocast():
-                        encoder_kv_extractor.reset_cache()
-                        encoder_kv_extractor._batch_size = raw_image_enc.shape[0]  # For SAM2 un-windowing
-                        features = encoders[0].forward_features(raw_image_enc)
-                        z = normalize_repa_target(
-                            features['x_norm_patchtokens'],
-                            args.spnorm_method,
-                            args.zscore_alpha,
-                        )
-                        zs.append(z)
+                        fallback_to_extractor_forward = False
+                        encoder_kv_extractor.ensure_hooks()
                         try:
-                            enc_kv_list = encoder_kv_extractor.get_captured_kv_list()
-                        except RuntimeError:
+                            encoder_kv_extractor.reset_cache()
+                            encoder_kv_extractor._batch_size = raw_image_enc.shape[0]  # For SAM2 un-windowing
+                            features = encoders[0].forward_features(raw_image_enc)
+                            z = normalize_repa_target(
+                                features['x_norm_patchtokens'],
+                                args.spnorm_method,
+                                args.zscore_alpha,
+                            )
+                            zs.append(z)
+                            try:
+                                enc_kv_list = encoder_kv_extractor.get_captured_kv_list()
+                            except RuntimeError:
+                                fallback_to_extractor_forward = True
+                        finally:
+                            encoder_kv_extractor.remove_hooks()
+                        if fallback_to_extractor_forward:
                             # Fallback for encoders whose wrapper path does not trigger registered hooks.
                             enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
                 else:
@@ -760,9 +774,6 @@ def main(args):
                 denoising_loss_mean = denoising_loss.mean()
                 proj_loss = proj_loss_raw * repa_gate
                 
-                # Distillation coefficient: 0 in Stage 1, optionally warmed up in Stage 2.
-                base_distill_coeff = args.distill_coeff if current_stage == 2 else 0.0
-                current_distill_coeff = base_distill_coeff * kv_gate * distill_warmup_gate
                 distill_loss = distill_loss_raw * current_distill_coeff
 
                 # Total loss
@@ -1090,6 +1101,8 @@ def parse_args(input_args=None):
         parser.error("--transition-steps must be >= 0")
     if args.distill_warmup_steps < 0:
         parser.error("--distill-warmup-steps must be >= 0")
+    if args.distill_coeff < 0:
+        parser.error("--distill-coeff must be >= 0")
     time_dependent_proj_losses = {"cosine_v", "mse_v", "mse_v_norm", "cosine_noisy"}
     selected_proj_losses = [
         elem.strip() for elem in args.projection_loss_type.split(",") if elem.strip()

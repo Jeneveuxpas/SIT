@@ -4,7 +4,7 @@
 # iREPA 统一启动脚本 - 训练 + 评估
 #
 # 用法: 
-#   ./launch.sh --config configs/sit-xl-attnscaf-s1s2-irepa-kvnorm-k-layer-v-rms.yaml --exp-name attnscaf-s1s2-irepa-kvnorm-k-layer-v-rms --gpu 0,1,2,3,4,5,6,7 --num-gpus 8
+#   ./launch.sh --config configs/sit-xl-attnscaf-s1s2-irepa-kvnorm-layernorm.yaml --exp-name attnscaf-stage1-irepa-kvnorm-layernorm --gpu 0,1,2,3,4,5,6,7 --num-gpus 8
 #   
 # Historical configs are under configs_legacy/.
 
