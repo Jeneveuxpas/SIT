@@ -7,7 +7,7 @@
 #   ./sweep_cfg.sh
 #   ./sweep_cfg.sh --steps "0600000,0700000,0800000"
 #   ./sweep_cfg.sh --cfg-scales "1.7" --guidance-highs "0.7"
-#   ./sweep_cfg.sh --config configs/sit-xl-attnscaf-s1s2-irepa-kvnorm-k-layer-v-rms.yaml --exp-name attnscaf-s1s2-irepa-kvnorm-k-layer-v-rms \
+#   ./sweep_cfg.sh --config configs/sit-xl-attnscaf-stage1-irepa-kvnorm-k-layer-v-rms.yaml --exp-name attnscaf-stage1-irepa-kvnorm-k-layer-v-rms \
 #       --steps "2000000" --vae ema --gpu 4,5,6,7 --num-gpus 4
 # ============================================================================
 set -e
@@ -15,8 +15,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 默认参数
-CONFIG="configs/sit-xl-attnscaf-s1s2-irepa-kvnorm-k-layer-v-rms.yaml"
-EXP_NAME="attnscaf-s1s2-irepa-kvnorm-k-layer-v-rms"
+CONFIG="configs/sit-xl-attnscaf-stage1-irepa-kvnorm-k-layer-v-rms.yaml"
+EXP_NAME="attnscaf-stage1-irepa-kvnorm-k-layer-v-rms"
 STEPS="2000000"
 
 GPU="0,1,2,3,4,5,6,7"

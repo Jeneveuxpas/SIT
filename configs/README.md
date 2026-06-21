@@ -14,9 +14,9 @@ Core routing ablations:
 
 KV-norm ablations on the Stage1 + iREPA main setting. Stage 2 distillation is disabled in these configs (`distill-coeff: 0.0`, `kv-stop-step: 30000`). The original `none` setting has already been run as the default baseline:
 
-- `sit-xl-attnscaf-s1s2-irepa-kvnorm-layernorm.yaml`
-- `sit-xl-attnscaf-s1s2-irepa-kvnorm-rmsnorm.yaml`
-- `sit-xl-attnscaf-s1s2-irepa-kvnorm-k-rms-v-layer.yaml`
-- `sit-xl-attnscaf-s1s2-irepa-kvnorm-k-layer-v-rms.yaml`
+- `sit-xl-attnscaf-stage1-irepa-kvnorm-layernorm.yaml`
+- `sit-xl-attnscaf-stage1-irepa-kvnorm-rmsnorm.yaml`
+- `sit-xl-attnscaf-stage1-irepa-kvnorm-k-rms-v-layer.yaml`
+- `sit-xl-attnscaf-stage1-irepa-kvnorm-k-layer-v-rms.yaml`
 
 All current configs use `stage1-steps: 30000` and `max-train-steps: 100000`. iREPA configs use `proj-coeff: "1.0"`. Historical rejected-paper and ablation configs are kept in `../configs_legacy/`.
