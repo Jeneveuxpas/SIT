@@ -9,7 +9,7 @@ num-classes: 1000
 encoder-depth: 10
 fused-attn: true
 qk-norm: false
-projection-layer-type: mlp
+projection-layer-type: conv
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
@@ -35,7 +35,7 @@ kv-zscore-alpha: 1.0
 # ============================================================================
 repa-loss: true
 proj-coeff: "1.0"
-projection-loss-type: cosine_repa    # cosine, mse, mse_v, mse_noisy
+projection-loss-type: cosine    # cosine, mse, mse_v, mse_noisy
 spnorm-method: zscore           # none, zscore, zscore_token, layernorm
 zscore-alpha: 0.6
 
