@@ -56,6 +56,48 @@ def sample_posterior(moments, latents_scale=1., latents_bias=0.):
     return z 
 
 
+def patch_shuffle_image(x: torch.Tensor, grid: int = 0, patch_size: int = 14) -> torch.Tensor:
+    """
+    Shuffle spatial patches in the preprocessed encoder input.
+
+    This is intended for scaffold controls: diffusion still trains on the
+    original image/latent, while encoder K/V are extracted from a jigsaw image.
+    """
+    if x.ndim != 4:
+        raise ValueError(f"Expected BCHW image tensor, got shape {tuple(x.shape)}")
+
+    B, C, H, W = x.shape
+    if grid <= 0:
+        if H % patch_size != 0 or W % patch_size != 0:
+            raise ValueError(
+                f"Cannot infer patch-shuffle grid from H={H}, W={W}, patch_size={patch_size}"
+            )
+        grid_h, grid_w = H // patch_size, W // patch_size
+    else:
+        grid_h = grid_w = grid
+
+    if H % grid_h != 0 or W % grid_w != 0:
+        raise ValueError(
+            f"Patch-shuffle grid {grid_h}x{grid_w} must divide image size {H}x{W}"
+        )
+
+    ph, pw = H // grid_h, W // grid_w
+    patches = x.unfold(2, ph, ph).unfold(3, pw, pw)
+    patches = patches.permute(0, 2, 3, 1, 4, 5).contiguous()
+    patches = patches.reshape(B, grid_h * grid_w, C, ph, pw)
+
+    perm = torch.stack(
+        [torch.randperm(grid_h * grid_w, device=x.device) for _ in range(B)],
+        dim=0,
+    )
+    batch_idx = torch.arange(B, device=x.device)[:, None]
+    patches = patches[batch_idx, perm]
+
+    x_shuf = patches.reshape(B, grid_h, grid_w, C, ph, pw)
+    x_shuf = x_shuf.permute(0, 3, 1, 4, 2, 5).contiguous()
+    return x_shuf.reshape(B, C, H, W)
+
+
 @torch.no_grad()
 def update_ema(ema_model, model, decay=0.9999):
     """
@@ -406,6 +448,12 @@ def main(args):
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
         logger.info(f"Encoder KV: {len(enc_layer_indices)} layer pairs, replace_mode={args.kv_replace_mode}")
         logger.info(f"Encoder layers: {enc_layer_indices} -> SiT layers: {sit_layer_indices}")
+        if args.encoder_patch_shuffle:
+            logger.info(
+                "Encoder patch-shuffle ablation enabled for K/V branch: "
+                f"grid={args.encoder_patch_shuffle_grid}, "
+                f"patch_size={args.encoder_patch_shuffle_patch_size}"
+            )
         if args.stage1_steps > 0 and args.transition_steps > 0:
             logger.info(
                 "Stage-1 attention handoff: "
@@ -679,6 +727,7 @@ def main(args):
                 # Fast path: single encoder + both losses active -> one encoder forward.
                 single_encoder_joint_path = (
                     kv_active and repa_active and len(encoders) == 1 and encoder_kv_extractor is not None
+                    and not args.encoder_patch_shuffle
                 )
 
                 if single_encoder_joint_path:
@@ -701,6 +750,12 @@ def main(args):
                         if raw_image is None:
                              raise ValueError("use_kv requires raw images, but the dataset returned latents only.")
                         raw_image_enc = encoders[0].preprocess(raw_image)
+                        if args.encoder_patch_shuffle:
+                            raw_image_enc = patch_shuffle_image(
+                                raw_image_enc,
+                                grid=args.encoder_patch_shuffle_grid,
+                                patch_size=args.encoder_patch_shuffle_patch_size,
+                            )
                         with accelerator.autocast():
                             enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
                     
@@ -947,6 +1002,12 @@ def parse_args(input_args=None):
                         choices=["kv", "k", "v", "qkv", "qk", "q"],
                         help="Which attention components to replace from encoder in Stage 1: "
                              "kv (default), k-only, v-only, qkv (all), qk, q-only")
+    parser.add_argument("--encoder-patch-shuffle", action=argparse.BooleanOptionalAction, default=False,
+                        help="Shuffle patches of the preprocessed encoder input before extracting scaffold K/V")
+    parser.add_argument("--encoder-patch-shuffle-grid", type=int, default=0,
+                        help="Patch-shuffle grid size. Use 16 for DINOv2-B/14 at 224x224; 0 infers from patch size.")
+    parser.add_argument("--encoder-patch-shuffle-patch-size", type=int, default=14,
+                        help="Patch size used to infer patch-shuffle grid when encoder-patch-shuffle-grid is 0")
     parser.add_argument("--kv-use-adaln", action=argparse.BooleanOptionalAction, default=False,
                         help="Apply AdaLN t-conditioning to KV projection output (default: False)")
     parser.add_argument("--train-kv-proj-stage2", action=argparse.BooleanOptionalAction, default=False,
