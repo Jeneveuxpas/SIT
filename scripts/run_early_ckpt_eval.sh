@@ -40,7 +40,9 @@ SKIP_Q_PROBE="false"
 SKIP_SPATIAL="false"
 RUN_TEACHER_ALIGN="false"
 TEACHER_LAYER_DEPTHS="8,10"
+TEACHER_EVAL_MODE="auto"
 TEACHER_PATCH_SHUFFLE_MODE="off"
+SCAFFOLD_PATCH_SHUFFLE_MODE="checkpoint"
 RUN_LINEAR_PROBE="false"
 RUN_FID="false"
 FID_STEPS=""
@@ -139,8 +141,16 @@ while [[ $# -gt 0 ]]; do
             TEACHER_LAYER_DEPTHS="$2"
             shift 2
             ;;
+        --teacher-eval-mode)
+            TEACHER_EVAL_MODE="$2"
+            shift 2
+            ;;
         --teacher-patch-shuffle-mode)
             TEACHER_PATCH_SHUFFLE_MODE="$2"
+            shift 2
+            ;;
+        --scaffold-patch-shuffle-mode)
+            SCAFFOLD_PATCH_SHUFFLE_MODE="$2"
             shift 2
             ;;
         --linear-probe)
@@ -308,8 +318,10 @@ for STEP in "${STEP_LIST[@]}"; do
             --num-workers "$NUM_WORKERS" \
             --timesteps "$TIMESTEPS" \
             --layer-depths "$TEACHER_LAYER_DEPTHS" \
+            --eval-mode "$TEACHER_EVAL_MODE" \
             --inference-dtype "$INFERENCE_DTYPE" \
-            --patch-shuffle-mode "$TEACHER_PATCH_SHUFFLE_MODE"
+            --patch-shuffle-mode "$TEACHER_PATCH_SHUFFLE_MODE" \
+            --scaffold-patch-shuffle-mode "$SCAFFOLD_PATCH_SHUFFLE_MODE"
     fi
 
     if [[ "$RUN_LINEAR_PROBE" == "true" ]]; then

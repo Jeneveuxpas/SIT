@@ -17,7 +17,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -40,6 +40,7 @@ from q_scaffold_probe import (  # noqa: E402
     subset_dataset,
     unpack_batch,
 )
+from models.encoder_adapter import EncoderKVExtractor  # noqa: E402
 from vision_encoder import load_encoders  # noqa: E402
 
 
@@ -168,6 +169,30 @@ def compute_trsa_metrics(
     }
 
 
+def select_effective_eval_mode(eval_mode: str, meta: Dict[str, object]) -> str:
+    if eval_mode in ("native", "scaffold"):
+        return eval_mode
+    if eval_mode != "auto":
+        raise ValueError(f"Unknown eval mode: {eval_mode}")
+
+    step = int(meta["step"])
+    stage1_steps = int(meta.get("stage1_steps", 30000))
+    return "scaffold" if step <= stage1_steps else "native"
+
+
+def cast_enc_kv(
+    enc_kv,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    q_raw, k_raw, v_raw = enc_kv
+    return (
+        q_raw.to(device=device, dtype=dtype),
+        k_raw.to(device=device, dtype=dtype),
+        v_raw.to(device=device, dtype=dtype),
+    )
+
+
 @torch.no_grad()
 def extract_hidden_states_by_layer(
     model,
@@ -175,6 +200,8 @@ def extract_hidden_states_by_layer(
     t: torch.Tensor,
     labels: torch.Tensor,
     layer_depths: Iterable[int],
+    enc_kv_list=None,
+    stage: int = 2,
 ) -> Dict[int, torch.Tensor]:
     target_layers = set(int(v) for v in layer_depths)
     max_layer = max(target_layers)
@@ -186,10 +213,25 @@ def extract_hidden_states_by_layer(
 
     hidden_by_layer: Dict[int, torch.Tensor] = {}
     for layer_idx, block in enumerate(model.blocks, start=1):
+        enc_kv = None
+        layer_idx0 = layer_idx - 1
+        if enc_kv_list is not None and layer_idx0 in getattr(model, "sit_to_enc_idx", {}):
+            enc_idx = model.sit_to_enc_idx[layer_idx0]
+            if enc_idx < len(enc_kv_list):
+                enc_kv = cast_enc_kv(enc_kv_list[enc_idx], x_tokens.device, x_tokens.dtype)
+
+        old_training = block.training
+        if enc_kv is not None and stage == 1:
+            # SiTBlockWithEncoderKV gates encoder projection on block.training.
+            # Flip only this flag so eval-time submodules stay in eval mode.
+            block.training = True
         try:
-            block_out = block(x_tokens, c, enc_kv=None, stage=2)
-        except TypeError:
-            block_out = block(x_tokens, c)
+            try:
+                block_out = block(x_tokens, c, enc_kv=enc_kv, stage=stage)
+            except TypeError:
+                block_out = block(x_tokens, c)
+        finally:
+            block.training = old_training
         x_tokens = block_out[0] if isinstance(block_out, tuple) else block_out
 
         if layer_idx in target_layers:
@@ -200,7 +242,7 @@ def extract_hidden_states_by_layer(
     return hidden_by_layer
 
 
-def get_teacher_tokens(
+def prepare_encoder_input(
     encoder,
     raw_image: torch.Tensor,
     use_patch_shuffle: bool,
@@ -214,7 +256,13 @@ def get_teacher_tokens(
             grid=patch_shuffle_grid,
             patch_size=patch_shuffle_patch_size,
         )
+    return raw_image_enc
 
+
+def get_teacher_tokens_from_preprocessed(
+    encoder,
+    raw_image_enc: torch.Tensor,
+) -> torch.Tensor:
     features = encoder.forward_features(raw_image_enc)
     tokens = features.get("x_norm_patchtokens")
     if tokens is None:
@@ -270,14 +318,31 @@ def evaluate_teacher_spatial_alignment(args):
         int(meta["resolution"]),
         accelerator=None,
     )[0]
+    effective_eval_mode = select_effective_eval_mode(args.eval_mode, meta)
 
     use_patch_shuffle = resolve_patch_shuffle(meta, args.patch_shuffle_mode)
+    use_scaffold_patch_shuffle = resolve_patch_shuffle(
+        meta,
+        args.scaffold_patch_shuffle_mode,
+    )
+    extractor = None
+    if effective_eval_mode == "scaffold":
+        enc_layer_indices_0 = [idx - 1 for idx in meta["enc_layer_indices"]]
+        extractor = EncoderKVExtractor(encoder.model, enc_layer_indices_0)
+        extractor._target_num_patches = model.x_embedder.num_patches
+        extractor.eval()
+
     print("\nTeacher spatial alignment setup")
     print(f"  checkpoint={args.checkpoint}")
     print(f"  teacher={teacher_type}")
+    print(f"  eval_mode={args.eval_mode} effective={effective_eval_mode}")
     print(f"  layers={layer_depths} timesteps={timesteps}")
     print(f"  samples={len(dataset)} conditioning={args.conditioning}")
     print(f"  teacher_patch_shuffle={use_patch_shuffle} mode={args.patch_shuffle_mode}")
+    print(
+        "  scaffold_patch_shuffle="
+        f"{use_scaffold_patch_shuffle} mode={args.scaffold_patch_shuffle_mode}"
+    )
 
     accum = {
         f"t={t_val:g}": {f"layer_{layer}": MeanAccumulator() for layer in layer_depths}
@@ -285,58 +350,83 @@ def evaluate_teacher_spatial_alignment(args):
     }
 
     total_seen = 0
-    for batch in tqdm(dataloader, desc="teacher-align"):
-        raw_image, moments, labels = unpack_batch(batch)
-        raw_image = raw_image.to(device, non_blocking=True)
-        moments = moments.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True).long()
-        bsz = labels.size(0)
+    try:
+        for batch in tqdm(dataloader, desc="teacher-align"):
+            raw_image, moments, labels = unpack_batch(batch)
+            raw_image = raw_image.to(device, non_blocking=True)
+            moments = moments.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True).long()
+            bsz = labels.size(0)
 
-        teacher_tokens = get_teacher_tokens(
-            encoder,
-            raw_image,
-            use_patch_shuffle=use_patch_shuffle,
-            patch_shuffle_grid=int(meta["encoder_patch_shuffle_grid"]),
-            patch_shuffle_patch_size=int(meta["encoder_patch_shuffle_patch_size"]),
-        )
-
-        x0 = sample_posterior(
-            moments,
-            latents_scale,
-            latents_bias,
-            mode=args.latent_mode,
-        ).to(model_dtype)
-        cond_labels = make_condition_labels(
-            model,
-            labels,
-            int(meta["num_classes"]),
-            args.conditioning,
-        )
-
-        for t_val in timesteps:
-            t = torch.full((bsz,), t_val, device=device, dtype=model_dtype)
-            x_t = make_noisy_model_input(
-                x0,
-                t,
-                path_type=str(meta["path_type"]),
+            teacher_image_enc = prepare_encoder_input(
+                encoder,
+                raw_image,
+                use_patch_shuffle=use_patch_shuffle,
+                patch_shuffle_grid=int(meta["encoder_patch_shuffle_grid"]),
+                patch_shuffle_patch_size=int(meta["encoder_patch_shuffle_patch_size"]),
             )
-            hidden_by_layer = extract_hidden_states_by_layer(
+            teacher_tokens = get_teacher_tokens_from_preprocessed(
+                encoder,
+                teacher_image_enc,
+            )
+
+            enc_kv_list = None
+            if extractor is not None:
+                if use_scaffold_patch_shuffle == use_patch_shuffle:
+                    scaffold_image_enc = teacher_image_enc
+                else:
+                    scaffold_image_enc = prepare_encoder_input(
+                        encoder,
+                        raw_image,
+                        use_patch_shuffle=use_scaffold_patch_shuffle,
+                        patch_shuffle_grid=int(meta["encoder_patch_shuffle_grid"]),
+                        patch_shuffle_patch_size=int(meta["encoder_patch_shuffle_patch_size"]),
+                    )
+                enc_kv_list, _ = extractor(scaffold_image_enc)
+
+            x0 = sample_posterior(
+                moments,
+                latents_scale,
+                latents_bias,
+                mode=args.latent_mode,
+            ).to(model_dtype)
+            cond_labels = make_condition_labels(
                 model,
-                x_t,
-                t,
-                cond_labels,
-                layer_depths,
+                labels,
+                int(meta["num_classes"]),
+                args.conditioning,
             )
 
-            for layer in layer_depths:
-                if layer not in hidden_by_layer:
-                    continue
-                metrics = compute_trsa_metrics(hidden_by_layer[layer], teacher_tokens)
-                accum[f"t={t_val:g}"][f"layer_{layer}"].update(metrics, bsz)
+            stage = 1 if effective_eval_mode == "scaffold" else 2
+            for t_val in timesteps:
+                t = torch.full((bsz,), t_val, device=device, dtype=model_dtype)
+                x_t = make_noisy_model_input(
+                    x0,
+                    t,
+                    path_type=str(meta["path_type"]),
+                )
+                hidden_by_layer = extract_hidden_states_by_layer(
+                    model,
+                    x_t,
+                    t,
+                    cond_labels,
+                    layer_depths,
+                    enc_kv_list=enc_kv_list,
+                    stage=stage,
+                )
 
-        total_seen += bsz
-        if args.num_samples > 0 and total_seen >= args.num_samples:
-            break
+                for layer in layer_depths:
+                    if layer not in hidden_by_layer:
+                        continue
+                    metrics = compute_trsa_metrics(hidden_by_layer[layer], teacher_tokens)
+                    accum[f"t={t_val:g}"][f"layer_{layer}"].update(metrics, bsz)
+
+            total_seen += bsz
+            if args.num_samples > 0 and total_seen >= args.num_samples:
+                break
+    finally:
+        if extractor is not None:
+            extractor.remove_hooks()
 
     results = {
         t_key: {
@@ -349,6 +439,9 @@ def evaluate_teacher_spatial_alignment(args):
     meta = dict(meta)
     meta["teacher_enc_type"] = teacher_type
     meta["teacher_patch_shuffle"] = use_patch_shuffle
+    meta["scaffold_patch_shuffle"] = use_scaffold_patch_shuffle
+    meta["trsa_eval_mode"] = args.eval_mode
+    meta["trsa_effective_eval_mode"] = effective_eval_mode
 
     output_dir = Path(args.output_dir) if args.output_dir else (
         Path(args.checkpoint).resolve().parent.parent / "teacher_spatial_alignment"
@@ -408,12 +501,31 @@ if __name__ == "__main__":
         help="Teacher encoder type. Defaults to the first encoder in the checkpoint.",
     )
     parser.add_argument(
+        "--eval-mode",
+        choices=["auto", "native", "scaffold"],
+        default="auto",
+        help=(
+            "auto uses scaffold K/V for checkpoints at or before stage1_steps "
+            "and native K/V afterwards. native always disables scaffold. "
+            "scaffold always injects encoder K/V."
+        ),
+    )
+    parser.add_argument(
         "--patch-shuffle-mode",
         choices=["checkpoint", "on", "off"],
         default="off",
         help=(
-            "Patch-shuffle the teacher input. Default off keeps the reference as "
-            "canonical DINO image geometry, even for patch-shuffle ablations."
+            "Patch-shuffle the teacher reference input. Default off keeps the "
+            "reference as canonical DINO image geometry."
+        ),
+    )
+    parser.add_argument(
+        "--scaffold-patch-shuffle-mode",
+        choices=["checkpoint", "on", "off"],
+        default="checkpoint",
+        help=(
+            "Patch-shuffle mode for injected scaffold K/V. Default checkpoint "
+            "matches the run config while the reference can remain canonical."
         ),
     )
     evaluate_teacher_spatial_alignment(parser.parse_args())
