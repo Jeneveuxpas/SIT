@@ -248,7 +248,7 @@ def evaluate_teacher_spatial_alignment(args):
     )
 
     timesteps = parse_csv_floats(args.timesteps)
-    layer_depths = parse_csv_ints(args.layer_depths, default=[10])
+    layer_depths = parse_csv_ints(args.layer_depths, default=[8, 10])
 
     latents_scale, latents_bias = load_latent_stats(device, args.vae, args.latent_stats)
     dataset = build_dataset(args.data_dir, args.vae, args.split, meta["resolution"])
@@ -390,7 +390,16 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=12)
 
     parser.add_argument("--timesteps", type=str, default="0.0,0.1,0.5")
-    parser.add_argument("--layer-depths", type=str, default="10")
+    parser.add_argument(
+        "--layer-depths",
+        type=str,
+        default="8,10",
+        help=(
+            "Comma-separated SiT layers. Layer 8 is not directly touched by "
+            "REPA; layer 10 is the alignment layer and should be interpreted "
+            "with that caveat."
+        ),
+    )
     parser.add_argument("--conditioning", choices=["data", "null", "zero"], default="data")
     parser.add_argument(
         "--teacher-enc-type",

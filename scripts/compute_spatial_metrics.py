@@ -510,6 +510,8 @@ def main():
                         help='Path to data directory')
     parser.add_argument('--resolution', type=int, choices=[256, 512], default=256,
                         help='Image resolution for ImageFolder fallback dataset')
+    parser.add_argument('--split', type=str, choices=['train', 'val'], default='train',
+                        help='Dataset split to evaluate')
     parser.add_argument('--num-samples', type=int, default=256,
                         help='Number of samples to evaluate')
     parser.add_argument('--batch-size', type=int, default=64,
@@ -548,12 +550,12 @@ def main():
     
     # Load dataset
     try:
-        dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split="train")
+        dataset = HFImgLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, split=args.split)
     except Exception as e:
         print(f"Error loading HFImgLatentDataset: {e}")
         print("Falling back to ImageFolderLatentDataset")
         dataset = ImageFolderLatentDataset("sdvae-ft-mse-f8d4", args.data_dir, 
-                                            resolution=args.resolution, split="train")
+                                            resolution=args.resolution, split=args.split)
     print(dataset)
     
     dataloader = DataLoader(

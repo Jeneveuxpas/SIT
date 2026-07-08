@@ -13,7 +13,7 @@ set -euo pipefail
 #   CUDA_VISIBLE_DEVICES=0 ./scripts/run_early_ckpt_eval.sh \
 #     --exp-name attnscaf-ablate-kvnorm-attnscaf-only-100k \
 #     --data-dir /dev/shm/data \
-#     --teacher-align --teacher-layer-depths 10 \
+#     --teacher-align --teacher-layer-depths 8,10 \
 #     --steps 0005000,0010000,0015000,0020000,0025000,0030000,0035000,0040000,0050000,0075000,0100000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +27,7 @@ MAX_STEP=100000
 DATA_DIR="/dev/shm/data"
 GPU="${GPU:-0}"
 DEVICE="${DEVICE:-cuda:0}"
+SPLIT="train"
 NUM_SAMPLES=512
 BATCH_SIZE=64
 NUM_WORKERS=12
@@ -38,7 +39,7 @@ PATCH_SHUFFLE_MODE="checkpoint"
 SKIP_Q_PROBE="false"
 SKIP_SPATIAL="false"
 RUN_TEACHER_ALIGN="false"
-TEACHER_LAYER_DEPTHS="10"
+TEACHER_LAYER_DEPTHS="8,10"
 TEACHER_PATCH_SHUFFLE_MODE="off"
 RUN_LINEAR_PROBE="false"
 RUN_FID="false"
@@ -80,6 +81,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --data-dir)
             DATA_DIR="$2"
+            shift 2
+            ;;
+        --split)
+            SPLIT="$2"
             shift 2
             ;;
         --gpu)
@@ -238,6 +243,7 @@ echo "Early checkpoint evaluation"
 echo "run: $EXP_NAME"
 echo "dir: $RUN_DIR"
 echo "gpu/device: $GPU / $DEVICE"
+echo "split: $SPLIT"
 echo "steps: ${STEP_LIST[*]}"
 echo "================================================"
 
@@ -259,6 +265,7 @@ for STEP in "${STEP_LIST[@]}"; do
             --checkpoint "$CKPT" \
             --data-dir "$DATA_DIR" \
             --device "$DEVICE" \
+            --split "$SPLIT" \
             --num-samples "$NUM_SAMPLES" \
             --batch-size "$BATCH_SIZE" \
             --num-workers "$NUM_WORKERS" \
@@ -278,6 +285,7 @@ for STEP in "${STEP_LIST[@]}"; do
             --checkpoint "$CKPT" \
             --data-dir "$DATA_DIR" \
             --device "$DEVICE" \
+            --split "$SPLIT" \
             --num-samples "$NUM_SAMPLES" \
             --batch-size "$BATCH_SIZE" \
             --num-workers "$NUM_WORKERS" \
@@ -294,6 +302,7 @@ for STEP in "${STEP_LIST[@]}"; do
             --checkpoint "$CKPT" \
             --data-dir "$DATA_DIR" \
             --device "$DEVICE" \
+            --split "$SPLIT" \
             --num-samples "$NUM_SAMPLES" \
             --batch-size "$BATCH_SIZE" \
             --num-workers "$NUM_WORKERS" \
