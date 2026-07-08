@@ -75,6 +75,37 @@ def collect_spatial(run_dir: Path) -> List[Dict[str, object]]:
     return rows
 
 
+def collect_teacher_spatial_alignment(run_dir: Path) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    for path in sorted(
+        (run_dir / "teacher_spatial_alignment").glob(
+            "teacher_spatial_alignment_*.json"
+        )
+    ):
+        with open(path) as f:
+            payload = json.load(f)
+        meta = payload.get("meta", {})
+        step = int(meta.get("step", step_from_name(path)))
+        for timestep, layer_map in payload.get("results", {}).items():
+            for layer, metrics in layer_map.items():
+                row = {
+                    "run": run_dir.name,
+                    "step": step,
+                    "timestep": timestep,
+                    "layer": layer,
+                    "model": meta.get("model"),
+                    "teacher_enc_type": meta.get("teacher_enc_type"),
+                    "teacher_patch_shuffle": meta.get("teacher_patch_shuffle"),
+                    "repa_loss": meta.get("repa_loss"),
+                    "distill_coeff": meta.get("distill_coeff"),
+                    "kv_replace_mode": meta.get("kv_replace_mode"),
+                    "encoder_patch_shuffle": meta.get("encoder_patch_shuffle"),
+                }
+                row.update(metrics)
+                rows.append(row)
+    return rows
+
+
 def collect_linear_probe(run_dir: Path) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     for path in sorted((run_dir / "linear_probe").glob("linear_probe_*.json")):
@@ -103,6 +134,10 @@ def main(args):
     out_dir = Path(args.output_dir).resolve() if args.output_dir else run_dir / "early_eval"
     write_rows(out_dir / "q_scaffold_probe.csv", collect_q_scaffold(run_dir))
     write_rows(out_dir / "spatial_metrics.csv", collect_spatial(run_dir))
+    write_rows(
+        out_dir / "teacher_spatial_alignment.csv",
+        collect_teacher_spatial_alignment(run_dir),
+    )
     write_rows(out_dir / "linear_probe.csv", collect_linear_probe(run_dir))
 
 

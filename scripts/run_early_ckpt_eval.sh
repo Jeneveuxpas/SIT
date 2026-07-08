@@ -13,6 +13,7 @@ set -euo pipefail
 #   CUDA_VISIBLE_DEVICES=0 ./scripts/run_early_ckpt_eval.sh \
 #     --exp-name attnscaf-ablate-kvnorm-attnscaf-only-100k \
 #     --data-dir /dev/shm/data \
+#     --teacher-align --teacher-layer-depths 10 \
 #     --steps 0005000,0010000,0015000,0020000,0025000,0030000,0035000,0040000,0050000,0075000,0100000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,6 +37,9 @@ PATCH_SHUFFLE_MODE="checkpoint"
 
 SKIP_Q_PROBE="false"
 SKIP_SPATIAL="false"
+RUN_TEACHER_ALIGN="false"
+TEACHER_LAYER_DEPTHS="10"
+TEACHER_PATCH_SHUFFLE_MODE="off"
 RUN_LINEAR_PROBE="false"
 RUN_FID="false"
 FID_STEPS=""
@@ -121,6 +125,18 @@ while [[ $# -gt 0 ]]; do
         --skip-spatial)
             SKIP_SPATIAL="true"
             shift
+            ;;
+        --teacher-align)
+            RUN_TEACHER_ALIGN="true"
+            shift
+            ;;
+        --teacher-layer-depths)
+            TEACHER_LAYER_DEPTHS="$2"
+            shift 2
+            ;;
+        --teacher-patch-shuffle-mode)
+            TEACHER_PATCH_SHUFFLE_MODE="$2"
+            shift 2
             ;;
         --linear-probe)
             RUN_LINEAR_PROBE="true"
@@ -271,6 +287,20 @@ for STEP in "${STEP_LIST[@]}"; do
             SPATIAL_CMD+=(--layer-depths "$LAYER_DEPTHS")
         fi
         "${SPATIAL_CMD[@]}"
+    fi
+
+    if [[ "$RUN_TEACHER_ALIGN" == "true" ]]; then
+        python "${SCRIPT_DIR}/teacher_spatial_alignment.py" \
+            --checkpoint "$CKPT" \
+            --data-dir "$DATA_DIR" \
+            --device "$DEVICE" \
+            --num-samples "$NUM_SAMPLES" \
+            --batch-size "$BATCH_SIZE" \
+            --num-workers "$NUM_WORKERS" \
+            --timesteps "$TIMESTEPS" \
+            --layer-depths "$TEACHER_LAYER_DEPTHS" \
+            --inference-dtype "$INFERENCE_DTYPE" \
+            --patch-shuffle-mode "$TEACHER_PATCH_SHUFFLE_MODE"
     fi
 
     if [[ "$RUN_LINEAR_PROBE" == "true" ]]; then

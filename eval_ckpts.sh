@@ -5,7 +5,7 @@
 # 
 # 用法:
 #   # 评估指定的 steps
-#   ./eval_ckpts.sh --config configs/SIT-XL-early-stop-320.yaml --exp-name SIT-XL-early-stop-320 --steps "0490000,0500000,0510000,0520000,0530000,0540000,0550000" --gpu 6,7 --num-gpus 2 
+#   ./eval_ckpts.sh --config configs/repa-zscore-mlp-no-scaffold-400k.yaml --exp-name repa-zscore-mlp-no-scaffold-400k --steps "0400000" --gpu 0,1 --num-gpus 2 
 #   ./eval_ckpts.sh --config configs/SIT-6.yaml --exp-name SIT-6 --steps "0100000" --gpu 0,1,2,3,4,5,6,7 --num-gpus 8
 #   ./eval_ckpts.sh --config configs/SIT-XL-early-stop-300.yaml --exp-name SIT-XL-early-stop-300 --gpu 0,1,2,3,4,5,6,7 --num-gpus 8 --steps "0700000"
 #   # 使用 guidance interval
