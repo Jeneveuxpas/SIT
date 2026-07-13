@@ -1,0 +1,103 @@
+# Standalone AttnScaf continuation: stop the attention-output consistency
+# objective after the 100K checkpoint, without REPA and without K/V norm.
+#
+# Schedule (absolute global steps):
+#   0--30K:     encoder K/V scaffold
+#   30K--100K:  native SiT attention + full consistency objective
+#   100K--120K: cosine fade of the consistency coefficient to zero
+#   120K--400K: native SiT trained only with the denoising objective
+#
+# Resume usage:
+#   1. Copy 0100000.pt to:
+#        exps/attnscaf-no-repa-stop100k-fade20k-400k/checkpoints/0100000.pt
+#   2. Run:
+#        ./launch.sh \
+#          --config configs/attnscaf-consistency-no-repa-stop100k-fade20k-400k.yaml \
+#          --exp-name attnscaf-no-repa-stop100k-fade20k-400k \
+#          --gpu 0,1,2,3 --num-gpus 4 --resume-step 100000
+
+# ============================================================================
+# Model
+# ============================================================================
+model: SiT-XL/2-EncoderKV
+num-classes: 1000
+encoder-depth: 10
+fused-attn: true
+qk-norm: false
+projection-layer-type: mlp
+proj-kwargs-kernel-size: 3
+
+# ============================================================================
+# Encoder K/V Scaffold + attention-output consistency
+# ============================================================================
+use-kv: true
+enc-type: dinov2-b
+enc-layer-indices: "12"
+sit-layer-indices: "4"
+stage1-steps: 30000
+transition-steps: 0
+
+align-mode: attn_mse
+distill-coeff: 2.0
+distill-warmup-steps: 0
+
+# At step 100K the gate is still 1.0; it reaches 0 at step 120K.
+# Once it reaches 0, the encoder branch is skipped entirely.
+kv-stop-step: 100000
+kv-stop-fade-steps: 20000
+
+kv-replace-mode: kv
+kv-proj-type: linear
+kv-proj-kernel-size: 1
+kv-norm-type: none
+kv-zscore-alpha: 1.0
+
+# ============================================================================
+# REPA disabled
+# ============================================================================
+repa-loss: false
+proj-coeff: "0.0"
+projection-loss-type: cosine
+spnorm-method: zscore
+zscore-alpha: 0.6
+
+# ============================================================================
+# Dataset
+# ============================================================================
+data-dir: /dev/shm/data
+resolution: 256
+batch-size: 256
+
+# ============================================================================
+# Training
+# ============================================================================
+epochs: 1400
+max-train-steps: 100000
+checkpointing-steps: 100000
+sampling-steps: 100000
+gradient-accumulation-steps: 1
+learning-rate: 1e-4
+adam-beta1: 0.9
+adam-beta2: 0.999
+adam-weight-decay: 0.0
+adam-epsilon: 1e-8
+max-grad-norm: 1.0
+ema-decay: 0.9999
+ema-update-freq: 1
+
+# ============================================================================
+# Precision
+# ============================================================================
+allow-tf32: true
+mixed-precision: fp16
+compile: true
+
+# ============================================================================
+# Misc
+# ============================================================================
+seed: 0
+num-workers: 12
+cfg-prob: 0.1
+path-type: linear
+prediction: v
+n-samples: 256
