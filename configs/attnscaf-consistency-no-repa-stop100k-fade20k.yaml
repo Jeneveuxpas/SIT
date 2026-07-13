@@ -11,10 +11,7 @@
 #   1. Copy 0100000.pt to:
 #        exps/attnscaf-no-repa-stop100k-fade20k-400k/checkpoints/0100000.pt
 #   2. Run:
-#        ./launch.sh \
-#          --config configs/attnscaf-consistency-no-repa-stop100k-fade20k-400k.yaml \
-#          --exp-name attnscaf-no-repa-stop100k-fade20k-400k \
-#          --gpu 0,1,2,3 --num-gpus 4 --resume-step 100000
+#        ./launch.sh --config configs/attnscaf-consistency-no-repa-stop100k-fade20k.yaml --exp-name attnscaf-no-repa-stop100k-fade20k --gpu 0,1,2,3 --num-gpus 4 
 
 # ============================================================================
 # Model
@@ -72,7 +69,7 @@ batch-size: 256
 # Training
 # ============================================================================
 epochs: 1400
-max-train-steps: 100000
+max-train-steps: 200000
 checkpointing-steps: 100000
 sampling-steps: 100000
 gradient-accumulation-steps: 1
