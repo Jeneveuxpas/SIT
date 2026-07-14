@@ -1,17 +1,17 @@
-# Standalone AttnScaf continuation: stop the attention-output consistency
-# objective after the 100K checkpoint, without REPA and without K/V norm.
+# Ablation: Attention Residual Scaffold, without REPA and without K/V norm.
 #
-# Schedule (absolute global steps):
-#   0--30K:     encoder K/V scaffold
-#   30K--100K:  native SiT attention + full consistency objective
-#   100K--120K: cosine fade of the consistency coefficient to zero
-#   120K--400K: native SiT trained only with the denoising objective
+# This is a fresh 100K run; do not resume from a K/V-scaffold checkpoint.
 #
-# Resume usage:
-#   1. Copy 0100000.pt to:
-#        exps/attnscaf-no-repa-stop100k-fade20k-400k/checkpoints/0100000.pt
-#   2. Run:
-#        ./launch.sh --config configs/attnscaf-consistency-no-repa-stop100k-fade20k.yaml --exp-name attnscaf-consistency-no-repa-stop100k-fade20k --gpu 0,1,2,3 --num-gpus 4 
+#   0--30K: projected DINOv2 attention-input hidden state replaces the selected
+#            SiT block's attention residual update.
+#   30--100K: native SiT attention returns and is trained with an output-level
+#              handoff MSE against the detached residual teacher.
+#
+# Usage:
+#   ./launch.sh \
+#     --config configs/attnscaf-ablate-residual-scaffold-no-repa-100k.yaml \
+#     --exp-name attnscaf-ablate-residual-scaffold-no-repa-100k \
+#     --gpu 0,1,2,3 --num-gpus 4
 
 # ============================================================================
 # Model
@@ -25,12 +25,14 @@ projection-layer-type: mlp
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
-# Encoder K/V Scaffold + attention-output consistency
+# Encoder scaffold
 # ============================================================================
 use-kv: true
+scaffold-interface: residual
 enc-type: dinov2-b
 enc-layer-indices: "12"
 sit-layer-indices: "4"
+
 stage1-steps: 30000
 transition-steps: 0
 
@@ -38,11 +40,11 @@ align-mode: attn_mse
 distill-coeff: 2.0
 distill-warmup-steps: 0
 
-# At step 100K the gate is still 1.0; it reaches 0 at step 120K.
-# Once it reaches 0, the encoder branch is skipped entirely.
-kv-stop-step: 100000
-kv-stop-fade-steps: 20000
+# Keep the residual teacher available through the 100K comparison point.
+kv-stop-step: -1
 
+# Retained for protocol parity with the K/V run; residual mode uses one
+# bias-free linear hidden-state projection and does not use these K/V options.
 kv-replace-mode: kv
 kv-proj-type: linear
 kv-proj-kernel-size: 1
@@ -69,8 +71,8 @@ batch-size: 256
 # Training
 # ============================================================================
 epochs: 1400
-max-train-steps: 200000
-checkpointing-steps: 100000
+max-train-steps: 100000
+checkpointing-steps: 5000
 sampling-steps: 100000
 gradient-accumulation-steps: 1
 learning-rate: 1e-4

@@ -1,17 +1,19 @@
-# Standalone AttnScaf continuation: stop the attention-output consistency
-# objective after the 100K checkpoint, without REPA and without K/V norm.
+# AttnScaf + attention-output consistency, without REPA.
+# Distillation-coefficient ablation: lambda = 4.0.
 #
-# Schedule (absolute global steps):
-#   0--30K:     encoder K/V scaffold
-#   30K--100K:  native SiT attention + full consistency objective
-#   100K--120K: cosine fade of the consistency coefficient to zero
-#   120K--400K: native SiT trained only with the denoising objective
+# Protocol:
+#   0--30K:    native SiT Q attends to frozen DINOv2 K/V at layer 4.
+#   30--100K:  native SiT attention + always-on output consistency.
+#   Inference:  native SiT only; the encoder is training-only.
 #
-# Resume usage:
-#   1. Copy 0100000.pt to:
-#        exps/attnscaf-no-repa-stop100k-fade20k-400k/checkpoints/0100000.pt
+# Efficient resume from the common 30K checkpoint:
+#   1. Copy 0030000.pt into:
+#        exps/attnscaf-consistency-no-repa-lambda4-100k/checkpoints/
 #   2. Run:
-#        ./launch.sh --config configs/attnscaf-consistency-no-repa-stop100k-fade20k.yaml --exp-name attnscaf-consistency-no-repa-stop100k-fade20k --gpu 0,1,2,3 --num-gpus 4 
+#        ./launch.sh \
+#          --config configs/attnscaf-consistency-no-repa-lambda4-100k.yaml \
+#          --exp-name attnscaf-consistency-no-repa-lambda4-100k \
+#          --gpu 0,1,2,3 --num-gpus 4 --resume-step 30000
 
 # ============================================================================
 # Model
@@ -25,7 +27,7 @@ projection-layer-type: mlp
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
-# Encoder K/V Scaffold + attention-output consistency
+# Encoder K/V scaffold + attention-output consistency
 # ============================================================================
 use-kv: true
 enc-type: dinov2-b
@@ -34,14 +36,12 @@ sit-layer-indices: "4"
 stage1-steps: 30000
 transition-steps: 0
 
-align-mode: attn_mse
-distill-coeff: 2.0
-distill-warmup-steps: 0
+# Keep the encoder branch available as the training-only consistency teacher.
+kv-stop-step: -1
 
-# At step 100K the gate is still 1.0; it reaches 0 at step 120K.
-# Once it reaches 0, the encoder branch is skipped entirely.
-kv-stop-step: 100000
-kv-stop-fade-steps: 20000
+align-mode: attn_mse
+distill-coeff: 4.0
+distill-warmup-steps: 0
 
 kv-replace-mode: kv
 kv-proj-type: linear
@@ -69,8 +69,8 @@ batch-size: 256
 # Training
 # ============================================================================
 epochs: 1400
-max-train-steps: 200000
-checkpointing-steps: 100000
+max-train-steps: 100000
+checkpointing-steps: 5000
 sampling-steps: 100000
 gradient-accumulation-steps: 1
 learning-rate: 1e-4
