@@ -1,8 +1,13 @@
-# Standalone AttnScaf scaffold-duration ablation: 20K.
-# Hard scaffold withdrawal; no REPA, no K/V normalization, lambda=2.
+# Literal hidden-state replacement using the exact DINO feature used by REPA.
 #
-# Efficient resume: copy the common 0020000.pt checkpoint into this
-# experiment's checkpoints directory and launch with --resume-step 20000.
+#   0--30K:    after SiT block 10, replace the complete hidden state with a
+#              bias-free linear projection of DINOv2 x_norm_patchtokens.
+#   30--100K:  restore the native block-10 hidden state and match it to the
+#              detached projected DINO feature with MSE (lambda=2).
+#
+# This intentionally removes the noisy generative state accumulated through
+# block 10 during the scaffold window. It is a diagnostic interface control,
+# not a residual injection. Start from step 0; do not resume a K/V checkpoint.
 
 # ============================================================================
 # Model
@@ -16,13 +21,16 @@ projection-layer-type: mlp
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
-# Encoder K/V scaffold + attention-output consistency
+# REPA-feature hidden-state scaffold
 # ============================================================================
 use-kv: true
+scaffold-interface: hidden
+scaffold-feature-source: repa
 enc-type: dinov2-b
 enc-layer-indices: "12"
-sit-layer-indices: "4"
-stage1-steps: 20000
+sit-layer-indices: "10"
+
+stage1-steps: 30000
 transition-steps: 0
 transition-schedule: cosine
 
@@ -31,6 +39,7 @@ align-mode: attn_mse
 distill-coeff: 2.0
 distill-warmup-steps: 0
 
+# Inactive for hidden mode; retained for protocol parity.
 kv-replace-mode: kv
 kv-proj-type: linear
 kv-proj-kernel-size: 1
@@ -38,7 +47,7 @@ kv-norm-type: none
 kv-zscore-alpha: 1.0
 
 # ============================================================================
-# REPA disabled
+# REPA loss disabled: DINO features participate only through the scaffold.
 # ============================================================================
 repa-loss: false
 proj-coeff: "0.0"

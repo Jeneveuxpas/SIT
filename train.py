@@ -361,7 +361,7 @@ def main(args):
         
         # Auto-detect enc_dim and enc_heads from the encoder layer
         if len(enc_layer_indices) > 0:
-            if args.scaffold_interface == "residual":
+            if args.scaffold_interface in ("residual", "hidden"):
                 enc_dim = encoder_kv_extractor.get_layer_input_dim(enc_layer_indices[0])
             else:
                 enc_dim = encoder_kv_extractor.get_layer_dim(enc_layer_indices[0])
@@ -753,7 +753,18 @@ def main(args):
                         except RuntimeError:
                             # Fallback for encoders whose wrapper path does not trigger registered hooks.
                             enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
-                        if args.scaffold_interface == "residual":
+                        if (
+                            args.scaffold_interface == "hidden"
+                            or (
+                                args.scaffold_interface == "residual"
+                                and args.scaffold_feature_source == "repa"
+                            )
+                        ):
+                            # Exact REPA feature source: final normalized DINO
+                            # patch tokens. Repeat only to preserve the existing
+                            # encoder-layer-to-SiT-layer list interface.
+                            enc_feat_list = [z for _ in enc_layer_indices]
+                        elif args.scaffold_interface == "residual":
                             enc_feat_list = encoder_kv_extractor.get_captured_feat_list()
                 else:
                     if kv_active:
@@ -767,9 +778,21 @@ def main(args):
                                 patch_size=args.encoder_patch_shuffle_patch_size,
                             )
                         with accelerator.autocast():
-                            enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
-                            if args.scaffold_interface == "residual":
-                                enc_feat_list = encoder_kv_extractor.get_captured_feat_list()
+                            if (
+                                args.scaffold_interface == "hidden"
+                                or (
+                                    args.scaffold_interface == "residual"
+                                    and args.scaffold_feature_source == "repa"
+                                )
+                            ):
+                                encoder_kv_extractor.reset_cache()
+                                features = encoders[0].forward_features(raw_image_enc)
+                                z_hidden = features['x_norm_patchtokens']
+                                enc_feat_list = [z_hidden for _ in enc_layer_indices]
+                            else:
+                                enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
+                                if args.scaffold_interface == "residual":
+                                    enc_feat_list = encoder_kv_extractor.get_captured_feat_list()
                     
                     if repa_active:
                         with accelerator.autocast():
@@ -805,7 +828,7 @@ def main(args):
                     ),
                     enc_feat_list=(
                         enc_feat_list
-                        if kv_active and args.scaffold_interface == "residual" else None
+                        if kv_active and args.scaffold_interface in ("residual", "hidden") else None
                     ),
                     stage=current_stage if kv_active else 2,  # Skip stage 1 if KV branch is off
                     align_mode=current_align_mode,
@@ -1022,9 +1045,14 @@ def parse_args(input_args=None):
                         help="Which attention components to replace from encoder in Stage 1: "
                              "kv (default), k-only, v-only, qkv (all), qk, q-only")
     parser.add_argument("--scaffold-interface", type=str, default="kv",
-                        choices=["kv", "residual"],
+                        choices=["kv", "residual", "hidden"],
                         help="Where the temporary encoder scaffold enters: encoder K/V memory "
-                             "(kv, default) or the attention residual branch (residual)")
+                             "(kv, default), the attention residual branch (residual), or a "
+                             "literal replacement of the selected block hidden state (hidden)")
+    parser.add_argument("--scaffold-feature-source", type=str, default="attn_input",
+                        choices=["attn_input", "repa"],
+                        help="Encoder feature used by residual/hidden scaffolds: the selected "
+                             "encoder attention input, or REPA's final x_norm_patchtokens")
     parser.add_argument("--encoder-patch-shuffle", action=argparse.BooleanOptionalAction, default=False,
                         help="Shuffle patches of the preprocessed encoder input before extracting scaffold K/V")
     parser.add_argument("--encoder-patch-shuffle-grid", type=int, default=0,
@@ -1154,14 +1182,18 @@ def parse_args(input_args=None):
         parser.error("--transition-steps must be >= 0")
     if args.distill_warmup_steps < 0:
         parser.error("--distill-warmup-steps must be >= 0")
-    if args.scaffold_interface == "residual" and not args.use_kv:
-        parser.error("--scaffold-interface residual requires --use-kv")
+    if args.scaffold_interface in ("residual", "hidden") and not args.use_kv:
+        parser.error("--scaffold-interface residual/hidden requires --use-kv")
+    if args.scaffold_interface == "hidden" and args.scaffold_feature_source != "repa":
+        parser.error("--scaffold-interface hidden requires --scaffold-feature-source repa")
+    if args.scaffold_interface == "kv" and args.scaffold_feature_source != "attn_input":
+        parser.error("--scaffold-feature-source only applies to residual/hidden scaffolds")
     if (
-        args.scaffold_interface == "residual"
+        args.scaffold_interface in ("residual", "hidden")
         and args.distill_coeff > 0
         and args.align_mode != "attn_mse"
     ):
-        parser.error("Residual scaffolding currently requires --align-mode attn_mse")
+        parser.error("Residual/hidden scaffolding currently requires --align-mode attn_mse")
 
     for prefix in ("kv", "repa"):
         decay_start = getattr(args, f"{prefix}_decay_start_step")

@@ -278,9 +278,10 @@ class SiTBlockWithEncoderKV(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
         
-        if scaffold_interface not in ("kv", "residual"):
+        if scaffold_interface not in ("kv", "residual", "hidden"):
             raise ValueError(
-                f"scaffold_interface must be 'kv' or 'residual', got {scaffold_interface}"
+                "scaffold_interface must be 'kv', 'residual', or 'hidden', "
+                f"got {scaffold_interface}"
             )
 
         # Encoder scaffold projections.  The residual baseline projects the
@@ -293,6 +294,7 @@ class SiTBlockWithEncoderKV(nn.Module):
             self.has_encoder_scaffold and scaffold_interface == "kv" and enc_heads is not None
         )
         self.has_enc_residual = self.has_encoder_scaffold and scaffold_interface == "residual"
+        self.has_enc_hidden = self.has_encoder_scaffold and scaffold_interface == "hidden"
         self.kv_replace_mode = kv_replace_mode
         self.kv_use_adaln = kv_use_adaln
         if self.has_enc_kv:
@@ -308,6 +310,8 @@ class SiTBlockWithEncoderKV(nn.Module):
             )
         elif self.has_enc_residual:
             self.residual_proj = nn.Linear(enc_dim, hidden_size, bias=False)
+        elif self.has_enc_hidden:
+            self.hidden_proj = nn.Linear(enc_dim, hidden_size, bias=False)
         
 
     def forward(
@@ -327,7 +331,9 @@ class SiTBlockWithEncoderKV(nn.Module):
         Forward pass.
         Args:
             enc_kv: Optional (Q_enc, K_enc, V_enc) tuple from encoder
-            enc_feat: Optional encoder attention-input patch features (B, N, C_enc)
+            enc_feat: Optional encoder patch features (B, N, C_enc). Depending
+                on the training configuration this is either the selected
+                encoder attention input or REPA's final normalized patch tokens.
         """
         # AdaLN modulation
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
@@ -357,7 +363,55 @@ class SiTBlockWithEncoderKV(nn.Module):
             if stage == 2 and not self.attn.train_kv_proj_in_stage2:
                 residual_teacher = residual_teacher.detach()
 
+        hidden_teacher = None
+        if self.has_enc_hidden and enc_feat is not None and self.training:
+            if enc_feat.ndim != 3:
+                raise ValueError(
+                    f"enc_feat must have shape (B, N, C), got {tuple(enc_feat.shape)}"
+                )
+            if enc_feat.shape[:2] != x.shape[:2]:
+                raise ValueError(
+                    "Encoder and SiT token grids must match for hidden scaffolding: "
+                    f"encoder={tuple(enc_feat.shape[:2])}, SiT={tuple(x.shape[:2])}"
+                )
+            hidden_teacher = self.hidden_proj(enc_feat)
+            if stage == 2 and not self.attn.train_kv_proj_in_stage2:
+                hidden_teacher = hidden_teacher.detach()
+
         attn_input = modulate(self.norm1(x), shift_msa, scale_msa)
+
+        if self.scaffold_interface == "hidden" and hidden_teacher is not None:
+            # Literal hidden-state replacement control:
+            #     h_l <- P(f_DINO(x_0)).
+            # During the scaffold window this deliberately discards the native
+            # generative state at the selected depth.  Outside that window, the
+            # native block is restored and matched to the detached teacher.
+            if stage == 1 and not transition_active:
+                return hidden_teacher, None
+
+            native_attn_out, _ = self.attn(
+                attn_input,
+                stage=2,
+                align_mode=align_mode,
+                time_input=time_input,
+                path_type=path_type,
+                kv_replace_mode=self.kv_replace_mode,
+            )
+            native_x = x + gate_msa.unsqueeze(1) * native_attn_out
+            native_x = native_x + gate_mlp.unsqueeze(1) * self.mlp(
+                modulate(self.norm2(native_x), shift_mlp, scale_mlp)
+            )
+
+            if stage == 1:
+                alpha = transition_alpha.to(device=native_x.device, dtype=native_x.dtype)
+                return (1.0 - alpha) * hidden_teacher + alpha * native_x, None
+
+            if align_mode != "attn_mse":
+                raise ValueError(
+                    "Hidden-state scaffolding currently supports align_mode='attn_mse' only"
+                )
+            distill_loss = F.mse_loss(native_x.float(), hidden_teacher.float())
+            return native_x, distill_loss
 
         if self.scaffold_interface == "residual" and residual_teacher is not None:
             if stage == 1 and not transition_active:
@@ -415,7 +469,8 @@ class SiTWithEncoderKV(nn.Module):
     SiT with a temporary encoder scaffold.
     
     Structure:
-    - Stage 1: Encoder K/V memory or projected encoder residual guidance
+    - Stage 1: Encoder K/V memory, projected attention residual guidance, or
+      literal hidden-state replacement
     - Stage 2: Native SiT attention + output handoff loss
     """
     def __init__(
