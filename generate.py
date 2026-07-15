@@ -175,7 +175,7 @@ def main(args):
     filtered_state_dict = {}
     ignored_keys = []
     for k, v in state_dict.items():
-        if 'kv_proj' in k:  # DINO K/V projection weights
+        if 'kv_proj' in k or 'residual_proj' in k:  # Training-only scaffold projections
             ignored_keys.append(k)
         else:
             filtered_state_dict[k] = v

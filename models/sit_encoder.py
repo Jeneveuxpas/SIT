@@ -232,7 +232,7 @@ class AttentionWithEncoderKV(nn.Module):
 
 class SiTBlockWithEncoderKV(nn.Module):
     """
-    SiT block with optional Encoder Q/K/V injection.
+    SiT block with optional encoder K/V or attention-residual scaffolding.
     """
     def __init__(
         self,
@@ -247,6 +247,7 @@ class SiTBlockWithEncoderKV(nn.Module):
         kv_norm_type: str = "zscore",
         kv_zscore_alpha: float = 1.0,
         kv_replace_mode: str = "kv",
+        scaffold_interface: str = "kv",
         kv_use_adaln: bool = False,
         train_kv_proj_in_stage2: bool = False,
         **block_kwargs
@@ -277,8 +278,21 @@ class SiTBlockWithEncoderKV(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
         
-        # Encoder Q/K/V projection
-        self.has_enc_kv = enc_dim is not None and enc_heads is not None
+        if scaffold_interface not in ("kv", "residual"):
+            raise ValueError(
+                f"scaffold_interface must be 'kv' or 'residual', got {scaffold_interface}"
+            )
+
+        # Encoder scaffold projections.  The residual baseline projects the
+        # encoder attention-input hidden state directly into the SiT attention
+        # residual branch.  It intentionally bypasses native attention during
+        # the scaffold window, while preserving the block's main residual path.
+        self.scaffold_interface = scaffold_interface
+        self.has_encoder_scaffold = enc_dim is not None
+        self.has_enc_kv = (
+            self.has_encoder_scaffold and scaffold_interface == "kv" and enc_heads is not None
+        )
+        self.has_enc_residual = self.has_encoder_scaffold and scaffold_interface == "residual"
         self.kv_replace_mode = kv_replace_mode
         self.kv_use_adaln = kv_use_adaln
         if self.has_enc_kv:
@@ -292,6 +306,8 @@ class SiTBlockWithEncoderKV(nn.Module):
                 kv_replace_mode=kv_replace_mode,
                 kv_use_adaln=kv_use_adaln,
             )
+        elif self.has_enc_residual:
+            self.residual_proj = nn.Linear(enc_dim, hidden_size, bias=False)
         
 
     def forward(
@@ -305,17 +321,19 @@ class SiTBlockWithEncoderKV(nn.Module):
         path_type: str = "linear",
         transition_alpha: Optional[torch.Tensor] = None,
         transition_active: bool = False,
+        enc_feat: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass.
         Args:
             enc_kv: Optional (Q_enc, K_enc, V_enc) tuple from encoder
+            enc_feat: Optional encoder attention-input patch features (B, N, C_enc)
         """
         # AdaLN modulation
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.adaLN_modulation(c).chunk(6, dim=-1)
         )     
-        # Prepare Encoder Q/K/V if available
+        # Prepare the selected encoder scaffold if available.
         q_enc, k_enc, v_enc = None, None, None
         if self.has_enc_kv and enc_kv is not None and self.training:
             q_raw, k_raw, v_raw = enc_kv
@@ -323,21 +341,69 @@ class SiTBlockWithEncoderKV(nn.Module):
             q_enc, k_enc, v_enc = self.kv_proj(
                 q_enc=q_raw, k_enc=k_raw, v_enc=v_raw, stage=proj_stage, c=c,
             )
-        
-        # Attention with stage-based Q/K/V selection
-        attn_out, distill_loss = self.attn(
-            modulate(self.norm1(x), shift_msa, scale_msa),
-            q_enc=q_enc,
-            k_enc=k_enc,
-            v_enc=v_enc,
-            stage=stage,
-            align_mode=align_mode,
-            time_input=time_input,
-            path_type=path_type,
-            kv_replace_mode=self.kv_replace_mode,
-            transition_alpha=transition_alpha,
-            transition_active=transition_active,
-        )
+
+        residual_teacher = None
+        if self.has_enc_residual and enc_feat is not None and self.training:
+            if enc_feat.ndim != 3:
+                raise ValueError(
+                    f"enc_feat must have shape (B, N, C), got {tuple(enc_feat.shape)}"
+                )
+            if enc_feat.shape[:2] != x.shape[:2]:
+                raise ValueError(
+                    "Encoder and SiT token grids must match for residual scaffolding: "
+                    f"encoder={tuple(enc_feat.shape[:2])}, SiT={tuple(x.shape[:2])}"
+                )
+            residual_teacher = self.residual_proj(enc_feat)
+            if stage == 2 and not self.attn.train_kv_proj_in_stage2:
+                residual_teacher = residual_teacher.detach()
+
+        attn_input = modulate(self.norm1(x), shift_msa, scale_msa)
+
+        if self.scaffold_interface == "residual" and residual_teacher is not None:
+            if stage == 1 and not transition_active:
+                # Direct-feature control: replace only the attention branch
+                # update; keep x, AdaLN gating, MLP, and downstream blocks native.
+                attn_out = residual_teacher
+                distill_loss = None
+            else:
+                native_attn_out, _ = self.attn(
+                    attn_input,
+                    stage=2,
+                    align_mode=align_mode,
+                    time_input=time_input,
+                    path_type=path_type,
+                    kv_replace_mode=self.kv_replace_mode,
+                )
+                if stage == 1:
+                    alpha = transition_alpha.to(
+                        device=native_attn_out.device, dtype=native_attn_out.dtype
+                    )
+                    attn_out = (1.0 - alpha) * residual_teacher + alpha * native_attn_out
+                    distill_loss = None
+                else:
+                    if align_mode != "attn_mse":
+                        raise ValueError(
+                            "Residual scaffolding currently supports align_mode='attn_mse' only"
+                        )
+                    attn_out = native_attn_out
+                    distill_loss = F.mse_loss(
+                        native_attn_out.float(), residual_teacher.float()
+                    )
+        else:
+            # Native attention, or the original K/V scaffold path.
+            attn_out, distill_loss = self.attn(
+                attn_input,
+                q_enc=q_enc,
+                k_enc=k_enc,
+                v_enc=v_enc,
+                stage=stage,
+                align_mode=align_mode,
+                time_input=time_input,
+                path_type=path_type,
+                kv_replace_mode=self.kv_replace_mode,
+                transition_alpha=transition_alpha,
+                transition_active=transition_active,
+            )
         x = x + gate_msa.unsqueeze(1) * attn_out
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         
@@ -346,11 +412,11 @@ class SiTBlockWithEncoderKV(nn.Module):
 
 class SiTWithEncoderKV(nn.Module):
     """
-    SiT with Encoder K/V Distillation.
+    SiT with a temporary encoder scaffold.
     
     Structure:
-    - Stage 1: Encoder K/V semantic guidance
-    - Stage 2: SiT K/V + distillation
+    - Stage 1: Encoder K/V memory or projected encoder residual guidance
+    - Stage 2: Native SiT attention + output handoff loss
     """
     def __init__(
         self,
@@ -385,6 +451,7 @@ class SiTWithEncoderKV(nn.Module):
         kv_norm_type: str = "layernorm",
         kv_zscore_alpha: float = 1.0,
         kv_replace_mode: str = "kv",
+        scaffold_interface: str = "kv",
         kv_use_adaln: bool = False,
         distill_temperature: float = 1.0,
         kv_distill_snr_gamma: float = 1.0,
@@ -409,6 +476,7 @@ class SiTWithEncoderKV(nn.Module):
         self.hidden_size = hidden_size
         self.distill_temperature = distill_temperature
         self.kv_replace_mode = kv_replace_mode
+        self.scaffold_interface = scaffold_interface
         
         # Encoder KV config
         self.enc_layer_indices = enc_layer_indices
@@ -458,6 +526,7 @@ class SiTWithEncoderKV(nn.Module):
                     kv_norm_type=kv_norm_type,
                     kv_zscore_alpha=kv_zscore_alpha,
                     kv_replace_mode=kv_replace_mode,
+                    scaffold_interface=scaffold_interface,
                     kv_use_adaln=kv_use_adaln,
                     train_kv_proj_in_stage2=train_kv_proj_in_stage2,
                     **{
@@ -473,6 +542,7 @@ class SiTWithEncoderKV(nn.Module):
                 block = SiTBlockWithEncoderKV(
                     hidden_size, num_heads, mlp_ratio=mlp_ratio,
                     enc_dim=None, enc_heads=None,
+                    scaffold_interface=scaffold_interface,
                     train_kv_proj_in_stage2=train_kv_proj_in_stage2,
                     **block_kwargs
                 )
@@ -540,11 +610,13 @@ class SiTWithEncoderKV(nn.Module):
         transition_alpha: Optional[torch.Tensor] = None,
         transition_active: bool = False,
         return_logvar: bool = False,
+        enc_feat_list: Optional[List[torch.Tensor]] = None,
     ):
         """
         Forward pass.
         Args:
             enc_kv_list: List of (Q, K, V) tuples from encoder extractor
+            enc_feat_list: List of encoder patch hidden states for residual scaffolding
         """
         x = self.x_embedder(x) + self.pos_embed
         N, T, D = x.shape
@@ -560,13 +632,19 @@ class SiTWithEncoderKV(nn.Module):
         
         for i, block in enumerate(self.blocks):
             enc_kv = None
+            enc_feat = None
             if i in self.sit_to_enc_idx and enc_kv_list is not None:
                 enc_idx = self.sit_to_enc_idx[i]
                 if enc_idx < len(enc_kv_list):
                     enc_kv = enc_kv_list[enc_idx]
+            if i in self.sit_to_enc_idx and enc_feat_list is not None:
+                enc_idx = self.sit_to_enc_idx[i]
+                if enc_idx < len(enc_feat_list):
+                    enc_feat = enc_feat_list[enc_idx]
             
             x, block_distill_loss = block(
-                x, c, enc_kv=enc_kv, stage=stage, align_mode=align_mode,
+                x, c, enc_kv=enc_kv, enc_feat=enc_feat,
+                stage=stage, align_mode=align_mode,
                 time_input=t, path_type=self.path_type,
                 transition_alpha=transition_alpha,
                 transition_active=transition_active,

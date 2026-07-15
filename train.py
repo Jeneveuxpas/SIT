@@ -361,7 +361,10 @@ def main(args):
         
         # Auto-detect enc_dim and enc_heads from the encoder layer
         if len(enc_layer_indices) > 0:
-            enc_dim = encoder_kv_extractor.get_layer_dim(enc_layer_indices[0])
+            if args.scaffold_interface == "residual":
+                enc_dim = encoder_kv_extractor.get_layer_input_dim(enc_layer_indices[0])
+            else:
+                enc_dim = encoder_kv_extractor.get_layer_dim(enc_layer_indices[0])
             enc_heads = encoder_kv_extractor.get_layer_heads(enc_layer_indices[0])
             
             # Fallback to model embedding dim if detection failed
@@ -405,6 +408,7 @@ def main(args):
         kv_norm_type=args.kv_norm_type,
         kv_zscore_alpha=args.kv_zscore_alpha,
         kv_replace_mode=args.kv_replace_mode,
+        scaffold_interface=args.scaffold_interface,
         kv_use_adaln=args.kv_use_adaln,
         train_kv_proj_in_stage2=args.train_kv_proj_stage2,
         distill_temperature=args.distill_temperature,
@@ -446,7 +450,10 @@ def main(args):
     )
     if accelerator.is_main_process:
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
-        logger.info(f"Encoder KV: {len(enc_layer_indices)} layer pairs, replace_mode={args.kv_replace_mode}")
+        logger.info(
+            f"Encoder scaffold: interface={args.scaffold_interface}, "
+            f"{len(enc_layer_indices)} layer pairs, replace_mode={args.kv_replace_mode}"
+        )
         logger.info(f"Encoder layers: {enc_layer_indices} -> SiT layers: {sit_layer_indices}")
         if args.encoder_patch_shuffle:
             logger.info(
@@ -719,8 +726,9 @@ def main(args):
             with torch.no_grad():
                 x = sample_posterior(x, latents_scale=latents_scale, latents_bias=latents_bias)
                 
-                # Extract Encoder K/V and CLS token (only if KV distillation is enabled)
+                # Extract the encoder tensors required by the selected scaffold.
                 enc_kv_list = None
+                enc_feat_list = None
                 # Extract encoder features for REPA projection loss
                 zs = []
                 
@@ -745,6 +753,8 @@ def main(args):
                         except RuntimeError:
                             # Fallback for encoders whose wrapper path does not trigger registered hooks.
                             enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
+                        if args.scaffold_interface == "residual":
+                            enc_feat_list = encoder_kv_extractor.get_captured_feat_list()
                 else:
                     if kv_active:
                         if raw_image is None:
@@ -758,6 +768,8 @@ def main(args):
                             )
                         with accelerator.autocast():
                             enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
+                            if args.scaffold_interface == "residual":
+                                enc_feat_list = encoder_kv_extractor.get_captured_feat_list()
                     
                     if repa_active:
                         with accelerator.autocast():
@@ -787,7 +799,14 @@ def main(args):
                 )
                 model_kwargs = dict(
                     y=labels,
-                    enc_kv_list=enc_kv_list if kv_active else None,
+                    enc_kv_list=(
+                        enc_kv_list
+                        if kv_active and args.scaffold_interface == "kv" else None
+                    ),
+                    enc_feat_list=(
+                        enc_feat_list
+                        if kv_active and args.scaffold_interface == "residual" else None
+                    ),
                     stage=current_stage if kv_active else 2,  # Skip stage 1 if KV branch is off
                     align_mode=current_align_mode,
                     transition_alpha=transition_alpha_tensor,
@@ -879,7 +898,7 @@ def main(args):
                     "proj_loss": proj_loss.detach().item() if isinstance(proj_loss, torch.Tensor) else proj_loss,
                     # "proj_loss_raw": proj_loss_raw.detach().item() if isinstance(proj_loss_raw, torch.Tensor) else proj_loss_raw,
                     "distill_loss": distill_loss.detach().item() if isinstance(distill_loss, torch.Tensor) else distill_loss,
-                    # "distill_loss_raw": distill_loss_raw.detach().item() if isinstance(distill_loss_raw, torch.Tensor) else distill_loss_raw,
+                    "distill_loss_raw": distill_loss_raw.detach().item() if isinstance(distill_loss_raw, torch.Tensor) else distill_loss_raw,
                     # "distill_coeff": current_distill_coeff,
                     # "distill_coeff_base": base_distill_coeff,
                     "repa_gate": repa_gate,
@@ -1002,6 +1021,10 @@ def parse_args(input_args=None):
                         choices=["kv", "k", "v", "qkv", "qk", "q"],
                         help="Which attention components to replace from encoder in Stage 1: "
                              "kv (default), k-only, v-only, qkv (all), qk, q-only")
+    parser.add_argument("--scaffold-interface", type=str, default="kv",
+                        choices=["kv", "residual"],
+                        help="Where the temporary encoder scaffold enters: encoder K/V memory "
+                             "(kv, default) or the attention residual branch (residual)")
     parser.add_argument("--encoder-patch-shuffle", action=argparse.BooleanOptionalAction, default=False,
                         help="Shuffle patches of the preprocessed encoder input before extracting scaffold K/V")
     parser.add_argument("--encoder-patch-shuffle-grid", type=int, default=0,
@@ -1131,6 +1154,14 @@ def parse_args(input_args=None):
         parser.error("--transition-steps must be >= 0")
     if args.distill_warmup_steps < 0:
         parser.error("--distill-warmup-steps must be >= 0")
+    if args.scaffold_interface == "residual" and not args.use_kv:
+        parser.error("--scaffold-interface residual requires --use-kv")
+    if (
+        args.scaffold_interface == "residual"
+        and args.distill_coeff > 0
+        and args.align_mode != "attn_mse"
+    ):
+        parser.error("Residual scaffolding currently requires --align-mode attn_mse")
 
     for prefix in ("kv", "repa"):
         decay_start = getattr(args, f"{prefix}_decay_start_step")

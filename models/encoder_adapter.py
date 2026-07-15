@@ -55,6 +55,89 @@ class EncoderKVExtractor(nn.Module):
                 raise RuntimeError(f"Q/K/V for layer {idx} not captured")
             kv_list.append(self.captured_kv[idx])
         return kv_list
+
+    def get_captured_feat_list(self) -> List[torch.Tensor]:
+        """Collect patch-token features captured at the encoder attention inputs.
+
+        Attention hooks keep the encoder's prefix tokens in ``captured_feat`` but
+        remove them from Q/K/V.  Remove leading prefixes using model metadata (or
+        square-grid inference), then spatially resize patch tokens when the
+        selected encoder produces a different grid from the SiT block.
+
+        Returns:
+            List of tensors shaped ``(B, target_num_patches, encoder_dim)`` in
+            the same order as ``self.layer_indices``.
+        """
+        feat_list = []
+        configured_target = getattr(self, "_target_num_patches", None)
+
+        for idx in self.layer_indices:
+            if idx not in self.captured_feat:
+                raise RuntimeError(f"Hidden features for layer {idx} not captured")
+
+            feat = self.captured_feat[idx]
+            if feat.ndim != 3:
+                raise RuntimeError(
+                    f"Expected hidden features for layer {idx} to have shape (B, N, C), "
+                    f"got {tuple(feat.shape)}"
+                )
+
+            # Remove known CLS/register tokens first.  If the wrapper does not
+            # expose prefix metadata, infer a small leading prefix only when the
+            # remaining tokens form a square patch grid.  Do not infer prefixes
+            # from the cached K length: hierarchical hooks may already have
+            # resized K to a different spatial grid.
+            kv_tokens = None
+            if idx in self.captured_kv:
+                kv_tokens = int(self.captured_kv[idx][1].shape[-2])
+
+            num_prefix = 0
+            metadata_prefix = self._get_prefix_token_count()
+            if 0 < metadata_prefix < feat.shape[1]:
+                remaining = feat.shape[1] - metadata_prefix
+                remaining_hw = int(round(remaining ** 0.5))
+                if remaining_hw * remaining_hw == remaining:
+                    num_prefix = metadata_prefix
+            if num_prefix == 0:
+                token_hw = int(round(feat.shape[1] ** 0.5))
+                if token_hw * token_hw != feat.shape[1]:
+                    for candidate in range(1, min(17, feat.shape[1])):
+                        patch_tokens = feat.shape[1] - candidate
+                        patch_hw = int(round(patch_tokens ** 0.5))
+                        if patch_hw * patch_hw == patch_tokens:
+                            num_prefix = candidate
+                            break
+            if num_prefix > 0:
+                if feat.shape[1] <= num_prefix:
+                    raise RuntimeError(
+                        f"Invalid prefix-token count {num_prefix} for hidden shape "
+                        f"{tuple(feat.shape)} at layer {idx}"
+                    )
+                feat = feat[:, num_prefix:, :]
+
+            target_tokens = configured_target or kv_tokens
+            if target_tokens is not None and feat.shape[1] != target_tokens:
+                source_hw = int(round(feat.shape[1] ** 0.5))
+                target_hw = int(round(target_tokens ** 0.5))
+                if source_hw * source_hw != feat.shape[1] or target_hw * target_hw != target_tokens:
+                    raise RuntimeError(
+                        f"Cannot spatially resize encoder hidden features from "
+                        f"{feat.shape[1]} to {target_tokens} non-square tokens"
+                    )
+                feat_2d = feat.transpose(1, 2).reshape(
+                    feat.shape[0], feat.shape[2], source_hw, source_hw
+                )
+                feat_2d = F.interpolate(
+                    feat_2d.float(), size=(target_hw, target_hw),
+                    mode="bilinear", align_corners=False,
+                )
+                feat = feat_2d.flatten(2).transpose(1, 2).to(
+                    dtype=self.captured_feat[idx].dtype
+                )
+
+            feat_list.append(feat.detach())
+
+        return feat_list
             
     def _get_model_blocks(self, model: nn.Module) -> List[nn.Module]:
         """Flatten model blocks into a list for consistent indexing."""
@@ -172,6 +255,26 @@ class EncoderKVExtractor(nn.Module):
              
         # Fallback: try to find linear layers in attention
         return 0
+
+    def get_layer_input_dim(self, idx: int) -> int:
+        """Get the channel dimension of the hidden state entering attention.
+
+        This is usually identical to the Q/K/V output dimension, but can differ
+        in hierarchical encoders at a stage-transition block.
+        """
+        if idx >= len(self.blocks):
+            return 0
+
+        block = self.blocks[idx]
+        if hasattr(block, "attn") and isinstance(block.attn, nn.MultiheadAttention):
+            return block.attn.embed_dim
+        if hasattr(block, "attn") and hasattr(block.attn, "qkv"):
+            return int(block.attn.qkv.in_features)
+        if hasattr(block, "attention") and hasattr(block.attention, "attention"):
+            return int(block.attention.attention.query.in_features)
+        if hasattr(block, "attn") and hasattr(block.attn, "q_proj"):
+            return int(block.attn.q_proj.in_features)
+        return self.get_layer_dim(idx)
 
     def get_layer_heads(self, idx: int) -> int:
         """Get the number of attention heads of the specified layer."""
