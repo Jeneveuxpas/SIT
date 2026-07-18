@@ -28,6 +28,7 @@ class EncoderKVExtractor(nn.Module):
         self.layer_indices = layer_indices
         self.captured_kv: Dict[int, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}  # (Q, K, V)
         self.captured_feat: Dict[int, torch.Tensor] = {}
+        self.captured_attn_output: Dict[int, torch.Tensor] = {}
         self._hooks = []
         
         # Flatten blocks to allow index-based access
@@ -44,6 +45,7 @@ class EncoderKVExtractor(nn.Module):
         """Reset captured hook outputs before a new encoder forward."""
         self.captured_kv = {}
         self.captured_feat = {}
+        self.captured_attn_output = {}
 
     def get_captured_kv_list(self) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """
@@ -69,75 +71,104 @@ class EncoderKVExtractor(nn.Module):
             the same order as ``self.layer_indices``.
         """
         feat_list = []
-        configured_target = getattr(self, "_target_num_patches", None)
-
         for idx in self.layer_indices:
             if idx not in self.captured_feat:
                 raise RuntimeError(f"Hidden features for layer {idx} not captured")
-
-            feat = self.captured_feat[idx]
-            if feat.ndim != 3:
-                raise RuntimeError(
-                    f"Expected hidden features for layer {idx} to have shape (B, N, C), "
-                    f"got {tuple(feat.shape)}"
+            feat_list.append(
+                self._prepare_patch_features(
+                    self.captured_feat[idx], idx, feature_name="hidden features"
                 )
-
-            # Remove known CLS/register tokens first.  If the wrapper does not
-            # expose prefix metadata, infer a small leading prefix only when the
-            # remaining tokens form a square patch grid.  Do not infer prefixes
-            # from the cached K length: hierarchical hooks may already have
-            # resized K to a different spatial grid.
-            kv_tokens = None
-            if idx in self.captured_kv:
-                kv_tokens = int(self.captured_kv[idx][1].shape[-2])
-
-            num_prefix = 0
-            metadata_prefix = self._get_prefix_token_count()
-            if 0 < metadata_prefix < feat.shape[1]:
-                remaining = feat.shape[1] - metadata_prefix
-                remaining_hw = int(round(remaining ** 0.5))
-                if remaining_hw * remaining_hw == remaining:
-                    num_prefix = metadata_prefix
-            if num_prefix == 0:
-                token_hw = int(round(feat.shape[1] ** 0.5))
-                if token_hw * token_hw != feat.shape[1]:
-                    for candidate in range(1, min(17, feat.shape[1])):
-                        patch_tokens = feat.shape[1] - candidate
-                        patch_hw = int(round(patch_tokens ** 0.5))
-                        if patch_hw * patch_hw == patch_tokens:
-                            num_prefix = candidate
-                            break
-            if num_prefix > 0:
-                if feat.shape[1] <= num_prefix:
-                    raise RuntimeError(
-                        f"Invalid prefix-token count {num_prefix} for hidden shape "
-                        f"{tuple(feat.shape)} at layer {idx}"
-                    )
-                feat = feat[:, num_prefix:, :]
-
-            target_tokens = configured_target or kv_tokens
-            if target_tokens is not None and feat.shape[1] != target_tokens:
-                source_hw = int(round(feat.shape[1] ** 0.5))
-                target_hw = int(round(target_tokens ** 0.5))
-                if source_hw * source_hw != feat.shape[1] or target_hw * target_hw != target_tokens:
-                    raise RuntimeError(
-                        f"Cannot spatially resize encoder hidden features from "
-                        f"{feat.shape[1]} to {target_tokens} non-square tokens"
-                    )
-                feat_2d = feat.transpose(1, 2).reshape(
-                    feat.shape[0], feat.shape[2], source_hw, source_hw
-                )
-                feat_2d = F.interpolate(
-                    feat_2d.float(), size=(target_hw, target_hw),
-                    mode="bilinear", align_corners=False,
-                )
-                feat = feat_2d.flatten(2).transpose(1, 2).to(
-                    dtype=self.captured_feat[idx].dtype
-                )
-
-            feat_list.append(feat.detach())
-
+            )
         return feat_list
+
+    def get_captured_attn_output_list(self) -> List[torch.Tensor]:
+        """Collect encoder attention-branch outputs as spatial patch tokens.
+
+        For timm-style DINOv2 this is the output of ``block.attn`` after its
+        output projection and before the enclosing block applies LayerScale,
+        residual addition, or the MLP.  Prefix-token outputs are removed and
+        patch grids are resized using the same policy as attention-input
+        features.
+        """
+        output_list = []
+        for idx in self.layer_indices:
+            if idx not in self.captured_attn_output:
+                raise RuntimeError(
+                    f"Attention output for layer {idx} not captured; "
+                    "scaffold_feature_source=attn_output currently requires a "
+                    "timm-style encoder attention hook"
+                )
+            output_list.append(
+                self._prepare_patch_features(
+                    self.captured_attn_output[idx],
+                    idx,
+                    feature_name="attention output",
+                )
+            )
+        return output_list
+
+    def _prepare_patch_features(
+        self,
+        feat: torch.Tensor,
+        layer_idx: int,
+        feature_name: str,
+    ) -> torch.Tensor:
+        """Remove prefix tokens and resize a captured encoder token grid."""
+        if feat.ndim != 3:
+            raise RuntimeError(
+                f"Expected {feature_name} for layer {layer_idx} to have shape "
+                f"(B, N, C), got {tuple(feat.shape)}"
+            )
+
+        original_dtype = feat.dtype
+        kv_tokens = None
+        if layer_idx in self.captured_kv:
+            kv_tokens = int(self.captured_kv[layer_idx][1].shape[-2])
+
+        num_prefix = 0
+        metadata_prefix = self._get_prefix_token_count()
+        if 0 < metadata_prefix < feat.shape[1]:
+            remaining = feat.shape[1] - metadata_prefix
+            remaining_hw = int(round(remaining ** 0.5))
+            if remaining_hw * remaining_hw == remaining:
+                num_prefix = metadata_prefix
+        if num_prefix == 0:
+            token_hw = int(round(feat.shape[1] ** 0.5))
+            if token_hw * token_hw != feat.shape[1]:
+                for candidate in range(1, min(17, feat.shape[1])):
+                    patch_tokens = feat.shape[1] - candidate
+                    patch_hw = int(round(patch_tokens ** 0.5))
+                    if patch_hw * patch_hw == patch_tokens:
+                        num_prefix = candidate
+                        break
+        if num_prefix > 0:
+            if feat.shape[1] <= num_prefix:
+                raise RuntimeError(
+                    f"Invalid prefix-token count {num_prefix} for {feature_name} "
+                    f"shape {tuple(feat.shape)} at layer {layer_idx}"
+                )
+            feat = feat[:, num_prefix:, :]
+
+        configured_target = getattr(self, "_target_num_patches", None)
+        target_tokens = configured_target or kv_tokens
+        if target_tokens is not None and feat.shape[1] != target_tokens:
+            source_hw = int(round(feat.shape[1] ** 0.5))
+            target_hw = int(round(target_tokens ** 0.5))
+            if source_hw * source_hw != feat.shape[1] or target_hw * target_hw != target_tokens:
+                raise RuntimeError(
+                    f"Cannot spatially resize encoder {feature_name} from "
+                    f"{feat.shape[1]} to {target_tokens} non-square tokens"
+                )
+            feat_2d = feat.transpose(1, 2).reshape(
+                feat.shape[0], feat.shape[2], source_hw, source_hw
+            )
+            feat_2d = F.interpolate(
+                feat_2d.float(), size=(target_hw, target_hw),
+                mode="bilinear", align_corners=False,
+            )
+            feat = feat_2d.flatten(2).transpose(1, 2).to(dtype=original_dtype)
+
+        return feat.detach()
             
     def _get_model_blocks(self, model: nn.Module) -> List[nn.Module]:
         """Flatten model blocks into a list for consistent indexing."""
@@ -364,6 +395,17 @@ class EncoderKVExtractor(nn.Module):
             # Store Q, K, V (B, heads, num_patches, head_dim)
             self.captured_kv[layer_idx] = (q.detach(), k.detach(), v.detach())
             self.captured_feat[layer_idx] = x.detach()
+
+            # The timm/DINOv2 attention module returns its post-projection
+            # branch output.  The enclosing block applies LayerScale and the
+            # residual connection only after this hook fires.
+            attn_output = output[0] if isinstance(output, (tuple, list)) else output
+            if not torch.is_tensor(attn_output) or attn_output.ndim != 3:
+                raise RuntimeError(
+                    f"Expected timm attention output with shape (B, N, C), got "
+                    f"{type(attn_output)}"
+                )
+            self.captured_attn_output[layer_idx] = attn_output.detach()
         
         hook = attn_module.register_forward_hook(hook_fn)
         self._hooks.append(hook)

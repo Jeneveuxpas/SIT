@@ -333,7 +333,7 @@ class SiTBlockWithEncoderKV(nn.Module):
             enc_kv: Optional (Q_enc, K_enc, V_enc) tuple from encoder
             enc_feat: Optional encoder patch features (B, N, C_enc). Depending
                 on the training configuration this is either the selected
-                encoder attention input or REPA's final normalized patch tokens.
+                encoder attention input/output or REPA's final normalized patch tokens.
         """
         # AdaLN modulation
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (

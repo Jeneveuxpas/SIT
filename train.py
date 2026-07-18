@@ -765,7 +765,10 @@ def main(args):
                             # encoder-layer-to-SiT-layer list interface.
                             enc_feat_list = [z for _ in enc_layer_indices]
                         elif args.scaffold_interface == "residual":
-                            enc_feat_list = encoder_kv_extractor.get_captured_feat_list()
+                            if args.scaffold_feature_source == "attn_output":
+                                enc_feat_list = encoder_kv_extractor.get_captured_attn_output_list()
+                            else:
+                                enc_feat_list = encoder_kv_extractor.get_captured_feat_list()
                 else:
                     if kv_active:
                         if raw_image is None:
@@ -792,7 +795,10 @@ def main(args):
                             else:
                                 enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
                                 if args.scaffold_interface == "residual":
-                                    enc_feat_list = encoder_kv_extractor.get_captured_feat_list()
+                                    if args.scaffold_feature_source == "attn_output":
+                                        enc_feat_list = encoder_kv_extractor.get_captured_attn_output_list()
+                                    else:
+                                        enc_feat_list = encoder_kv_extractor.get_captured_feat_list()
                     
                     if repa_active:
                         with accelerator.autocast():
@@ -1050,9 +1056,9 @@ def parse_args(input_args=None):
                              "(kv, default), the attention residual branch (residual), or a "
                              "literal replacement of the selected block hidden state (hidden)")
     parser.add_argument("--scaffold-feature-source", type=str, default="attn_input",
-                        choices=["attn_input", "repa"],
+                        choices=["attn_input", "attn_output", "repa"],
                         help="Encoder feature used by residual/hidden scaffolds: the selected "
-                             "encoder attention input, or REPA's final x_norm_patchtokens")
+                             "encoder attention input/output, or REPA's final x_norm_patchtokens")
     parser.add_argument("--encoder-patch-shuffle", action=argparse.BooleanOptionalAction, default=False,
                         help="Shuffle patches of the preprocessed encoder input before extracting scaffold K/V")
     parser.add_argument("--encoder-patch-shuffle-grid", type=int, default=0,
@@ -1186,6 +1192,8 @@ def parse_args(input_args=None):
         parser.error("--scaffold-interface residual/hidden requires --use-kv")
     if args.scaffold_interface == "hidden" and args.scaffold_feature_source != "repa":
         parser.error("--scaffold-interface hidden requires --scaffold-feature-source repa")
+    if args.scaffold_feature_source == "attn_output" and args.scaffold_interface != "residual":
+        parser.error("--scaffold-feature-source attn_output requires --scaffold-interface residual")
     if args.scaffold_interface == "kv" and args.scaffold_feature_source != "attn_input":
         parser.error("--scaffold-feature-source only applies to residual/hidden scaffolds")
     if (
