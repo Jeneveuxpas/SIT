@@ -1,12 +1,10 @@
-# Standalone final-feature K/V scaffold.
-# DINO's final x_norm_patchtokens are independently projected into K and V,
-# while the selected SiT block retains its native noisy query.
-# Matched to attnscaf-consistency-no-repa-smooth5k-100k except for the
-# encoder memory source. Start from step 0; internal-K/V checkpoints are not
-# compatible with this experiment.
+# Standalone V-only scaffold with smooth withdrawal and output consistency.
+# During the scaffold window, SiT retains native Q/K while DINO supplies V.
+# Matched to attnscaf-consistency-no-repa-smooth5k-100k except for
+# kv-replace-mode. Start from step 0.
 #
 # Protocol:
-#   0--25K:    final DINO patch tokens provide projected K/V memory.
+#   0--25K:    Q_S/K_S attend over projected DINO V.
 #   25--30K:   cosine blend from scaffolded to native attention output.
 #   30--100K:  native attention + output consistency (lambda=2).
 
@@ -22,11 +20,10 @@ projection-layer-type: mlp
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
-# Final-representation K/V scaffold
+# Encoder V-only scaffold + attention-output consistency
 # ============================================================================
 use-kv: true
 scaffold-interface: kv
-scaffold-feature-source: final_feature
 enc-type: dinov2-b
 enc-layer-indices: "12"
 sit-layer-indices: "4"
@@ -39,7 +36,7 @@ align-mode: attn_mse
 distill-coeff: 2.0
 distill-warmup-steps: 0
 
-kv-replace-mode: kv
+kv-replace-mode: v
 kv-proj-type: linear
 kv-proj-kernel-size: 1
 kv-norm-type: none
