@@ -98,6 +98,50 @@ def patch_shuffle_image(x: torch.Tensor, grid: int = 0, patch_size: int = 14) ->
     return x_shuf.reshape(B, C, H, W)
 
 
+def final_features_to_kv_memory(
+    features: torch.Tensor,
+    num_heads: int,
+    target_num_patches: int,
+) -> torch.Tensor:
+    """Convert final encoder patch tokens to the extractor's head layout.
+
+    The resulting tensor is supplied to two independent trainable K and V
+    projections. Splitting the feature dimension into encoder heads is only a
+    layout conversion: ``EncoderKVProjection`` flattens it before projection.
+    """
+    if features.ndim != 3:
+        raise ValueError(
+            f"Expected final encoder features with shape (B, N, C), got {tuple(features.shape)}"
+        )
+
+    B, N, C = features.shape
+    if C % num_heads != 0:
+        raise ValueError(
+            f"Final feature dimension {C} must be divisible by encoder heads {num_heads}"
+        )
+
+    if N != target_num_patches:
+        source_hw = int(round(N ** 0.5))
+        target_hw = int(round(target_num_patches ** 0.5))
+        if source_hw * source_hw != N or target_hw * target_hw != target_num_patches:
+            raise ValueError(
+                f"Cannot resize final encoder features from {N} to "
+                f"{target_num_patches} non-square tokens"
+            )
+        original_dtype = features.dtype
+        features_2d = features.transpose(1, 2).reshape(B, C, source_hw, source_hw)
+        features_2d = F.interpolate(
+            features_2d.float(),
+            size=(target_hw, target_hw),
+            mode="bilinear",
+            align_corners=False,
+        )
+        features = features_2d.flatten(2).transpose(1, 2).to(dtype=original_dtype)
+        N = target_num_patches
+
+    return features.reshape(B, N, num_heads, C // num_heads).transpose(1, 2).detach()
+
+
 @torch.no_grad()
 def update_ema(ema_model, model, decay=0.9999):
     """
@@ -748,11 +792,27 @@ def main(args):
                         features = encoders[0].forward_features(raw_image_enc)
                         z = features['x_norm_patchtokens']
                         zs.append(z)
-                        try:
-                            enc_kv_list = encoder_kv_extractor.get_captured_kv_list()
-                        except RuntimeError:
-                            # Fallback for encoders whose wrapper path does not trigger registered hooks.
-                            enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
+                        if (
+                            args.scaffold_interface == "kv"
+                            and args.scaffold_feature_source == "final_feature"
+                        ):
+                            final_memory = final_features_to_kv_memory(
+                                z,
+                                num_heads=enc_heads,
+                                target_num_patches=encoder_kv_extractor._target_num_patches,
+                            )
+                            # K and V see the same final tokens but use separate
+                            # trainable projections inside EncoderKVProjection.
+                            enc_kv_list = [
+                                (None, final_memory, final_memory)
+                                for _ in enc_layer_indices
+                            ]
+                        else:
+                            try:
+                                enc_kv_list = encoder_kv_extractor.get_captured_kv_list()
+                            except RuntimeError:
+                                # Fallback for encoders whose wrapper path does not trigger registered hooks.
+                                enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
                         if (
                             args.scaffold_interface == "hidden"
                             or (
@@ -787,11 +847,26 @@ def main(args):
                                     args.scaffold_interface == "residual"
                                     and args.scaffold_feature_source == "repa"
                                 )
+                                or (
+                                    args.scaffold_interface == "kv"
+                                    and args.scaffold_feature_source == "final_feature"
+                                )
                             ):
                                 encoder_kv_extractor.reset_cache()
                                 features = encoders[0].forward_features(raw_image_enc)
                                 z_hidden = features['x_norm_patchtokens']
-                                enc_feat_list = [z_hidden for _ in enc_layer_indices]
+                                if args.scaffold_interface == "kv":
+                                    final_memory = final_features_to_kv_memory(
+                                        z_hidden,
+                                        num_heads=enc_heads,
+                                        target_num_patches=encoder_kv_extractor._target_num_patches,
+                                    )
+                                    enc_kv_list = [
+                                        (None, final_memory, final_memory)
+                                        for _ in enc_layer_indices
+                                    ]
+                                else:
+                                    enc_feat_list = [z_hidden for _ in enc_layer_indices]
                             else:
                                 enc_kv_list, enc_cls = encoder_kv_extractor(raw_image_enc)
                                 if args.scaffold_interface == "residual":
@@ -1056,9 +1131,10 @@ def parse_args(input_args=None):
                              "(kv, default), the attention residual branch (residual), or a "
                              "literal replacement of the selected block hidden state (hidden)")
     parser.add_argument("--scaffold-feature-source", type=str, default="attn_input",
-                        choices=["attn_input", "attn_output", "repa"],
-                        help="Encoder feature used by residual/hidden scaffolds: the selected "
-                             "encoder attention input/output, or REPA's final x_norm_patchtokens")
+                        choices=["attn_input", "attn_output", "repa", "final_feature"],
+                        help="Encoder source used by the scaffold: selected attention "
+                             "input/output, REPA's final x_norm_patchtokens for residual/hidden "
+                             "controls, or final_feature projected into K/V memory")
     parser.add_argument("--encoder-patch-shuffle", action=argparse.BooleanOptionalAction, default=False,
                         help="Shuffle patches of the preprocessed encoder input before extracting scaffold K/V")
     parser.add_argument("--encoder-patch-shuffle-grid", type=int, default=0,
@@ -1194,8 +1270,18 @@ def parse_args(input_args=None):
         parser.error("--scaffold-interface hidden requires --scaffold-feature-source repa")
     if args.scaffold_feature_source == "attn_output" and args.scaffold_interface != "residual":
         parser.error("--scaffold-feature-source attn_output requires --scaffold-interface residual")
-    if args.scaffold_interface == "kv" and args.scaffold_feature_source != "attn_input":
-        parser.error("--scaffold-feature-source only applies to residual/hidden scaffolds")
+    if args.scaffold_feature_source == "final_feature":
+        if args.scaffold_interface != "kv":
+            parser.error("--scaffold-feature-source final_feature requires --scaffold-interface kv")
+        if args.kv_replace_mode != "kv":
+            parser.error("--scaffold-feature-source final_feature currently requires --kv-replace-mode kv")
+    if args.scaffold_interface == "kv" and args.scaffold_feature_source not in (
+        "attn_input", "final_feature"
+    ):
+        parser.error(
+            "--scaffold-interface kv supports scaffold-feature-source "
+            "attn_input or final_feature"
+        )
     if (
         args.scaffold_interface in ("residual", "hidden")
         and args.distill_coeff > 0
