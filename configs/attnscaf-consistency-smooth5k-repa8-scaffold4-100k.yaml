@@ -1,40 +1,43 @@
-# Standalone AttnScaf with a smooth 5K withdrawal at SiT block 8.
+# K/V AttnScaf at block 4 + output consistency + smooth withdrawal
+# + REPA alignment at block 8.
 #
-# Protocol:
-#   0--25K:    native SiT queries attend to DINOv2 keys and values.
-#   25--30K:   cosine blend from scaffolded to native attention output.
-#   30--100K:  native self-attention with attention-output consistency
-#              against the detached DINO-scaffolded output (lambda=2).
+#   0--25K:    encoder K/V scaffold at block 4 + REPA at block 8.
+#   25--30K:   cosine blend from scaffolded to native attention + REPA.
+#   30--100K:  native attention + output consistency (lambda=2) + REPA.
 #
-# No REPA alignment is used. The 25K checkpoint is shared with the two hard
-# K/V runs and can be used to branch this smooth-withdrawal experiment.
+# This is matched to attnscaf-consistency-repa-smooth5k-100k.yaml except
+# that the REPA alignment depth is changed from block 10 to block 8 and the
+# final checkpoint is written at 100K.
 
 # ============================================================================
 # Model
 # ============================================================================
 model: SiT-XL/2-EncoderKV
 num-classes: 1000
-encoder-depth: 10
+
+# REPA alignment location (independent of sit-layer-indices below).
+encoder-depth: 8
+
 fused-attn: true
 qk-norm: false
 projection-layer-type: mlp
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
-# Encoder K/V scaffold + attention-output consistency
+# K/V scaffold at block 4 + smooth withdrawal + output consistency
 # ============================================================================
 use-kv: true
 scaffold-interface: kv
-scaffold-feature-source: attn_input
 enc-type: dinov2-b
 enc-layer-indices: "12"
-sit-layer-indices: "8"
+
+# AttnScaf injection location.
+sit-layer-indices: "4"
 
 stage1-steps: 30000
 transition-steps: 5000
 transition-schedule: cosine
 
-# Keep DINO available only as the detached Stage-2 consistency teacher.
 kv-stop-step: -1
 align-mode: attn_mse
 distill-coeff: 2.0
@@ -47,13 +50,15 @@ kv-norm-type: none
 kv-zscore-alpha: 1.0
 
 # ============================================================================
-# REPA disabled
+# REPA alignment at block 8 (MLP head + spatial z-score target)
 # ============================================================================
-repa-loss: false
-proj-coeff: "0.0"
+repa-loss: true
+proj-coeff: "1.0"
 projection-loss-type: cosine
 spnorm-method: zscore
 zscore-alpha: 0.6
+repa-stop-step: -1
+repa-stop-fade-steps: 0
 
 # ============================================================================
 # Dataset
@@ -66,7 +71,7 @@ batch-size: 256
 # Training
 # ============================================================================
 epochs: 1400
-max-train-steps: 400000
+max-train-steps: 100000
 checkpointing-steps: 100000
 sampling-steps: 100000
 gradient-accumulation-steps: 1

@@ -1,13 +1,11 @@
-# Standalone AttnScaf with a smooth 5K withdrawal at SiT block 8.
+# Stage-1 K/V oracle checkpoint at SiT block 8.
 #
 # Protocol:
-#   0--25K:    native SiT queries attend to DINOv2 keys and values.
-#   25--30K:   cosine blend from scaffolded to native attention output.
-#   30--100K:  native self-attention with attention-output consistency
-#              against the detached DINO-scaffolded output (lambda=2).
+#   0--30K: native SiT queries attend to DINOv2 keys and values.
+#   At 30K: save the EMA checkpoint and stop, before scaffold withdrawal.
 #
-# No REPA alignment is used. The 25K checkpoint is shared with the two hard
-# K/V runs and can be used to branch this smooth-withdrawal experiment.
+# This matches the first 30K of attnscaf-only-layer8-100k.yaml and is used
+# only for clean-reference oracle sampling. No REPA or consistency is active.
 
 # ============================================================================
 # Model
@@ -21,7 +19,7 @@ projection-layer-type: mlp
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
-# Encoder K/V scaffold + attention-output consistency
+# Encoder K/V scaffold
 # ============================================================================
 use-kv: true
 scaffold-interface: kv
@@ -31,13 +29,13 @@ enc-layer-indices: "12"
 sit-layer-indices: "8"
 
 stage1-steps: 30000
-transition-steps: 5000
+transition-steps: 0
 transition-schedule: cosine
 
-# Keep DINO available only as the detached Stage-2 consistency teacher.
-kv-stop-step: -1
+kv-stop-step: 30000
+kv-stop-fade-steps: 0
 align-mode: attn_mse
-distill-coeff: 2.0
+distill-coeff: 0.0
 distill-warmup-steps: 0
 
 kv-replace-mode: kv
@@ -66,8 +64,8 @@ batch-size: 256
 # Training
 # ============================================================================
 epochs: 1400
-max-train-steps: 400000
-checkpointing-steps: 100000
+max-train-steps: 30000
+checkpointing-steps: 30000
 sampling-steps: 100000
 gradient-accumulation-steps: 1
 learning-rate: 1e-4
