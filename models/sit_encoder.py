@@ -326,6 +326,7 @@ class SiTBlockWithEncoderKV(nn.Module):
         transition_alpha: Optional[torch.Tensor] = None,
         transition_active: bool = False,
         enc_feat: Optional[torch.Tensor] = None,
+        enable_scaffold_in_eval: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass.
@@ -341,7 +342,8 @@ class SiTBlockWithEncoderKV(nn.Module):
         )     
         # Prepare the selected encoder scaffold if available.
         q_enc, k_enc, v_enc = None, None, None
-        if self.has_enc_kv and enc_kv is not None and self.training:
+        scaffold_enabled = self.training or enable_scaffold_in_eval
+        if self.has_enc_kv and enc_kv is not None and scaffold_enabled:
             q_raw, k_raw, v_raw = enc_kv
             proj_stage = 1 if (stage == 2 and self.attn.train_kv_proj_in_stage2) else stage
             q_enc, k_enc, v_enc = self.kv_proj(
@@ -349,7 +351,7 @@ class SiTBlockWithEncoderKV(nn.Module):
             )
 
         residual_teacher = None
-        if self.has_enc_residual and enc_feat is not None and self.training:
+        if self.has_enc_residual and enc_feat is not None and scaffold_enabled:
             if enc_feat.ndim != 3:
                 raise ValueError(
                     f"enc_feat must have shape (B, N, C), got {tuple(enc_feat.shape)}"
@@ -364,7 +366,7 @@ class SiTBlockWithEncoderKV(nn.Module):
                 residual_teacher = residual_teacher.detach()
 
         hidden_teacher = None
-        if self.has_enc_hidden and enc_feat is not None and self.training:
+        if self.has_enc_hidden and enc_feat is not None and scaffold_enabled:
             if enc_feat.ndim != 3:
                 raise ValueError(
                     f"enc_feat must have shape (B, N, C), got {tuple(enc_feat.shape)}"
@@ -666,6 +668,7 @@ class SiTWithEncoderKV(nn.Module):
         transition_active: bool = False,
         return_logvar: bool = False,
         enc_feat_list: Optional[List[torch.Tensor]] = None,
+        enable_scaffold_in_eval: bool = False,
     ):
         """
         Forward pass.
@@ -703,6 +706,7 @@ class SiTWithEncoderKV(nn.Module):
                 time_input=t, path_type=self.path_type,
                 transition_alpha=transition_alpha,
                 transition_active=transition_active,
+                enable_scaffold_in_eval=enable_scaffold_in_eval,
             )
             
             if block_distill_loss is not None:

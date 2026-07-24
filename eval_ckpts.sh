@@ -9,7 +9,7 @@
 #   ./eval_ckpts.sh --config configs/SIT-6.yaml --exp-name SIT-6 --steps "0100000" --gpu 0,1,2,3,4,5,6,7 --num-gpus 8
 #   ./eval_ckpts.sh --config configs/SIT-XL-early-stop-300.yaml --exp-name SIT-XL-early-stop-300 --gpu 0,1,2,3,4,5,6,7 --num-gpus 8 --steps "0700000"
 #   # 使用 guidance interval
-#   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.65
+#   ./eval_ckpts.sh --config configs/baseline.yaml --exp-name baseline --steps "2000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.65
 #   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.7
 #   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.8
 #   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.65 --cfg-scale 1.65
@@ -41,7 +41,7 @@ CFG_SCALE="${CFG_SCALE:-1.0}"
 GUIDANCE_LOW="${GUIDANCE_LOW:-0.0}"
 GUIDANCE_HIGH="${GUIDANCE_HIGH:-1.0}"
 MODE="${MODE:-sde}"
-VAE="${VAE:-mse}"
+VAE="${VAE:-ema}"
 REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
 INFERENCE_DTYPE="${INFERENCE_DTYPE:-fp32}"
 
