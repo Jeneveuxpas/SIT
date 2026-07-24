@@ -452,6 +452,7 @@ def main(args):
         kv_norm_type=args.kv_norm_type,
         kv_zscore_alpha=args.kv_zscore_alpha,
         kv_replace_mode=args.kv_replace_mode,
+        kv_memory_mode=args.kv_memory_mode,
         scaffold_interface=args.scaffold_interface,
         kv_use_adaln=args.kv_use_adaln,
         train_kv_proj_in_stage2=args.train_kv_proj_stage2,
@@ -1125,6 +1126,15 @@ def parse_args(input_args=None):
                         choices=["kv", "k", "v", "qkv", "qk", "q"],
                         help="Which attention components to replace from encoder in Stage 1: "
                              "kv (default), k-only, v-only, qkv (all), qk, q-only")
+    parser.add_argument(
+        "--kv-memory-mode",
+        type=str,
+        default="replace",
+        choices=["replace", "concat", "cross_attn"],
+        help="How projected encoder K/V interact with native attention in Stage 1: "
+             "replace native K/V, concatenate native and encoder memory, or add "
+             "a parallel cross-attention branch.",
+    )
     parser.add_argument("--scaffold-interface", type=str, default="kv",
                         choices=["kv", "residual", "hidden"],
                         help="Where the temporary encoder scaffold enters: encoder K/V memory "
@@ -1275,6 +1285,12 @@ def parse_args(input_args=None):
             parser.error("--scaffold-feature-source final_feature requires --scaffold-interface kv")
         if args.kv_replace_mode != "kv":
             parser.error("--scaffold-feature-source final_feature currently requires --kv-replace-mode kv")
+    if args.kv_memory_mode != "replace":
+        if args.scaffold_interface != "kv" or args.kv_replace_mode != "kv":
+            parser.error(
+                "--kv-memory-mode concat/cross_attn requires "
+                "--scaffold-interface kv and --kv-replace-mode kv"
+            )
     if args.scaffold_interface == "kv" and args.scaffold_feature_source not in (
         "attn_input", "final_feature"
     ):

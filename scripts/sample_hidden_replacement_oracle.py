@@ -149,12 +149,14 @@ def load_oracle_model(
 
     interface = get_arg(saved_args, "scaffold_interface", "kv")
     feature_source = get_arg(saved_args, "scaffold_feature_source", "attn_input")
-    if interface not in ("hidden", "kv"):
+    if interface not in ("hidden", "residual", "kv"):
         raise ValueError(
-            f"This diagnostic supports hidden or kv checkpoints, got {interface!r}"
+            f"This diagnostic supports hidden, residual, or kv checkpoints, got {interface!r}"
         )
-    if interface == "hidden" and feature_source != "repa":
-        raise ValueError("Hidden oracle inference requires scaffold_feature_source='repa'")
+    if interface in ("hidden", "residual") and feature_source != "repa":
+        raise ValueError(
+            "Hidden/residual oracle inference requires scaffold_feature_source='repa'"
+        )
     if interface == "kv" and feature_source not in ("attn_input", "final_feature"):
         raise ValueError(
             "K/V oracle inference supports attn_input or final_feature sources, "
@@ -214,6 +216,7 @@ def load_oracle_model(
         kv_norm_type=get_arg(saved_args, "kv_norm_type", "none"),
         kv_zscore_alpha=float(get_arg(saved_args, "kv_zscore_alpha", 1.0)),
         kv_replace_mode=get_arg(saved_args, "kv_replace_mode", "kv"),
+        kv_memory_mode=get_arg(saved_args, "kv_memory_mode", "replace"),
         scaffold_interface=interface,
         fused_attn=bool(get_arg(saved_args, "fused_attn", True)),
         qk_norm=bool(get_arg(saved_args, "qk_norm", False)),
@@ -239,6 +242,7 @@ def load_oracle_model(
         "enc_type": enc_type,
         "interface": interface,
         "feature_source": feature_source,
+        "kv_memory_mode": get_arg(saved_args, "kv_memory_mode", "replace"),
         "enc_layers": [index + 1 for index in enc_layer_indices],
         "sit_layers": [index + 1 for index in sit_layer_indices],
         "encoder_heads": encoder_heads,
@@ -264,6 +268,8 @@ class FixedHiddenScaffold(torch.nn.Module):
         feature = self.clean_feature
         if feature.shape[0] == 1:
             feature = feature.expand(x.shape[0], -1, -1)
+        elif x.shape[0] % feature.shape[0] == 0:
+            feature = feature.repeat(x.shape[0] // feature.shape[0], 1, 1)
         elif feature.shape[0] != x.shape[0]:
             raise ValueError(
                 f"Feature batch {feature.shape[0]} does not match sampler batch {x.shape[0]}"
@@ -299,6 +305,8 @@ class FixedKVScaffold(torch.nn.Module):
             return None
         if component.shape[0] == 1:
             return component.expand(batch_size, -1, -1, -1)
+        if batch_size % component.shape[0] == 0:
+            return component.repeat(batch_size // component.shape[0], 1, 1, 1)
         if component.shape[0] != batch_size:
             raise ValueError(
                 f"K/V batch {component.shape[0]} does not match sampler batch {batch_size}"
@@ -423,7 +431,7 @@ def main(args):
         raise RuntimeError("Visual encoder did not return normalized patch tokens")
     expected_tokens = (metadata["latent_size"] // 2) ** 2
 
-    if metadata["interface"] == "hidden":
+    if metadata["interface"] in ("hidden", "residual"):
         clean_feature = clean_feature.to(device=device, dtype=dtype)
         if clean_feature.shape[1] != expected_tokens:
             raise ValueError(

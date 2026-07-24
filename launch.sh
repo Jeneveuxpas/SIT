@@ -9,8 +9,8 @@
 # ./launch.sh --config configs/irepa_only-2.0.yaml --exp-name irepa_only-2.0 --gpu 6,7 --num-gpus 2 
 #  ./launch.sh --config configs/sam2-s-16.yaml --exp-name sam2-s-16 --gpu 2 --num-gpus 1
  
-# ./launch.sh --config configs/cosine_1.yaml --exp-name cosine_1 --gpu 6,7 --num-gpus 2 
-#  ./launch.sh --config configs/SIT-XL-without-kv-loss.yaml --exp-name  SIT-XL-without-kv-loss --gpu 4,5,6,7 --num-gpus 4 --resume-step 0100000
+# ./launch.sh --config configs/attnscaf-consistency-smooth5k-repa8-scaffold4-100k.yaml --exp-name attnscaf-consistency-smooth5k-repa8-scaffold4-100k --gpu 4,5,6,7 --num-gpus 4 --resume-step 300000 
+#  ./launch.sh --config configs/base.yaml --exp-name base --gpu 0,1,2,3  --num-gpus 4 --resume-step 1800000
 #  ./launch.sh --config configs/attn_mse_repa_early_stop_600.yaml --exp-name attn_mse_repa_early_stop_600 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0600000
 
 # ============================================================================
@@ -33,7 +33,7 @@ EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-256}"
 EVAL_NUM_STEPS="${EVAL_NUM_STEPS:-250}"
 CFG_SCALE="${CFG_SCALE:-1.0}"
 MODE="${MODE:-sde}"
-VAE="${VAE:-mse}"
+VAE="${VAE:-ema}"
 REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
 
 # 解析命令行参数

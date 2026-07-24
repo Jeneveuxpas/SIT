@@ -42,6 +42,7 @@ class AttentionWithEncoderKV(nn.Module):
         attn_loss_weight: float = 1.0,
         kv_loss_weight: float = 1.0,
         train_kv_proj_in_stage2: bool = False,
+        kv_memory_mode: str = "replace",
     ):
         super().__init__()
         self.dim = dim
@@ -55,9 +56,20 @@ class AttentionWithEncoderKV(nn.Module):
         self.attn_loss_weight = attn_loss_weight
         self.kv_loss_weight = kv_loss_weight
         self.train_kv_proj_in_stage2 = train_kv_proj_in_stage2
+        if kv_memory_mode not in ("replace", "concat", "cross_attn"):
+            raise ValueError(
+                "kv_memory_mode must be 'replace', 'concat', or 'cross_attn', "
+                f"got {kv_memory_mode}"
+            )
+        self.kv_memory_mode = kv_memory_mode
         
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim)
+        # Extra cross-attention has an independent output projection, matching
+        # the usual "native self-attention + cross-attention" construction.
+        self.encoder_proj = (
+            nn.Linear(dim, dim) if kv_memory_mode == "cross_attn" else None
+        )
         
         # Optional QK norm
         self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
@@ -161,9 +173,30 @@ class AttentionWithEncoderKV(nn.Module):
         has_enc = (q_enc is not None or k_enc is not None or v_enc is not None)
         attn_out = None
         
+        cross_attn_outputs = None
         if stage == 1 and has_enc:
             q_teacher, k_teacher, v_teacher = _select_qkv(q_enc, k_enc, v_enc)
-            if transition_active:
+            if self.kv_memory_mode == "concat":
+                if k_enc is None or v_enc is None:
+                    raise ValueError("concat memory requires both encoder K and V")
+                q = q_sit
+                k = torch.cat((k_sit, k_enc), dim=-2)
+                v = torch.cat((v_sit, v_enc), dim=-2)
+                if transition_active:
+                    attn_enc = self._compute_attn_output(q, k, v)
+                    attn_sit = self._compute_attn_output(q_sit, k_sit, v_sit)
+                    alpha = transition_alpha.to(device=attn_sit.device, dtype=attn_sit.dtype)
+                    attn_out = (1.0 - alpha) * attn_enc + alpha * attn_sit
+            elif self.kv_memory_mode == "cross_attn":
+                if k_enc is None or v_enc is None:
+                    raise ValueError("cross_attn memory requires both encoder K and V")
+                attn_sit = self._compute_attn_output(q_sit, k_sit, v_sit)
+                attn_enc = self._compute_attn_output(q_sit, k_enc, v_enc)
+                if transition_active:
+                    alpha = transition_alpha.to(device=attn_sit.device, dtype=attn_sit.dtype)
+                    attn_enc = (1.0 - alpha) * attn_enc
+                cross_attn_outputs = (attn_sit, attn_enc)
+            elif transition_active:
                 attn_enc = self._compute_attn_output(q_teacher, k_teacher, v_teacher)
                 attn_sit = self._compute_attn_output(q_sit, k_sit, v_sit)
                 alpha = transition_alpha.to(device=attn_sit.device, dtype=attn_sit.dtype)
@@ -212,20 +245,28 @@ class AttentionWithEncoderKV(nn.Module):
             k = k_sit
             v = v_sit
         
-        # Attention
-        if attn_out is None:
-            if self.fused_attn:
-                x = F.scaled_dot_product_attention(q, k, v)
+        # Attention. Parallel cross-attention has already computed both
+        # branches and applies their separate output projections below.
+        if cross_attn_outputs is None:
+            if attn_out is None:
+                if self.fused_attn:
+                    x = F.scaled_dot_product_attention(q, k, v)
+                else:
+                    attn = (q @ k.transpose(-2, -1)) * self.scale
+                    attn = attn.softmax(dim=-1)
+                    x = attn @ v
             else:
-                attn = (q @ k.transpose(-2, -1)) * self.scale
-                attn = attn.softmax(dim=-1)
-                x = attn @ v
-        else:
-            x = attn_out
+                x = attn_out
         
         # Reshape and project
-        x = x.transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
+        if cross_attn_outputs is not None:
+            native_out, encoder_out = cross_attn_outputs
+            native_out = native_out.transpose(1, 2).reshape(B, N, C)
+            encoder_out = encoder_out.transpose(1, 2).reshape(B, N, C)
+            x = self.proj(native_out) + self.encoder_proj(encoder_out)
+        else:
+            x = x.transpose(1, 2).reshape(B, N, C)
+            x = self.proj(x)
         
         return x, distill_loss
 
@@ -250,6 +291,7 @@ class SiTBlockWithEncoderKV(nn.Module):
         scaffold_interface: str = "kv",
         kv_use_adaln: bool = False,
         train_kv_proj_in_stage2: bool = False,
+        kv_memory_mode: str = "replace",
         **block_kwargs
     ):
         super().__init__()
@@ -266,6 +308,7 @@ class SiTBlockWithEncoderKV(nn.Module):
             attn_loss_weight=block_kwargs.get("attn_loss_weight", 1.0),
             kv_loss_weight=block_kwargs.get("kv_loss_weight", 1.0),
             train_kv_proj_in_stage2=train_kv_proj_in_stage2,
+            kv_memory_mode=kv_memory_mode,
         )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
@@ -516,6 +559,7 @@ class SiTWithEncoderKV(nn.Module):
         attn_loss_weight: float = 1.0,
         kv_loss_weight: float = 1.0,
         train_kv_proj_in_stage2: bool = False,
+        kv_memory_mode: str = "replace",
         **block_kwargs
     ):
         super().__init__()
@@ -534,6 +578,7 @@ class SiTWithEncoderKV(nn.Module):
         self.distill_temperature = distill_temperature
         self.kv_replace_mode = kv_replace_mode
         self.scaffold_interface = scaffold_interface
+        self.kv_memory_mode = kv_memory_mode
         
         # Encoder KV config
         self.enc_layer_indices = enc_layer_indices
@@ -586,6 +631,7 @@ class SiTWithEncoderKV(nn.Module):
                     scaffold_interface=scaffold_interface,
                     kv_use_adaln=kv_use_adaln,
                     train_kv_proj_in_stage2=train_kv_proj_in_stage2,
+                    kv_memory_mode=kv_memory_mode,
                     **{
                         **block_kwargs,
                         "distill_temperature": distill_temperature,
