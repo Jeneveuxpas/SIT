@@ -60,6 +60,23 @@ export CUDA_VISIBLE_DEVICES="$GPU"
 MASTER_PORT=$((29500 + RANDOM % 1000))
 SAVE_PATH="exps/${EXP_NAME}"
 CHECKPOINT="${SAVE_PATH}/checkpoints/${STEP}.pt"
+
+# Keep the artifact name honest: if the requested converted VAE is unavailable,
+# use the locally installed MSE VAE and label the result as vaemse.
+VAE_CHECKPOINT="pretrained_models/sdvae-ft-${VAE}-f8d4.pt"
+VAE_STATS="pretrained_models/sdvae-ft-${VAE}-f8d4-latents-stats.pt"
+if [[ ! -f "$VAE_CHECKPOINT" || ! -f "$VAE_STATS" ]]; then
+    if [[ "$VAE" != "mse" \
+        && -f "pretrained_models/sdvae-ft-mse-f8d4.pt" \
+        && -f "pretrained_models/sdvae-ft-mse-f8d4-latents-stats.pt" ]]; then
+        echo "[warning] Local VAE '${VAE}' unavailable; falling back to 'mse'."
+        VAE="mse"
+    else
+        echo "Required local VAE files are unavailable for '${VAE}'." >&2
+        exit 1
+    fi
+fi
+
 ORACLE_DIR="${SAVE_PATH}/checkpoints/${EXP_NAME}_oracle-vae${VAE}-cfg${CFG_SCALE}-seed${SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}"
 SAMPLE_NPZ="${ORACLE_DIR}.npz"
 

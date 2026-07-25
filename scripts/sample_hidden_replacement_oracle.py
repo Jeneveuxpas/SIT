@@ -114,10 +114,20 @@ def load_local_vae(device: torch.device, vae_name: str):
     checkpoint_path = model_dir / f"sdvae-ft-{vae_name}-f8d4.pt"
     stats_path = model_dir / f"sdvae-ft-{vae_name}-f8d4-latents-stats.pt"
 
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"VAE checkpoint not found: {checkpoint_path}")
-    if not stats_path.exists():
-        raise FileNotFoundError(f"VAE latent statistics not found: {stats_path}")
+    if not checkpoint_path.exists() or not stats_path.exists():
+        fallback_checkpoint = model_dir / "sdvae-ft-mse-f8d4.pt"
+        fallback_stats = model_dir / "sdvae-ft-mse-f8d4-latents-stats.pt"
+        if vae_name != "mse" and fallback_checkpoint.exists() and fallback_stats.exists():
+            print(
+                f"[warning] Local VAE '{vae_name}' is incomplete; "
+                "falling back to local VAE 'mse'."
+            )
+            checkpoint_path = fallback_checkpoint
+            stats_path = fallback_stats
+        else:
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(f"VAE checkpoint not found: {checkpoint_path}")
+            raise FileNotFoundError(f"VAE latent statistics not found: {stats_path}")
 
     vae = VAE_F8D4().to(device).eval()
     vae.load_state_dict(
