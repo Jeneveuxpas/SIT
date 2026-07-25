@@ -50,7 +50,20 @@ def center_crop_arr(image: Image.Image, image_size: int) -> np.ndarray:
     return array[top : top + image_size, left : left + image_size]
 
 
-def discover_imagefolder(root: Path) -> list[tuple[Path, int]]:
+def discover_references(root: Path):
+    # The training server stores validation images as a Hugging Face Dataset.
+    if (root / "dataset_info.json").exists() or (root / "state.json").exists():
+        from datasets import load_from_disk
+
+        dataset = load_from_disk(str(root))
+        if "image" not in dataset.column_names or "label" not in dataset.column_names:
+            raise ValueError(
+                f"HF reference dataset at {root} must contain image and label columns; "
+                f"found {dataset.column_names}"
+            )
+        print(f"Loaded {len(dataset)} references from HF dataset: {root}")
+        return dataset
+
     class_dirs = sorted(path for path in root.iterdir() if path.is_dir())
     if not class_dirs:
         raise FileNotFoundError(f"No ImageNet class directories found under {root}")
@@ -64,12 +77,15 @@ def discover_imagefolder(root: Path) -> list[tuple[Path, int]]:
     return samples
 
 
-def load_reference_batch(
-    samples: list[tuple[Path, int]], resolution: int
-) -> tuple[torch.Tensor, torch.Tensor]:
+def load_reference_batch(samples, resolution: int) -> tuple[torch.Tensor, torch.Tensor]:
     images, labels = [], []
-    for path, label in samples:
-        array = center_crop_arr(Image.open(path), resolution)
+    for sample in samples:
+        if isinstance(sample, dict):
+            image, label = sample["image"], int(sample["label"])
+        else:
+            path, label = sample
+            image = Image.open(path)
+        array = center_crop_arr(image, resolution)
         images.append(torch.from_numpy(array.copy()).permute(2, 0, 1))
         labels.append(label)
     return torch.stack(images), torch.tensor(labels, dtype=torch.long)
@@ -104,7 +120,7 @@ def main(args):
     model, encoder, extractor, metadata = load_oracle_model(
         args.checkpoint, device, dtype
     )
-    references = discover_imagefolder(Path(args.reference_dir))
+    references = discover_references(Path(args.reference_dir))
     count = min(args.num_fid_samples, len(references))
     if count < args.num_fid_samples:
         raise ValueError(
@@ -121,7 +137,7 @@ def main(args):
     for batch_index in tqdm(range(total_batches), desc="Oracle sampling"):
         start = batch_index * args.batch_size
         end = min(start + args.batch_size, count)
-        batch_refs = references[start:end]
+        batch_refs = [references[index] for index in range(start, end)]
         raw_images, labels = load_reference_batch(batch_refs, metadata["resolution"])
         raw_images = raw_images.to(device=device, dtype=torch.float32)
         labels = labels.to(device)

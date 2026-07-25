@@ -19,6 +19,7 @@ CFG_SCALE="1.0"
 MODE="sde"
 VAE="ema"
 INFERENCE_DTYPE="fp32"
+EVAL_ONLY="false"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,6 +39,7 @@ while [[ $# -gt 0 ]]; do
         --mode) MODE="$2"; shift 2 ;;
         --vae) VAE="$2"; shift 2 ;;
         --inference-dtype) INFERENCE_DTYPE="$2"; shift 2 ;;
+        --eval-only) EVAL_ONLY="true"; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -51,7 +53,7 @@ if [[ "$NUM_GPUS" != "1" ]]; then
     exit 1
 fi
 if [[ -z "$REFERENCE_DIR" ]]; then
-    REFERENCE_DIR="${DATA_DIR}/imagenet/val"
+    REFERENCE_DIR="${DATA_DIR}/imagenet-latents-images/val"
 fi
 
 export CUDA_VISIBLE_DEVICES="$GPU"
@@ -61,14 +63,18 @@ CHECKPOINT="${SAVE_PATH}/checkpoints/${STEP}.pt"
 ORACLE_DIR="${SAVE_PATH}/checkpoints/${EXP_NAME}_oracle-vae${VAE}-cfg${CFG_SCALE}-seed${SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}"
 SAMPLE_NPZ="${ORACLE_DIR}.npz"
 
-echo "Training oracle experiment: ${EXP_NAME}"
-accelerate launch \
-    --main_process_port "$MASTER_PORT" \
-    --num_processes 1 \
-    train.py \
-    --exp-name "$EXP_NAME" \
-    --seed "$SEED" \
-    --config "$CONFIG"
+if [[ "$EVAL_ONLY" == "false" ]]; then
+    echo "Training oracle experiment: ${EXP_NAME}"
+    accelerate launch \
+        --main_process_port "$MASTER_PORT" \
+        --num_processes 1 \
+        train.py \
+        --exp-name "$EXP_NAME" \
+        --seed "$SEED" \
+        --config "$CONFIG"
+else
+    echo "Skipping training and evaluating existing checkpoint: ${CHECKPOINT}"
+fi
 
 if [[ ! -f "$CHECKPOINT" ]]; then
     echo "Checkpoint not found: $CHECKPOINT" >&2
