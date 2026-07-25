@@ -93,6 +93,50 @@ def load_reference_batch(samples, resolution: int) -> tuple[torch.Tensor, torch.
     return torch.stack(images), torch.tensor(labels, dtype=torch.long)
 
 
+def reference_labels(references, count: int) -> list[int]:
+    if hasattr(references, "column_names"):
+        return [int(label) for label in references[:count]["label"]]
+    return [int(references[index][1]) for index in range(count)]
+
+
+def build_reference_mapping(labels: list[int], pairing: str) -> list[int]:
+    count = len(labels)
+    if pairing == "correct":
+        return list(range(count))
+
+    if pairing == "same_class_wrong":
+        class_members = {}
+        for index, label in enumerate(labels):
+            class_members.setdefault(label, []).append(index)
+        mapping = list(range(count))
+        for members in class_members.values():
+            if len(members) < 2:
+                raise ValueError(
+                    "same_class_wrong requires at least two references per class"
+                )
+            for position, index in enumerate(members):
+                mapping[index] = members[(position + 1) % len(members)]
+        return mapping
+
+    if pairing == "different_class_wrong":
+        class_members = {}
+        for index, label in enumerate(labels):
+            class_members.setdefault(label, []).append(index)
+        class_labels = sorted(class_members)
+        if len(class_labels) < 2:
+            raise ValueError("different_class_wrong requires multiple classes")
+        mapping = list(range(count))
+        for class_position, label in enumerate(class_labels):
+            target_members = class_members[label]
+            wrong_label = class_labels[(class_position + 1) % len(class_labels)]
+            reference_members = class_members[wrong_label]
+            for position, index in enumerate(target_members):
+                mapping[index] = reference_members[position % len(reference_members)]
+        return mapping
+
+    raise ValueError(f"Unknown reference pairing: {pairing}")
+
+
 def create_npz(sample_dir: Path, output_path: Path, count: int):
     images = []
     for index in tqdm(range(count), desc="Packing oracle samples"):
@@ -145,6 +189,19 @@ def main(args):
         raise ValueError(
             f"Requested {args.num_fid_samples} references, found only {len(references)}"
         )
+    target_labels = reference_labels(references, count)
+    reference_mapping = build_reference_mapping(
+        target_labels, args.reference_pairing
+    )
+    if rank == 0:
+        changed = sum(
+            target_index != reference_index
+            for target_index, reference_index in enumerate(reference_mapping)
+        )
+        print(
+            f"Reference pairing: {args.reference_pairing}; "
+            f"remapped {changed}/{count} targets"
+        )
 
     output_dir = Path(args.output_dir)
     image_dir = output_dir / "images"
@@ -166,10 +223,16 @@ def main(args):
     for batch_index in batch_iterator:
         begin = batch_index * args.batch_size
         batch_indices = rank_indices[begin : begin + args.batch_size]
-        batch_refs = [references[index] for index in batch_indices]
-        raw_images, labels = load_reference_batch(batch_refs, metadata["resolution"])
+        batch_refs = [
+            references[reference_mapping[index]] for index in batch_indices
+        ]
+        raw_images, _ = load_reference_batch(batch_refs, metadata["resolution"])
         raw_images = raw_images.to(device=device, dtype=torch.float32)
-        labels = labels.to(device)
+        labels = torch.tensor(
+            [target_labels[index] for index in batch_indices],
+            dtype=torch.long,
+            device=device,
+        )
 
         encoded_input = encoder.preprocess(raw_images)
         if extractor is not None:
@@ -249,6 +312,11 @@ def build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--reference-dir", required=True)
+    parser.add_argument(
+        "--reference-pairing",
+        choices=["correct", "same_class_wrong", "different_class_wrong"],
+        default="correct",
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--output-npz", required=True)
     parser.add_argument("--num-fid-samples", type=int, default=50_000)

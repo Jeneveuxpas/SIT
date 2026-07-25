@@ -20,6 +20,7 @@ MODE="sde"
 VAE="ema"
 INFERENCE_DTYPE="fp32"
 EVAL_ONLY="false"
+REFERENCE_PAIRING="correct"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -31,6 +32,7 @@ while [[ $# -gt 0 ]]; do
         --step) STEP="$2"; shift 2 ;;
         --data-dir) DATA_DIR="$2"; shift 2 ;;
         --reference-dir) REFERENCE_DIR="$2"; shift 2 ;;
+        --reference-pairing) REFERENCE_PAIRING="$2"; shift 2 ;;
         --ref-batch) REF_BATCH="$2"; shift 2 ;;
         --num-fid-samples) NUM_FID_SAMPLES="$2"; shift 2 ;;
         --eval-batch-size) EVAL_BATCH_SIZE="$2"; shift 2 ;;
@@ -60,7 +62,7 @@ export CUDA_VISIBLE_DEVICES="$GPU"
 MASTER_PORT=$((29500 + RANDOM % 1000))
 SAVE_PATH="exps/${EXP_NAME}"
 CHECKPOINT="${SAVE_PATH}/checkpoints/${STEP}.pt"
-ORACLE_DIR="${SAVE_PATH}/checkpoints/${EXP_NAME}_oracle-vae${VAE}-cfg${CFG_SCALE}-seed${SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}"
+ORACLE_DIR="${SAVE_PATH}/checkpoints/${EXP_NAME}_oracle-${REFERENCE_PAIRING}-vae${VAE}-cfg${CFG_SCALE}-seed${SEED}-mode${MODE}-steps${EVAL_NUM_STEPS}_${STEP}"
 SAMPLE_NPZ="${ORACLE_DIR}.npz"
 
 if [[ "$EVAL_ONLY" == "false" ]]; then
@@ -99,6 +101,7 @@ torchrun \
     scripts/generate_oracle_fid.py \
     --checkpoint "$CHECKPOINT" \
     --reference-dir "$REFERENCE_DIR" \
+    --reference-pairing "$REFERENCE_PAIRING" \
     --output-dir "$ORACLE_DIR" \
     --output-npz "$SAMPLE_NPZ" \
     --num-fid-samples "$NUM_FID_SAMPLES" \
