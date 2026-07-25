@@ -31,7 +31,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from models.autoencoder import VAE_F8D4
 from models.encoder_adapter import EncoderKVExtractor
 from models.sit_encoder import SiT_EncoderKV_models
 from samplers import euler_maruyama_sampler, euler_sampler
@@ -110,35 +109,13 @@ def load_reference_image(path: str, resolution: int) -> tuple[Image.Image, torch
 
 
 def load_local_vae(device: torch.device, vae_name: str):
-    model_dir = REPO_ROOT / "pretrained_models"
-    checkpoint_path = model_dir / f"sdvae-ft-{vae_name}-f8d4.pt"
-    stats_path = model_dir / f"sdvae-ft-{vae_name}-f8d4-latents-stats.pt"
+    # Reuse the standard evaluation path exactly:
+    #   1. load the requested decoder (e.g. sd-vae-ft-ema);
+    #   2. if its latent-statistics file is absent, use the MSE statistics;
+    #   3. only use a converted local decoder when the HF decoder is unavailable.
+    from generate import load_vae
 
-    if not checkpoint_path.exists() or not stats_path.exists():
-        fallback_checkpoint = model_dir / "sdvae-ft-mse-f8d4.pt"
-        fallback_stats = model_dir / "sdvae-ft-mse-f8d4-latents-stats.pt"
-        if vae_name != "mse" and fallback_checkpoint.exists() and fallback_stats.exists():
-            print(
-                f"[warning] Local VAE '{vae_name}' is incomplete; "
-                "falling back to local VAE 'mse'."
-            )
-            checkpoint_path = fallback_checkpoint
-            stats_path = fallback_stats
-        else:
-            if not checkpoint_path.exists():
-                raise FileNotFoundError(f"VAE checkpoint not found: {checkpoint_path}")
-            raise FileNotFoundError(f"VAE latent statistics not found: {stats_path}")
-
-    vae = VAE_F8D4().to(device).eval()
-    vae.load_state_dict(
-        torch.load(checkpoint_path, map_location=device, weights_only=False)
-    )
-    vae.requires_grad_(False)
-
-    stats = torch.load(stats_path, map_location=device, weights_only=False)
-    scale = stats["latents_scale"].to(device).view(1, -1, 1, 1)
-    bias = stats["latents_bias"].to(device).view(1, -1, 1, 1)
-    return vae, scale, bias
+    return load_vae(device=device, vae_name=vae_name)
 
 
 def load_oracle_model(
