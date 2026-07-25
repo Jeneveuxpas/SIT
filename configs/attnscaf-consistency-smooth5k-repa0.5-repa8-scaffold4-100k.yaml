@@ -1,5 +1,5 @@
 # Full AttnScaf recipe with the REPA coefficient reduced from 1.0 to 0.5.
-# All other settings match the block-4 scaffold + block-8 REPA 100K run.
+# Continue the matching 100K run to 400K with checkpoints every 100K.
 
 model: SiT-XL/2-EncoderKV
 num-classes: 1000
@@ -41,7 +41,7 @@ data-dir: /dev/shm/data
 resolution: 256
 batch-size: 256
 epochs: 1400
-max-train-steps: 100000
+max-train-steps: 400000
 checkpointing-steps: 100000
 sampling-steps: 100000
 gradient-accumulation-steps: 1
