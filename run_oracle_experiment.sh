@@ -48,8 +48,8 @@ if [[ -z "$CONFIG" || -z "$EXP_NAME" ]]; then
     echo "Usage: $0 --config CONFIG --exp-name NAME --gpu GPU" >&2
     exit 1
 fi
-if [[ "$NUM_GPUS" != "1" ]]; then
-    echo "Oracle interface runs are configured for one GPU each." >&2
+if [[ "$NUM_GPUS" -lt 1 ]]; then
+    echo "--num-gpus must be at least 1." >&2
     exit 1
 fi
 if [[ -z "$REFERENCE_DIR" ]]; then
@@ -65,13 +65,24 @@ SAMPLE_NPZ="${ORACLE_DIR}.npz"
 
 if [[ "$EVAL_ONLY" == "false" ]]; then
     echo "Training oracle experiment: ${EXP_NAME}"
-    accelerate launch \
-        --main_process_port "$MASTER_PORT" \
-        --num_processes 1 \
-        train.py \
-        --exp-name "$EXP_NAME" \
-        --seed "$SEED" \
-        --config "$CONFIG"
+    if [[ "$NUM_GPUS" -gt 1 ]]; then
+        accelerate launch \
+            --multi_gpu \
+            --main_process_port "$MASTER_PORT" \
+            --num_processes "$NUM_GPUS" \
+            train.py \
+            --exp-name "$EXP_NAME" \
+            --seed "$SEED" \
+            --config "$CONFIG"
+    else
+        accelerate launch \
+            --main_process_port "$MASTER_PORT" \
+            --num_processes 1 \
+            train.py \
+            --exp-name "$EXP_NAME" \
+            --seed "$SEED" \
+            --config "$CONFIG"
+    fi
 else
     echo "Skipping training and evaluating existing checkpoint: ${CHECKPOINT}"
 fi
@@ -82,7 +93,10 @@ if [[ ! -f "$CHECKPOINT" ]]; then
 fi
 
 echo "Generating ${NUM_FID_SAMPLES} reference-conditioned oracle samples"
-python scripts/generate_oracle_fid.py \
+torchrun \
+    --nproc_per_node="$NUM_GPUS" \
+    --master_port="$MASTER_PORT" \
+    scripts/generate_oracle_fid.py \
     --checkpoint "$CHECKPOINT" \
     --reference-dir "$REFERENCE_DIR" \
     --output-dir "$ORACLE_DIR" \

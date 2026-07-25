@@ -2,6 +2,7 @@
 """Generate a reference-conditioned oracle sample batch for FID evaluation."""
 
 import argparse
+import datetime
 import math
 import os
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from PIL import Image
 from tqdm import tqdm
 
@@ -102,6 +104,23 @@ def create_npz(sample_dir: Path, output_path: Path, count: int):
     print(f"Saved oracle sample batch: {output_path} {array.shape}")
 
 
+def setup_distributed():
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        dist.init_process_group("nccl", timeout=datetime.timedelta(minutes=60))
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    else:
+        rank, world_size, local_rank = 0, 1, 0
+    torch.cuda.set_device(local_rank)
+    return rank, world_size, torch.device(f"cuda:{local_rank}")
+
+
+def barrier():
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+
 @torch.inference_mode()
 def main(args):
     if not torch.cuda.is_available():
@@ -109,7 +128,7 @@ def main(args):
     if args.cfg_scale < 1.0:
         raise ValueError("--cfg-scale must be >= 1")
 
-    device = torch.device("cuda")
+    rank, world_size, device = setup_distributed()
     dtype = {
         "fp32": torch.float32,
         "fp16": torch.float16,
@@ -129,15 +148,25 @@ def main(args):
 
     output_dir = Path(args.output_dir)
     image_dir = output_dir / "images"
-    image_dir.mkdir(parents=True, exist_ok=True)
+    if rank == 0:
+        image_dir.mkdir(parents=True, exist_ok=True)
+    barrier()
     expected_tokens = (metadata["latent_size"] // 2) ** 2
     vae, scale, bias = load_local_vae(device, args.vae)
 
-    total_batches = math.ceil(count / args.batch_size)
-    for batch_index in tqdm(range(total_batches), desc="Oracle sampling"):
-        start = batch_index * args.batch_size
-        end = min(start + args.batch_size, count)
-        batch_refs = [references[index] for index in range(start, end)]
+    rank_indices = list(range(rank, count, world_size))
+    total_batches = math.ceil(len(rank_indices) / args.batch_size)
+    batch_iterator = range(total_batches)
+    if rank == 0:
+        batch_iterator = tqdm(batch_iterator, desc="Oracle sampling")
+        print(
+            f"Distributed oracle generation: {world_size} GPU(s), "
+            f"per-GPU batch={args.batch_size}, total samples={count}"
+        )
+    for batch_index in batch_iterator:
+        begin = batch_index * args.batch_size
+        batch_indices = rank_indices[begin : begin + args.batch_size]
+        batch_refs = [references[index] for index in batch_indices]
         raw_images, labels = load_reference_batch(batch_refs, metadata["resolution"])
         raw_images = raw_images.to(device=device, dtype=torch.float32)
         labels = labels.to(device)
@@ -179,7 +208,7 @@ def main(args):
             ]
             oracle_model = FixedKVScaffold(model, encoder_kv).eval()
 
-        seeds = [args.global_seed + index for index in range(start, end)]
+        seeds = [args.global_seed + index for index in batch_indices]
         latents = make_seeded_latents(
             seeds, metadata["latent_size"], device=device, dtype=dtype
         )
@@ -195,20 +224,25 @@ def main(args):
             path_type=metadata["path_type"],
         )
         if args.mode == "sde":
-            torch.manual_seed(args.global_seed + start)
+            torch.manual_seed(args.global_seed + batch_indices[0])
             generated_latents = euler_maruyama_sampler(**sampling_kwargs)
         else:
             generated_latents = euler_sampler(**sampling_kwargs)
 
         generated = decode_latents(generated_latents, vae, scale, bias)
-        for offset, image in enumerate(generated):
-            image.save(image_dir / f"{start + offset:06d}.png")
+        for sample_index, image in zip(batch_indices, generated):
+            image.save(image_dir / f"{sample_index:06d}.png")
 
         del oracle_model, generated_latents, generated
 
     if extractor is not None:
         extractor.remove_hooks()
-    create_npz(image_dir, Path(args.output_npz), count)
+    barrier()
+    if rank == 0:
+        create_npz(image_dir, Path(args.output_npz), count)
+    barrier()
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def build_parser():
