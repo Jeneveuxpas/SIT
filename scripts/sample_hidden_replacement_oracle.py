@@ -94,6 +94,35 @@ def final_features_to_kv_memory(
     ).transpose(1, 2).detach()
 
 
+def select_oracle_feature(
+    clean_feature: torch.Tensor,
+    extractor: EncoderKVExtractor | None,
+    feature_source: str,
+) -> torch.Tensor:
+    """Select the same encoder feature source used to train a residual scaffold."""
+    if feature_source == "repa":
+        return clean_feature
+    if extractor is None:
+        raise RuntimeError(
+            f"scaffold_feature_source={feature_source!r} requires an encoder extractor"
+        )
+    if feature_source == "attn_input":
+        features = extractor.get_captured_feat_list()
+    elif feature_source == "attn_output":
+        features = extractor.get_captured_attn_output_list()
+    else:
+        raise ValueError(
+            "Residual oracle inference supports repa, attn_input, or attn_output "
+            f"feature sources, got {feature_source!r}"
+        )
+    if len(features) != 1:
+        raise ValueError(
+            "The fixed residual oracle currently expects exactly one encoder/SiT "
+            f"layer pair, found {len(features)}"
+        )
+    return features[0]
+
+
 def load_reference_image(path: str, resolution: int) -> tuple[Image.Image, torch.Tensor]:
     """Center-crop the reference and return both PIL and raw [0,255] BCHW."""
     image = Image.open(path).convert("RGB")
@@ -140,9 +169,18 @@ def load_oracle_model(
         raise ValueError(
             f"This diagnostic supports hidden, residual, or kv checkpoints, got {interface!r}"
         )
-    if interface in ("hidden", "residual") and feature_source != "repa":
+    if interface == "hidden" and feature_source != "repa":
         raise ValueError(
-            "Hidden/residual oracle inference requires scaffold_feature_source='repa'"
+            "Hidden oracle inference requires scaffold_feature_source='repa'"
+        )
+    if interface == "residual" and feature_source not in (
+        "repa",
+        "attn_input",
+        "attn_output",
+    ):
+        raise ValueError(
+            "Residual oracle inference supports repa, attn_input, or attn_output "
+            f"feature sources, got {feature_source!r}"
         )
     if interface == "kv" and feature_source not in ("attn_input", "final_feature"):
         raise ValueError(
@@ -169,10 +207,16 @@ def load_oracle_model(
         raise ValueError("Encoder and SiT layer-index lists have different lengths")
 
     extractor = None
-    if interface == "kv":
+    needs_extractor = interface == "kv" or (
+        interface == "residual" and feature_source in ("attn_input", "attn_output")
+    )
+    if needs_extractor:
         extractor = EncoderKVExtractor(encoder.model, enc_layer_indices).eval()
         extractor._target_num_patches = (latent_size // 2) ** 2
-        detected_dim = extractor.get_layer_dim(enc_layer_indices[0])
+        if interface == "kv":
+            detected_dim = extractor.get_layer_dim(enc_layer_indices[0])
+        else:
+            detected_dim = extractor.get_layer_input_dim(enc_layer_indices[0])
         detected_heads = extractor.get_layer_heads(enc_layer_indices[0])
         encoder_kv_dim = detected_dim or encoder_dim
         encoder_heads = detected_heads or max(1, encoder_kv_dim // 64)
@@ -419,13 +463,17 @@ def main(args):
     expected_tokens = (metadata["latent_size"] // 2) ** 2
 
     if metadata["interface"] in ("hidden", "residual"):
-        clean_feature = clean_feature.to(device=device, dtype=dtype)
-        if clean_feature.shape[1] != expected_tokens:
+        oracle_feature = select_oracle_feature(
+            clean_feature,
+            extractor,
+            metadata["feature_source"],
+        ).to(device=device, dtype=dtype)
+        if oracle_feature.shape[1] != expected_tokens:
             raise ValueError(
-                f"Clean feature has {clean_feature.shape[1]} tokens, but SiT expects "
+                f"Oracle feature has {oracle_feature.shape[1]} tokens, but SiT expects "
                 f"{expected_tokens}; check the reference resolution and encoder"
             )
-        oracle_payload = clean_feature
+        oracle_payload = oracle_feature
         oracle_model = FixedHiddenScaffold(model, oracle_payload).eval()
     else:
         if metadata["feature_source"] == "final_feature":

@@ -28,6 +28,7 @@ from scripts.sample_hidden_replacement_oracle import (
     load_local_vae,
     load_oracle_model,
     make_seeded_latents,
+    select_oracle_feature,
 )
 
 
@@ -242,7 +243,11 @@ def main(args):
         clean_feature = encoder_outputs["x_norm_patchtokens"]
 
         if metadata["interface"] in ("hidden", "residual"):
-            feature = clean_feature.to(device=device, dtype=dtype)
+            feature = select_oracle_feature(
+                clean_feature,
+                extractor,
+                metadata["feature_source"],
+            ).to(device=device, dtype=dtype)
             if feature.shape[1] != expected_tokens:
                 raise ValueError(
                     f"Encoder returned {feature.shape[1]} tokens; expected {expected_tokens}"
