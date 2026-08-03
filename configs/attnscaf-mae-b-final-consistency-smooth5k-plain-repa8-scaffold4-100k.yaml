@@ -1,31 +1,31 @@
-# MAE ViT-L/16 final-layer K/V scaffold at SiT block 8.
-# Standalone AttnScaf with output internalization and smooth withdrawal.
-# Requires pretrained_models/mae_vitl.pth.
+# MAE ViT-B/16 final-layer K/V scaffold at SiT block 4
+# with output internalization, smooth withdrawal, and plain REPA at block 8.
+# Requires pretrained_models/mae_vitb.pth.
 #
-#   0--25K:    native SiT queries attend to MAE keys and values.
-#   25--30K:   cosine blend from scaffolded to native attention output.
-#   30--100K:  native self-attention with output internalization (lambda=2).
+#   0--25K:    MAE K/V scaffold + REPA.
+#   25--30K:   cosine blend to native attention + REPA.
+#   30--100K:  native attention + output internalization + REPA.
 
 # ============================================================================
 # Model
 # ============================================================================
 model: SiT-XL/2-EncoderKV
 num-classes: 1000
-encoder-depth: 10
+encoder-depth: 8
 fused-attn: true
 qk-norm: false
 projection-layer-type: mlp
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
-# MAE-L K/V scaffold at SiT block 8
+# MAE-B K/V scaffold at SiT block 4
 # ============================================================================
 use-kv: true
 scaffold-interface: kv
 scaffold-feature-source: attn_input
-enc-type: mae-l
-enc-layer-indices: "24"
-sit-layer-indices: "8"
+enc-type: mae-b
+enc-layer-indices: "12"
+sit-layer-indices: "4"
 
 stage1-steps: 30000
 transition-steps: 5000
@@ -43,13 +43,15 @@ kv-norm-type: none
 kv-zscore-alpha: 1.0
 
 # ============================================================================
-# REPA disabled
+# Plain REPA at SiT block 8 using MAE final patch representations
 # ============================================================================
-repa-loss: false
-proj-coeff: "0.0"
-projection-loss-type: cosine
-spnorm-method: zscore
+repa-loss: true
+proj-coeff: "1.0"
+projection-loss-type: cosine_repa
+spnorm-method: none
 zscore-alpha: 0.6
+repa-stop-step: -1
+repa-stop-fade-steps: 0
 
 # ============================================================================
 # Dataset
