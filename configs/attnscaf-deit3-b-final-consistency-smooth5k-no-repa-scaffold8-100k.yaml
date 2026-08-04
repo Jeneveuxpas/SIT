@@ -1,32 +1,32 @@
-# DeiT-III-B/16 final-layer K/V scaffold at SiT block 4
-# with output internalization, smooth withdrawal, and plain REPA at block 8.
+# DeiT-III-B/16 final-layer K/V scaffold at SiT block 8.
+# Standalone AttnScaf with output internalization and smooth withdrawal.
 # The encoder is the ImageNet-1K supervised timm model
 # deit3_base_patch16_224.fb_in1k.
 #
-#   0--25K:    DeiT-III K/V scaffold + REPA.
-#   25--30K:   cosine blend to native attention + REPA.
-#   30--100K:  native attention + output internalization + REPA.
+#   0--25K:    native SiT queries attend to DeiT-III keys and values.
+#   25--30K:   cosine blend from scaffolded to native attention output.
+#   30--100K:  native self-attention with output internalization (lambda=2).
 
 # ============================================================================
 # Model
 # ============================================================================
 model: SiT-XL/2-EncoderKV
 num-classes: 1000
-encoder-depth: 8
+encoder-depth: 10
 fused-attn: true
 qk-norm: false
 projection-layer-type: mlp
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
-# DeiT-III-B K/V scaffold at SiT block 4
+# DeiT-III-B K/V scaffold at SiT block 8
 # ============================================================================
 use-kv: true
 scaffold-interface: kv
 scaffold-feature-source: attn_input
 enc-type: deit3-b
 enc-layer-indices: "12"
-sit-layer-indices: "4"
+sit-layer-indices: "8"
 
 stage1-steps: 30000
 transition-steps: 5000
@@ -44,15 +44,13 @@ kv-norm-type: none
 kv-zscore-alpha: 1.0
 
 # ============================================================================
-# Plain REPA at SiT block 8 using DeiT-III final patch representations
+# REPA disabled
 # ============================================================================
-repa-loss: true
-proj-coeff: "0.5"
-projection-loss-type: cosine_repa
-spnorm-method: none
+repa-loss: false
+proj-coeff: "0.0"
+projection-loss-type: cosine
+spnorm-method: zscore
 zscore-alpha: 0.6
-repa-stop-step: -1
-repa-stop-fade-steps: 0
 
 # ============================================================================
 # Dataset
