@@ -1,0 +1,73 @@
+# Vanilla SiT-B/2 baseline at 256x256.
+# Both AttnScaf and REPA are disabled. No visual encoder is loaded.
+
+# ============================================================================
+# Model
+# ============================================================================
+# The training entry point uses the EncoderKV wrapper, but with use-kv=false
+# and repa-loss=false it has the native SiT-B/2 forward path and no auxiliary
+# encoder projections.
+model: SiT-B/2-EncoderKV
+num-classes: 1000
+encoder-depth: 6
+fused-attn: true
+qk-norm: false
+
+# Layer indices are parsed by the shared training entry point but are inactive.
+enc-layer-indices: "6"
+sit-layer-indices: "6"
+
+# ============================================================================
+# Disable AttnScaf and internalization
+# ============================================================================
+use-kv: false
+stage1-steps: 0
+transition-steps: 0
+distill-coeff: 0.0
+
+# ============================================================================
+# Disable REPA
+# ============================================================================
+repa-loss: false
+proj-coeff: "0.0"
+
+# ============================================================================
+# Dataset
+# ============================================================================
+data-dir: /dev/shm/data
+resolution: 256
+batch-size: 256
+
+# ============================================================================
+# Training
+# ============================================================================
+epochs: 1400
+max-train-steps: 100000
+checkpointing-steps: 100000
+sampling-steps: 100000
+gradient-accumulation-steps: 1
+learning-rate: 1e-4
+adam-beta1: 0.9
+adam-beta2: 0.999
+adam-weight-decay: 0.0
+adam-epsilon: 1e-8
+max-grad-norm: 1.0
+ema-decay: 0.9999
+ema-update-freq: 1
+
+# ============================================================================
+# Precision
+# ============================================================================
+allow-tf32: true
+mixed-precision: fp16
+compile: true
+
+# ============================================================================
+# Misc
+# ============================================================================
+seed: 0
+num-workers: 12
+cfg-prob: 0.1
+path-type: linear
+prediction: v
+n-samples: 256
