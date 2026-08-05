@@ -1,0 +1,80 @@
+# K/V AttnScaf at block 8 + output consistency + smooth withdrawal
+# + plain REPA cosine alignment at the same block 8.
+#
+# Depth ablation matched to the scaffold-at-block-4 configuration.
+# The only method change is sit-layer-indices: "8".
+#
+#   0--25K:    encoder K/V scaffold at block 8 + REPA at block 8.
+#   25--30K:   cosine blend from scaffolded to native attention + REPA.
+#   30--400K:  native attention + output consistency (lambda=2) + REPA.
+
+model: SiT-XL/2-EncoderKV
+num-classes: 1000
+
+# REPA alignment location.
+encoder-depth: 8
+
+fused-attn: true
+qk-norm: false
+projection-layer-type: mlp
+proj-kwargs-kernel-size: 3
+
+use-kv: true
+scaffold-interface: kv
+enc-type: dinov2-b
+enc-layer-indices: "12"
+
+# AttnScaf injection location, matched to the REPA block.
+sit-layer-indices: "10"
+
+stage1-steps: 30000
+transition-steps: 5000
+transition-schedule: cosine
+
+kv-stop-step: -1
+align-mode: attn_mse
+distill-coeff: 2.0
+distill-warmup-steps: 0
+
+kv-replace-mode: kv
+kv-proj-type: linear
+kv-proj-kernel-size: 1
+kv-norm-type: none
+kv-zscore-alpha: 1.0
+
+repa-loss: true
+proj-coeff: "1.0"
+projection-loss-type: cosine_repa
+spnorm-method: none
+zscore-alpha: 0.6
+repa-stop-step: -1
+repa-stop-fade-steps: 0
+
+data-dir: /dev/shm/data
+resolution: 256
+batch-size: 256
+
+epochs: 1400
+max-train-steps: 100000
+checkpointing-steps: 100000
+sampling-steps: 100000
+gradient-accumulation-steps: 1
+learning-rate: 1e-4
+adam-beta1: 0.9
+adam-beta2: 0.999
+adam-weight-decay: 0.0
+adam-epsilon: 1e-8
+max-grad-norm: 1.0
+ema-decay: 0.9999
+ema-update-freq: 1
+
+allow-tf32: true
+mixed-precision: fp16
+compile: true
+
+seed: 0
+num-workers: 12
+cfg-prob: 0.1
+path-type: linear
+prediction: v
+n-samples: 256
