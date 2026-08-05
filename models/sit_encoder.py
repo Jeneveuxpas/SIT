@@ -136,6 +136,7 @@ class AttentionWithEncoderKV(nn.Module):
         kv_replace_mode: str = "kv",
         transition_alpha: Optional[torch.Tensor] = None,
         transition_active: bool = False,
+        transition_blend_mode: str = "output",
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward attention with staged Encoder-KV training.
@@ -197,10 +198,35 @@ class AttentionWithEncoderKV(nn.Module):
                     attn_enc = (1.0 - alpha) * attn_enc
                 cross_attn_outputs = (attn_sit, attn_enc)
             elif transition_active:
-                attn_enc = self._compute_attn_output(q_teacher, k_teacher, v_teacher)
-                attn_sit = self._compute_attn_output(q_sit, k_sit, v_sit)
-                alpha = transition_alpha.to(device=attn_sit.device, dtype=attn_sit.dtype)
-                attn_out = (1.0 - alpha) * attn_enc + alpha * attn_sit
+                if transition_blend_mode == "output":
+                    attn_enc = self._compute_attn_output(q_teacher, k_teacher, v_teacher)
+                    attn_sit = self._compute_attn_output(q_sit, k_sit, v_sit)
+                    alpha = transition_alpha.to(
+                        device=attn_sit.device, dtype=attn_sit.dtype
+                    )
+                    attn_out = (1.0 - alpha) * attn_enc + alpha * attn_sit
+                elif transition_blend_mode == "kv":
+                    if kv_replace_mode != "kv":
+                        raise ValueError(
+                            "K/V transition blending requires kv_replace_mode='kv'"
+                        )
+                    if k_teacher.shape != k_sit.shape or v_teacher.shape != v_sit.shape:
+                        raise ValueError(
+                            "K/V transition blending requires matching external and "
+                            "native tensor shapes, got "
+                            f"K {tuple(k_teacher.shape)} vs {tuple(k_sit.shape)} and "
+                            f"V {tuple(v_teacher.shape)} vs {tuple(v_sit.shape)}"
+                        )
+                    alpha = transition_alpha.to(
+                        device=k_sit.device, dtype=k_sit.dtype
+                    )
+                    q = q_sit
+                    k = (1.0 - alpha) * k_teacher + alpha * k_sit
+                    v = (1.0 - alpha) * v_teacher + alpha * v_sit
+                else:
+                    raise ValueError(
+                        f"Unknown transition_blend_mode: {transition_blend_mode}"
+                    )
             else:
                 q, k, v = q_teacher, k_teacher, v_teacher
         elif stage == 2 and has_enc:
@@ -368,6 +394,7 @@ class SiTBlockWithEncoderKV(nn.Module):
         path_type: str = "linear",
         transition_alpha: Optional[torch.Tensor] = None,
         transition_active: bool = False,
+        transition_blend_mode: str = "output",
         enc_feat: Optional[torch.Tensor] = None,
         enable_scaffold_in_eval: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -502,6 +529,7 @@ class SiTBlockWithEncoderKV(nn.Module):
                 kv_replace_mode=self.kv_replace_mode,
                 transition_alpha=transition_alpha,
                 transition_active=transition_active,
+                transition_blend_mode=transition_blend_mode,
             )
         x = x + gate_msa.unsqueeze(1) * attn_out
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
@@ -712,6 +740,7 @@ class SiTWithEncoderKV(nn.Module):
         align_mode: str = 'attn_mse',
         transition_alpha: Optional[torch.Tensor] = None,
         transition_active: bool = False,
+        transition_blend_mode: str = "output",
         return_logvar: bool = False,
         enc_feat_list: Optional[List[torch.Tensor]] = None,
         enable_scaffold_in_eval: bool = False,
@@ -752,6 +781,7 @@ class SiTWithEncoderKV(nn.Module):
                 time_input=t, path_type=self.path_type,
                 transition_alpha=transition_alpha,
                 transition_active=transition_active,
+                transition_blend_mode=transition_blend_mode,
                 enable_scaffold_in_eval=enable_scaffold_in_eval,
             )
             

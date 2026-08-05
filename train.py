@@ -509,7 +509,8 @@ def main(args):
         if args.stage1_steps > 0 and args.transition_steps > 0:
             logger.info(
                 "Stage-1 attention handoff: "
-                f"last {args.transition_steps} steps with {args.transition_schedule} schedule"
+                f"last {args.transition_steps} steps with {args.transition_schedule} "
+                f"schedule and {args.transition_blend_mode} blending"
             )
         if args.distill_warmup_steps > 0:
             logger.info(
@@ -916,6 +917,7 @@ def main(args):
                     align_mode=current_align_mode,
                     transition_alpha=transition_alpha_tensor,
                     transition_active=transition_active,
+                    transition_blend_mode=args.transition_blend_mode,
                 )
                 
                 denoising_loss, proj_loss_raw, distill_loss_raw, loss_dict = loss_fn(model, x, model_kwargs, zs=zs)
@@ -1077,6 +1079,15 @@ def parse_args(input_args=None):
     parser.add_argument("--transition-schedule", type=str, default="cosine",
                         choices=["cosine", "linear"],
                         help="Schedule for the Stage-1 attention handoff.")
+    parser.add_argument(
+        "--transition-blend-mode",
+        type=str,
+        default="output",
+        choices=["output", "kv"],
+        help="Where to interpolate during the Stage-1 handoff: blend two "
+             "complete attention outputs (output, default), or interpolate "
+             "projected external and native K/V before attention (kv).",
+    )
     parser.add_argument("--distill-coeff", type=float, default=1.0,
                         help="Coefficient for distillation loss (0 in Stage 1, this value in Stage 2)")
     parser.add_argument("--distill-warmup-steps", type=int, default=0,
@@ -1272,6 +1283,15 @@ def parse_args(input_args=None):
         parser.error("--repa-stop-fade-steps must be >= 0")
     if args.transition_steps < 0:
         parser.error("--transition-steps must be >= 0")
+    if args.transition_blend_mode == "kv" and (
+        args.scaffold_interface != "kv"
+        or args.kv_replace_mode != "kv"
+        or args.kv_memory_mode != "replace"
+    ):
+        parser.error(
+            "--transition-blend-mode kv requires --scaffold-interface kv, "
+            "--kv-replace-mode kv, and --kv-memory-mode replace"
+        )
     if args.distill_warmup_steps < 0:
         parser.error("--distill-warmup-steps must be >= 0")
     if args.scaffold_interface in ("residual", "hidden") and not args.use_kv:
