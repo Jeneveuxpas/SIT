@@ -5,7 +5,7 @@
 #   plain REPA at block 8 with MLP projector and coefficient 0.5.
 #
 #   0--25K:    encoder K/V scaffold at block 4 + REPA at block 8.
-#   25--30K:   cosine blend from scaffolded to native attention output + REPA.
+#   25--30K:   linear blend from scaffolded to native attention output + REPA.
 #   30--100K:  native attention + direct K/V consistency (lambda=0.25) + REPA.
 
 # ============================================================================
@@ -34,7 +34,7 @@ sit-layer-indices: "4"
 
 stage1-steps: 30000
 transition-steps: 5000
-transition-schedule: cosine
+transition-schedule: linear
 transition-blend-mode: output
 
 kv-stop-step: -1
