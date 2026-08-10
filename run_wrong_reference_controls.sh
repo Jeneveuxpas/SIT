@@ -3,7 +3,7 @@
 # same-class and different-class incorrect clean references on two GPUs.
 set -euo pipefail
 
-CONFIG="${CONFIG:-configs/attnscaf-kv-layer8-oracle30k.yaml}"
+CONFIG="${CONFIG:-configs/sit-xl2-attnscaf-dinob12-s8-t30k-cons-none-smooth-none-repa-none.yaml}"
 EXP_NAME="${EXP_NAME:-attnscaf-kv-layer8-oracle30k}"
 GPU="${GPU:-0,1}"
 NUM_GPUS="${NUM_GPUS:-2}"
