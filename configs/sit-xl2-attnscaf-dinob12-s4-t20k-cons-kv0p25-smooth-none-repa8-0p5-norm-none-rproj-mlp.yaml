@@ -1,0 +1,101 @@
+# SiT-XL/2 with a 20K DINOv2 K/V scaffold at block 4.
+# After scaffold removal, directly internalize encoder K/V with weight 0.25.
+# Plain REPA is applied at block 8 with weight 0.5 for the full 400K run.
+#
+#   0--20K:    encoder K/V scaffold at block 4 + REPA at block 8.
+#   20--400K:  native attention + direct K/V consistency + REPA.
+
+# ============================================================================
+# Model
+# ============================================================================
+model: SiT-XL/2-EncoderKV
+num-classes: 1000
+
+# REPA alignment location (independent of sit-layer-indices below).
+encoder-depth: 8
+
+fused-attn: true
+qk-norm: false
+projection-layer-type: mlp
+proj-kwargs-kernel-size: 3
+
+# ============================================================================
+# DINOv2 K/V scaffold at SiT block 4
+# ============================================================================
+use-kv: true
+scaffold-interface: kv
+scaffold-feature-source: attn_input
+enc-type: dinov2-b
+enc-layer-indices: "12"
+sit-layer-indices: "4"
+
+stage1-steps: 20000
+transition-steps: 0
+
+kv-stop-step: -1
+align-mode: kv_mse
+distill-coeff: 0.25
+distill-warmup-steps: 0
+
+# Disable timestep weighting for the matched direct K/V objective.
+kv-distill-snr-gamma: 1.0
+kv-distill-min-weight: 1.0
+
+kv-replace-mode: kv
+kv-memory-mode: replace
+kv-proj-type: linear
+kv-proj-kernel-size: 1
+kv-norm-type: none
+kv-zscore-alpha: 1.0
+
+# ============================================================================
+# Plain REPA at block 8 (MLP projector, no spatial normalization)
+# ============================================================================
+repa-loss: true
+proj-coeff: "0.5"
+projection-loss-type: cosine_repa
+spnorm-method: none
+zscore-alpha: 0.6
+repa-stop-step: -1
+repa-stop-fade-steps: 0
+
+# ============================================================================
+# Dataset
+# ============================================================================
+data-dir: /dev/shm/data
+resolution: 256
+batch-size: 256
+
+# ============================================================================
+# Training
+# ============================================================================
+epochs: 1400
+max-train-steps: 400000
+checkpointing-steps: 50000
+sampling-steps: 100000
+gradient-accumulation-steps: 1
+learning-rate: 1e-4
+adam-beta1: 0.9
+adam-beta2: 0.999
+adam-weight-decay: 0.0
+adam-epsilon: 1e-8
+max-grad-norm: 1.0
+ema-decay: 0.9999
+ema-update-freq: 1
+
+# ============================================================================
+# Precision
+# ============================================================================
+allow-tf32: true
+mixed-precision: fp16
+compile: true
+
+# ============================================================================
+# Misc
+# ============================================================================
+seed: 0
+num-workers: 12
+cfg-prob: 0.1
+path-type: linear
+prediction: v
+n-samples: 256
