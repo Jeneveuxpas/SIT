@@ -15,7 +15,7 @@ scaffold-interface: kv
 scaffold-feature-source: attn_input
 enc-type: dinov2-b
 enc-layer-indices: "12"
-sit-layer-indices: "8"
+sit-layer-indices: "6"
 
 stage1-steps: 20000
 transition-steps: 0
