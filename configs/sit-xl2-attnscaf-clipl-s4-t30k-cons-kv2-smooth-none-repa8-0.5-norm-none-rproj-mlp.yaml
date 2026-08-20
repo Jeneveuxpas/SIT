@@ -1,10 +1,8 @@
-# MAE ViT-B/16 final-layer K/V scaffold at SiT block 4
-# with output internalization, smooth withdrawal, and plain REPA at block 8.
-# Requires pretrained_models/mae_vitb.pth.
+# CLIP-L/14 final-layer K/V scaffold at SiT block 4
+# with direct K/V internalization and plain REPA at block 8.
 #
-#   0--25K:    MAE K/V scaffold + REPA.
-#   25--30K:   cosine blend to native attention + REPA.
-#   30--100K:  native attention + output internalization + REPA.
+#   0--30K:    CLIP K/V scaffold + REPA.
+#   30--100K:  native attention + K/V internalization + REPA.
 
 # ============================================================================
 # Model
@@ -18,7 +16,7 @@ projection-layer-type: mlp
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
-# MAE-B K/V scaffold at SiT block 4
+# CLIP-L/14 K/V scaffold at SiT block 4
 # ============================================================================
 use-kv: true
 scaffold-interface: kv
@@ -35,14 +33,19 @@ align-mode: kv_mse
 distill-coeff: 2.0
 distill-warmup-steps: 0
 
+# Use an unweighted direct K/V MSE at every diffusion timestep.
+kv-distill-snr-gamma: 1.0
+kv-distill-min-weight: 1.0
+
 kv-replace-mode: kv
+kv-memory-mode: replace
 kv-proj-type: linear
 kv-proj-kernel-size: 1
 kv-norm-type: none
 kv-zscore-alpha: 1.0
 
 # ============================================================================
-# Plain REPA at SiT block 8 using MAE final patch representations
+# Plain REPA at SiT block 8 using CLIP final patch representations
 # ============================================================================
 repa-loss: true
 proj-coeff: "0.5"

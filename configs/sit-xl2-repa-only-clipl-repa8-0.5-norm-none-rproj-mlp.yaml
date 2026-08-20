@@ -1,5 +1,6 @@
-# Strict control: MLP REPA projector + spatial zscore, without attention scaffolding
-# Purpose: isolate the contribution of REPA+zscore from K/V scaffolding and consistency.
+# CLIP-L/14 REPA-only control at SiT block 8.
+# Uses the original cosine REPA objective with an MLP projector and no
+# spatial normalization or attention scaffold.
 
 # ============================================================================
 # Model Configuration
