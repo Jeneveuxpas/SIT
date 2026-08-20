@@ -385,8 +385,22 @@ class EncoderKVExtractor(nn.Module):
             qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, heads, N, head_dim)
             q, k, v = qkv.unbind(0)
             
-            # Remove prefix tokens if present (CLS/register tokens). Some supervised ViTs are patch-only.
+            # Remove prefix tokens if present (CLS/register tokens). Some timm
+            # models (e.g. DeiT-III with ``no_embed_class``) keep a CLS token in
+            # the attention sequence while their positional embedding is
+            # patch-only, so ``num_prefix_tokens`` may incorrectly appear as 0
+            # after positional-embedding adaptation. Fall back to square-grid
+            # inference from the actual attention sequence.
             prefix_tokens = self._get_prefix_token_count()
+            remaining = N - prefix_tokens
+            remaining_hw = int(round(remaining ** 0.5))
+            if remaining_hw * remaining_hw != remaining:
+                for candidate in range(1, min(17, N)):
+                    patch_tokens = N - candidate
+                    patch_hw = int(round(patch_tokens ** 0.5))
+                    if patch_hw * patch_hw == patch_tokens:
+                        prefix_tokens = candidate
+                        break
             if prefix_tokens > 0:
                 q = q[:, :, prefix_tokens:, :]
                 k = k[:, :, prefix_tokens:, :]
