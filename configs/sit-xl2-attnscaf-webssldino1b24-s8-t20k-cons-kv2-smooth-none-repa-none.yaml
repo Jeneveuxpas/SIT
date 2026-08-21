@@ -1,0 +1,76 @@
+# WebSSL DINO-1B final-layer K/V scaffold at SiT block 8.
+#
+#   0--20K:    native SiT queries attend to WebSSL keys and values.
+#   20--100K:  native self-attention with direct K/V internalization
+#              against detached projected WebSSL K/V (lambda=2).
+#
+# The encoder is loaded from facebook/webssl-dino1b-full2b-224.
+
+model: SiT-XL/2-EncoderKV
+num-classes: 1000
+encoder-depth: 10
+fused-attn: true
+qk-norm: false
+projection-layer-type: mlp
+proj-kwargs-kernel-size: 3
+
+use-kv: true
+scaffold-interface: kv
+scaffold-feature-source: attn_input
+enc-type: webssl-dino1b-full2b-224
+enc-layer-indices: "24"
+sit-layer-indices: "8"
+
+stage1-steps: 20000
+transition-steps: 0
+transition-schedule: cosine
+transition-blend-mode: output
+
+kv-stop-step: -1
+align-mode: kv_mse
+distill-coeff: 2.0
+distill-warmup-steps: 0
+kv-distill-snr-gamma: 1.0
+kv-distill-min-weight: 1.0
+
+kv-replace-mode: kv
+kv-memory-mode: replace
+kv-proj-type: linear
+kv-proj-kernel-size: 1
+kv-norm-type: none
+kv-zscore-alpha: 1.0
+
+repa-loss: false
+proj-coeff: "0.0"
+projection-loss-type: cosine
+spnorm-method: zscore
+zscore-alpha: 0.6
+
+data-dir: /dev/shm/data
+resolution: 256
+batch-size: 256
+
+epochs: 1400
+max-train-steps: 100000
+checkpointing-steps: 100000
+sampling-steps: 100000
+gradient-accumulation-steps: 1
+learning-rate: 1e-4
+adam-beta1: 0.9
+adam-beta2: 0.999
+adam-weight-decay: 0.0
+adam-epsilon: 1e-8
+max-grad-norm: 1.0
+ema-decay: 0.9999
+ema-update-freq: 1
+
+allow-tf32: true
+mixed-precision: fp16
+compile: true
+
+seed: 0
+num-workers: 12
+cfg-prob: 0.1
+path-type: linear
+prediction: v
+n-samples: 256
