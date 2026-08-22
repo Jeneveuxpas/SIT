@@ -1,38 +1,43 @@
-# K/V internalization duration ablation without smooth withdrawal.
+# Canonical condition:
+#   SiT-XL/2; DINOv2-B block 12 K/V; AttnScaf at SiT block 4;
+#   30K scaffold; attention-output smooth withdrawal over the final 5K;
+#   direct K/V consistency (coefficient 0.25);
+#   plain REPA at block 8 with MLP projector and coefficient 0.5.
 #
-#   0--20K:    native SiT queries attend to DINOv2 keys and values.
-#   20--100K:  native self-attention with direct K/V internalization
-#              against detached projected DINOv2 K/V (lambda=2).
+#   0--25K:    encoder K/V scaffold at block 4 + REPA at block 8.
+#   25--30K:   linear blend from scaffolded to native attention output + REPA.
+#   30--100K:  native attention + direct K/V consistency (lambda=0.25) + REPA.
 
 # ============================================================================
 # Model
 # ============================================================================
 model: SiT-XL/2-EncoderKV
 num-classes: 1000
-encoder-depth: 10
+
+# REPA alignment location (independent of sit-layer-indices below).
+encoder-depth: 8
+
 fused-attn: true
 qk-norm: false
 projection-layer-type: mlp
 proj-kwargs-kernel-size: 3
 
 # ============================================================================
-# DINOv2 K/V scaffold at SiT block 6
+# DINOv2 K/V scaffold at SiT block 8
 # ============================================================================
 use-kv: true
 scaffold-interface: kv
 scaffold-feature-source: attn_input
 enc-type: dinov2-b
 enc-layer-indices: "12"
-sit-layer-indices: "12"
+sit-layer-indices: "2"
 
-stage1-steps: 20000
+stage1-steps: 30000
 transition-steps: 0
-transition-schedule: cosine
-transition-blend-mode: output
 
 kv-stop-step: -1
 align-mode: kv_mse
-distill-coeff: 2.0
+distill-coeff: 0.25
 distill-warmup-steps: 0
 
 # Disable the default timestep weighting in kv_mse for a matched comparison.
@@ -47,13 +52,15 @@ kv-norm-type: none
 kv-zscore-alpha: 1.0
 
 # ============================================================================
-# REPA disabled
+# Plain REPA alignment at block 8 (MLP head, no spatial normalization)
 # ============================================================================
-repa-loss: false
-proj-coeff: "0.0"
-projection-loss-type: cosine
-spnorm-method: zscore
+repa-loss: true
+proj-coeff: "0.5"
+projection-loss-type: cosine_repa
+spnorm-method: none
 zscore-alpha: 0.6
+repa-stop-step: -1
+repa-stop-fade-steps: 0
 
 # ============================================================================
 # Dataset
