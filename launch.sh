@@ -30,7 +30,7 @@ EVAL_NUM_STEPS="${EVAL_NUM_STEPS:-250}"
 CFG_SCALE="${CFG_SCALE:-1.0}"
 MODE="${MODE:-sde}"
 VAE="${VAE:-ema}"
-REF_BATCH="${REF_BATCH:-/workspace/SIT/VIRTUAL_imagenet256_labeled.npz}"
+REF_BATCH="${REF_BATCH:-/workspace/code/SIT/VIRTUAL_imagenet256_labeled.npz}"
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
