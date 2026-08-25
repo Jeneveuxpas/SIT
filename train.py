@@ -1097,7 +1097,7 @@ def parse_args(input_args=None):
                         choices=["linear", "cosine"],
                         help="Schedule for Stage-2 distillation warmup.")
     parser.add_argument("--align-mode", type=str, default="attn_mse",
-                        choices=["logits", "attn_mse", "attn_cosine", "snr_attn_mse", "attn_kl", "kv_mse", "attn_hybrid"],
+                        choices=["logits", "attn_mse", "attn_cosine", "snr_attn_mse", "attn_kl", "kv_mse", "kv_cos", "attn_hybrid"],
                         help="Alignment mode: logits, attn_mse, attn_cosine, snr_attn_mse, attn_kl, kv_mse, attn_hybrid")
     parser.add_argument("--distill-temperature", type=float, default=1.0,
                         help="Temperature for attn_kl mode (<1 sharpens distributions, making alignment harder)")
@@ -1237,7 +1237,7 @@ def parse_args(input_args=None):
 
     # config file (YAML)
     parser.add_argument("--config", type=str, default=None,
-        help="Path to YAML config file (e.g., configs/irepa.yaml)")
+        help="Path to YAML config file (e.g., configs/sit-xl2-vanilla-repa-none.yaml)")
 
     # First parse to get config file path
     if input_args is not None:

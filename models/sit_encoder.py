@@ -91,6 +91,11 @@ class AttentionWithEncoderKV(nn.Module):
     def _per_sample_mse(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         return (x - y).pow(2).mean(dim=(1, 2, 3))
 
+    @staticmethod
+    def _per_sample_cos(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        cos = F.cosine_similarity(x, y, dim=-1, eps=1e-6)
+        return (1.0 - cos).mean(dim=(1, 2))
+    
     def _snr_weight(
         self,
         time_input: Optional[torch.Tensor],
@@ -239,16 +244,16 @@ class AttentionWithEncoderKV(nn.Module):
                 attn_sit = self._compute_attn_output(q_sit, k_sit, v_sit)
                 teacher_target = attn_enc if self.train_kv_proj_in_stage2 else attn_enc.detach()
                 distill_loss = F.mse_loss(attn_sit, teacher_target)
-            elif align_mode == 'kv_mse':
-                # For kv_mse, compare the components that are being replaced
+            elif align_mode in ('kv_mse', 'kv_cos'):
                 loss_components = []
                 _detach = lambda t: t if self.train_kv_proj_in_stage2 else t.detach()
+                _dist = self._per_sample_mse if align_mode == 'kv_mse' else self._per_sample_cos
                 if k_enc is not None and kv_replace_mode in ('kv', 'k', 'qkv', 'qk'):
-                    loss_components.append(self._per_sample_mse(k_sit.float(), _detach(k_enc.float())))
+                    loss_components.append(_dist(k_sit.float(), _detach(k_enc.float())))
                 if v_enc is not None and kv_replace_mode in ('kv', 'v', 'qkv'):
-                    loss_components.append(self._per_sample_mse(v_sit.float(), _detach(v_enc.float())))
+                    loss_components.append(_dist(v_sit.float(), _detach(v_enc.float())))
                 if q_enc is not None and kv_replace_mode in ('qkv', 'qk', 'q'):
-                    loss_components.append(self._per_sample_mse(q_sit.float(), _detach(q_enc.float())))
+                    loss_components.append(_dist(q_sit.float(), _detach(q_enc.float())))
                 if loss_components:
                     combined = sum(loss_components)
                     kv_weight = self._snr_weight(
