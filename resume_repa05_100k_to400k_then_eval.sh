@@ -3,8 +3,8 @@
 # After training, evaluate 200K on GPUs 2--3 and 400K on GPUs 4--5.
 set -euo pipefail
 
-CONFIG="configs/attnscaf-consistency-smooth5k-repa0.5-repa8-scaffold4-100k.yaml"
-EXP_NAME="attnscaf-consistency-smooth5k-repa0.5-repa8-scaffold4-100k"
+CONFIG="configs/sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa8-0p5-norm-zs0p6-rproj-mlp.yaml"
+EXP_NAME="sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa8-0p5-norm-zs0p6-rproj-mlp"
 LOG_DIR="logs/${EXP_NAME}"
 
 mkdir -p "$LOG_DIR"

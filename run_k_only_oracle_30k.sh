@@ -3,7 +3,7 @@ set -euo pipefail
 
 EXP_NAME="sit-xl2-attnscaf-dinob12-replace-k-s8-t30k-cons-none-smooth-none-repa-none"
 
-./run_oracle_experiment.sh \
+bash ./run_oracle_experiment.sh \
   --config "configs/${EXP_NAME}.yaml" \
   --exp-name "$EXP_NAME" \
   --step 0030000 \

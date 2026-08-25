@@ -5,25 +5,21 @@
 # 
 # 用法:
 #   # 评估指定的 steps
-#   ./eval_ckpts.sh --config configs/attnscaf-consistency-no-repa-smooth5k-layer8-100k.yaml --exp-name attnscaf-consistency-no-repa-smooth5k-layer8-100k --steps "0400000" --gpu 6,7 --num-gpus 2 
-#   ./eval_ckpts.sh --config configs/SIT-6.yaml --exp-name SIT-6 --steps "0100000" --gpu 0,1,2,3,4,5,6,7 --num-gpus 8
-#   ./eval_ckpts.sh --config configs/attnscaf-consistency-smooth5k-repa8-scaffold4-100k.yaml --exp-name attnscaf-consistency-smooth5k-repa8-scaffold4-100k --gpu 6,7 --num-gpus 2 --steps "0400000"
+#   ./eval_ckpts.sh --config configs/sit-xl2-repa-only-dinob-repa8-0p5-norm-none-vae-mse.yaml --exp-name sit-xl2-repa-only-dinob-repa8-0p5-norm-none-vae-mse --steps "0100000" --gpu 6,7 --num-gpus 2 --guidance-low 0.0 --guidance-high 1.0 --cfg-scale 1.3
+#   ./eval_ckpts.sh --config configs/sit-xl2-attnscaf-dinob12-s10-t30k-cons-attn2-smooth-attn-repa8-1-norm-none-rproj-mlp.yaml --exp-name sit-xl2-attnscaf-dinob12-s10-t30k-cons-attn2-smooth-attn-repa8-1-norm-none-rproj-mlp --steps "0100000" --gpu 6,7 --num-gpus 2
+#   ./eval_ckpts.sh --config configs/sit-xl2-vanilla-repa-none.yaml --exp-name sit-xl2-vanilla-repa-none --steps "0100000" --gpu 0,1,2,3,4,5,6,7 --num-gpus 8
+#   ./eval_ckpts.sh --config configs/sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa8-1-norm-zs0p6-rproj-mlp.yaml --exp-name sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa8-1-norm-zs0p6-rproj-mlp --gpu 6,7 --num-gpus 2 --steps "0400000"
 #   # 使用 guidance interval
-#   ./eval_ckpts.sh --config configs/baseline.yaml --exp-name baseline --steps "2000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.65
-#   ./eval_ckpts.sh --config configs/attnscaf-consistency-repa-smooth5k-100k.yaml --exp-name attnscaf-consistency-repa-smooth5k-100k --steps "0400000" --gpu 6,7 --num-gpus 2 
-#   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.7
-#   ./eval_ckpts.sh --config configs/attn_mse_repa_early_stop_1000.yaml --exp-name attn_mse_repa_early_stop_1000 --steps "1000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.8
-#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.65 --cfg-scale 1.65
-#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.65 --cfg-scale 1.7
-#   ./eval_ckpts.sh --config configs/SIT-XL.yaml --exp-name SIT-XL --steps "1000000" --guidance-low 0.0 --guidance-high 0.65 --cfg-scale 1.8
+#   ./eval_ckpts.sh --config configs/sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-none-repa10-1-norm-zs0p6-rproj-mlp.yaml --exp-name sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-none-repa10-1-norm-zs0p6-rproj-mlp --steps "2000000" --guidance-low 0.0 --guidance-high 0.7 --cfg-scale 1.65
+#   ./eval_ckpts.sh --config configs/sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa10-1-norm-zs0p6-rproj-mlp.yaml --exp-name sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa10-1-norm-zs0p6-rproj-mlp --steps "0400000" --gpu 6,7 --num-gpus 2
 #   # 评估所有 checkpoints
-#   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --all
+#   ./eval_ckpts.sh --config configs/sit-xl2-vanilla-repa-none.yaml --exp-name my_exp --all
 #
 #   # 评估某个范围内的 checkpoints
-#   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --from 50000 --to 200000
+#   ./eval_ckpts.sh --config configs/sit-xl2-vanilla-repa-none.yaml --exp-name my_exp --from 50000 --to 200000
 #
 #   # 评估最近 N 个 checkpoints
-#   ./eval_ckpts.sh --config configs/default.yaml --exp-name my_exp --last 5
+#   ./eval_ckpts.sh --config configs/sit-xl2-vanilla-repa-none.yaml --exp-name my_exp --last 5
 # ============================================================================
 set -e
 

@@ -11,7 +11,7 @@ set -euo pipefail
 #
 # Example:
 #   CUDA_VISIBLE_DEVICES=0 ./scripts/run_early_ckpt_eval.sh \
-#     --exp-name attnscaf-ablate-kvnorm-attnscaf-only-100k \
+#     --exp-name sit-xl2-attnscaf-dinob12-s4-t30k-cons-none-smooth-none-kvnorm-krmsvlayer-repa-none-100k \
 #     --data-dir /dev/shm/data \
 #     --teacher-align --teacher-layer-depths 8,10 \
 #     --steps 0005000,0010000,0015000,0020000,0025000,0030000,0035000,0040000,0050000,0075000,0100000

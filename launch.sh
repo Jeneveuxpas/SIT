@@ -4,14 +4,10 @@
 # iREPA 统一启动脚本 - 训练 + 评估
 #
 # 用法: 
-#   ./launch.sh --config configs/DINO-8.yaml --exp-name DINO-8 --gpu 7 --num-gpus 1 
+#   ./launch.sh --config configs/sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa8-0p5-norm-none-rproj-mlp.yaml --exp-name sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa8-0p5-norm-none-rproj-mlp --gpu 0,1 --num-gpus 2
 #   
-# ./launch.sh --config configs/irepa_only-2.0.yaml --exp-name irepa_only-2.0 --gpu 6,7 --num-gpus 2 
-#  ./launch.sh --config configs/sam2-s-16.yaml --exp-name sam2-s-16 --gpu 2 --num-gpus 1
- 
-# ./launch.sh --config configs/attnscaf-consistency-smooth5k-repa8-scaffold4-100k.yaml --exp-name attnscaf-consistency-smooth5k-repa8-scaffold4-100k --gpu 4,5,6,7 --num-gpus 4 --resume-step 300000 
-#  ./launch.sh --config configs/base.yaml --exp-name base --gpu 0,1,2,3  --num-gpus 4 --resume-step 1800000
-#  ./launch.sh --config configs/attn_mse_repa_early_stop_600.yaml --exp-name attn_mse_repa_early_stop_600 --gpu 4,5,6,7 --num-gpus 4 --resume-step 0600000
+# ./launch.sh --config configs/sit-xl2-vanilla-repa-none.yaml --exp-name sit-xl2-vanilla-repa-none --gpu 6,7 --num-gpus 2
+# ./launch.sh --config configs/sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-kvnorm-zscore-repa8-1-norm-zs0p6-rproj-conv.yaml --exp-name sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-kvnorm-zscore-repa8-1-norm-zs0p6-rproj-conv --gpu 0,1,2,3 --num-gpus 4
 
 # ============================================================================
 set -e

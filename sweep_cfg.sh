@@ -7,7 +7,7 @@
 #   ./sweep_cfg.sh
 #   ./sweep_cfg.sh --steps "0600000,0700000,0800000"
 #   ./sweep_cfg.sh --cfg-scales "1.2,1.4,1.6,1.8" --guidance-highs "1.0,0.8,0.72,0.65"
-#   ./sweep_cfg.sh --config configs/SiT-XL-early-stop-300.yaml --exp-name SIT-XL-early-stop-300 \
+#   ./sweep_cfg.sh --config configs/sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa8-0p5-norm-zs0p6-rproj-mlp.yaml --exp-name sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa8-0p5-norm-zs0p6-rproj-mlp \
 #       --steps "0600000,0700000,0800000" --vae ema --gpu 4,5,6,7 --num-gpus 4
 # ============================================================================
 set -e
@@ -15,8 +15,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 默认参数
-CONFIG="configs/SIT-XL.yaml"
-EXP_NAME="SIT-XL"
+CONFIG="configs/sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa8-0p5-norm-zs0p6-rproj-mlp.yaml"
+EXP_NAME="sit-xl2-attnscaf-dinob12-s4-t30k-cons-attn2-smooth-attn-repa8-0p5-norm-zs0p6-rproj-mlp"
 STEPS="2000000"
 
 GPU="0,1,2,3,4,5,6,7"

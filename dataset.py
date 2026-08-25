@@ -119,13 +119,43 @@ class HFLatentDataset(Dataset):
     def __init__(self, vae_name, data_dir, split="train"):
         split_str = "val" if split == "val" else ""
         assert vae_name in self.PRECOMPUTED, f"VAE {vae_name} not found in {self.PRECOMPUTED}"
-        assert os.path.exists(os.path.join(data_dir, f"imagenet_{split}_labels.txt")), \
-            "imagenet_train_labels.txt not found, please download from huggingface"
-
         self.latent_dataset = load_from_disk(os.path.join(data_dir, f"imagenet-latents-{vae_name}", split_str))
 
-        with open(os.path.join(data_dir, f"imagenet_{split}_labels.txt"), "r") as f:
-            self.labels = [int(line.strip()) for line in f.readlines()]
+        label_path = os.path.join(data_dir, f"imagenet_{split}_labels.txt")
+        if os.path.exists(label_path):
+            with open(label_path, "r") as f:
+                self.labels = [int(line.strip()) for line in f]
+        else:
+            # The paired HuggingFace image dataset already stores labels in
+            # exactly the order used to construct the latent dataset.  Reading
+            # this column does not decode or return images, so latent-only
+            # training remains on the lightweight data path.
+            image_dataset_path = os.path.join(
+                data_dir, "imagenet-latents-images", split_str
+            )
+            if not os.path.exists(image_dataset_path):
+                raise FileNotFoundError(
+                    f"Neither {label_path} nor the paired image dataset "
+                    f"{image_dataset_path} exists"
+                )
+            image_dataset = load_from_disk(image_dataset_path)
+            if "label" not in image_dataset.column_names:
+                raise KeyError(
+                    f"Paired image dataset {image_dataset_path} has no label column"
+                )
+            if len(image_dataset) != len(self.latent_dataset):
+                raise ValueError(
+                    "Image and latent datasets must have the same length to "
+                    "recover labels safely: "
+                    f"images={len(image_dataset)}, latents={len(self.latent_dataset)}"
+                )
+            self.labels = image_dataset["label"]
+
+        if len(self.labels) != len(self.latent_dataset):
+            raise ValueError(
+                "Label and latent counts do not match: "
+                f"labels={len(self.labels)}, latents={len(self.latent_dataset)}"
+            )
 
     def __getitem__(self, idx):
         latent = self.latent_dataset[idx]["data"]
@@ -251,4 +281,3 @@ class EDM2ImgLatentDataset(Dataset):
 
     def __repr__(self):
         return f"EDM2ImgLatentDataset(n={len(self)}, img_root={self._img_root or self._img_zip})"
-
