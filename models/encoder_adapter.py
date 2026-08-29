@@ -971,3 +971,28 @@ class EncoderKVProjection(nn.Module):
                 v_proj = v_proj.detach()
 
         return q_proj, k_proj, v_proj
+
+class LatentKVSource(nn.Module):
+    """Clean VAE latent as scaffold source (DINO-free ablation).
+
+    Patchify z_0 with the same patch size as SiT so token count matches exactly,
+    then expose it in (B, enc_heads, N, enc_head_dim) layout so that the existing
+    EncoderKVProjection can consume it unchanged.
+    """
+    def __init__(self, patch_size=2, in_channels=4, num_layers=1):
+        super().__init__()
+        self.patch_size = patch_size
+        self.in_channels = in_channels
+        self.num_layers = num_layers
+        self.enc_dim = in_channels * patch_size * patch_size   # 4*2*2 = 16
+        self.enc_heads = 1                                     # head_dim = enc_dim
+
+    @torch.no_grad()
+    def forward(self, z0):
+        # z0: (B, C, H, W) clean latent, already scaled by sample_posterior
+        B, C, H, W = z0.shape
+        p = self.patch_size
+        t = z0.reshape(B, C, H // p, p, W // p, p)
+        t = t.permute(0, 2, 4, 1, 3, 5).reshape(B, (H // p) * (W // p), C * p * p)
+        t = t.unsqueeze(1)                                     # (B, 1, N, 16)
+        return [(t, t, t) for _ in range(self.num_layers)]
