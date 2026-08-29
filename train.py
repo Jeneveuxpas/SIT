@@ -1172,7 +1172,7 @@ def parse_args(input_args=None):
                              "(kv, default), the attention residual branch (residual), or a "
                              "literal replacement of the selected block hidden state (hidden)")
     parser.add_argument("--scaffold-feature-source", type=str, default="attn_input",
-                        choices=["attn_input", "attn_output", "repa", "final_feature"],
+                        choices=["attn_input", "attn_output", "repa", "final_feature", "latent"],
                         help="Encoder source used by the scaffold: selected attention "
                              "input/output, REPA's final x_norm_patchtokens for residual/hidden "
                              "controls, or final_feature projected into K/V memory")
@@ -1332,12 +1332,18 @@ def parse_args(input_args=None):
                 "--scaffold-interface kv and --kv-replace-mode kv"
             )
     if args.scaffold_interface == "kv" and args.scaffold_feature_source not in (
-        "attn_input", "final_feature"
+        "attn_input", "final_feature", "latent"
     ):
         parser.error(
             "--scaffold-interface kv supports scaffold-feature-source "
             "attn_input or final_feature"
         )
+
+    if args.scaffold_feature_source == "latent":
+        if args.scaffold_interface != "kv":
+            parser.error("--scaffold-feature-source latent requires --scaffold-interface kv")
+        if args.kv_replace_mode != "kv":
+            parser.error("--scaffold-feature-source latent currently requires --kv-replace-mode kv")
     if (
         args.scaffold_interface in ("residual", "hidden")
         and args.distill_coeff > 0
