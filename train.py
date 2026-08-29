@@ -141,6 +141,15 @@ def final_features_to_kv_memory(
 
     return features.reshape(B, N, num_heads, C // num_heads).transpose(1, 2).detach()
 
+def latent_to_kv_memory(z0: torch.Tensor, patch_size: int = 2) -> torch.Tensor:
+    """Patchify the clean VAE latent into the extractor's head layout."""
+    B, C, H, W = z0.shape
+    p = patch_size
+    if H % p != 0 or W % p != 0:
+        raise ValueError(f"Latent size {(H, W)} is not divisible by patch size {p}")
+    t = z0.reshape(B, C, H // p, p, W // p, p).permute(0, 2, 4, 1, 3, 5)
+    t = t.reshape(B, (H // p) * (W // p), C * p * p)
+    return t.unsqueeze(1).contiguous().detach()
 
 @torch.no_grad()
 def update_ema(ema_model, model, decay=0.9999):
@@ -384,8 +393,9 @@ def main(args):
     latent_size = args.resolution // 8
     in_channels = 4
     # Load encoders only when a raw-image branch is active.
-    # KV distillation and REPA both require encoder features from raw images.
-    needs_raw_images = args.use_kv or args.repa_loss
+    use_latent_kv = args.use_kv and args.scaffold_feature_source == "latent"
+    latent_patch_size = int(args.model.split("/")[-1].split("-")[0])
+    needs_raw_images = (args.use_kv and not use_latent_kv) or args.repa_loss
     if needs_raw_images:
         encoders = load_encoders(
             args.enc_type, device, args.resolution, accelerator=accelerator
@@ -397,7 +407,10 @@ def main(args):
     encoder_kv_extractor = None
     enc_dim = None
     enc_heads = None
-    if args.use_kv and len(encoders) > 0:
+    if use_latent_kv:
+        enc_heads = 1
+        enc_dim = in_channels * latent_patch_size * latent_patch_size   # 4*2*2 = 16
+    elif args.use_kv and len(encoders) > 0:
         encoder_kv_extractor = EncoderKVExtractor(encoders[0].model, enc_layer_indices)
         encoder_kv_extractor.eval()
         # Set target token count for spatial interpolation (SAM2 windowed attention etc.)
@@ -784,7 +797,7 @@ def main(args):
                     and not args.encoder_patch_shuffle
                 )
 
-                if single_encoder_joint_path:
+                if single_encoder_joint_path and not use_latent_kv:
                     if raw_image is None:
                         raise ValueError("Active REPA/KV branch requires raw images, but the dataset returned latents only.")
                     raw_image_enc = encoders[0].preprocess(raw_image)
@@ -832,7 +845,14 @@ def main(args):
                             else:
                                 enc_feat_list = encoder_kv_extractor.get_captured_feat_list()
                 else:
-                    if kv_active:
+                    if kv_active and use_latent_kv:
+                        # x is the clean latent z_0 (post sample_posterior, scaled)
+                        latent_memory = latent_to_kv_memory(x, patch_size=latent_patch_size)
+                        enc_kv_list = [
+                            (None, latent_memory, latent_memory)
+                            for _ in enc_layer_indices
+                        ]
+                    elif kv_active:
                         if raw_image is None:
                              raise ValueError("use_kv requires raw images, but the dataset returned latents only.")
                         raw_image_enc = encoders[0].preprocess(raw_image)
