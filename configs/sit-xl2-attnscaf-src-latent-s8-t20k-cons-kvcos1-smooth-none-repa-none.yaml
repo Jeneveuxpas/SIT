@@ -1,0 +1,109 @@
+# Encoder-free scaffold control. Identical to
+# sit-xl2-attnscaf-dinob12-s8-t30k-cons-kv2-smooth-none-repa-none.yaml except
+# that the scaffold memory is projected from the clean VAE latent x_0 instead
+# of DINOv2 attention keys and values. Isolates whether the gain comes from the
+# pretrained representation or merely from seeing the clean signal at training
+# time.
+#
+#   0--30K:    native SiT queries attend to K/V projected from x_0.
+#   30--100K:  native self-attention with direct K/V internalization
+#              against detached projected latent K/V (lambda=2).
+#
+# No encoder is loaded in this run: needs_raw_images is False, so the dataloader
+# falls back to the latent-only HFLatentDataset.
+
+# ============================================================================
+# Model
+# ============================================================================
+model: SiT-XL/2-EncoderKV
+num-classes: 1000
+encoder-depth: 10
+fused-attn: true
+qk-norm: false
+projection-layer-type: mlp
+proj-kwargs-kernel-size: 3
+
+# ============================================================================
+# Clean-latent K/V scaffold at SiT block 8
+# ============================================================================
+use-kv: true
+scaffold-interface: kv
+scaffold-feature-source: latent
+# enc-type and enc-layer-indices are unused when scaffold-feature-source=latent.
+# enc-layer-indices only has to match sit-layer-indices in length.
+enc-type: dinov2-b
+enc-layer-indices: "12"
+sit-layer-indices: "8"
+
+stage1-steps: 20000
+transition-steps: 0
+transition-schedule: cosine
+transition-blend-mode: output
+
+kv-stop-step: -1
+align-mode: kv_cos
+distill-coeff: 1.0
+distill-warmup-steps: 0
+
+# Disable the default timestep weighting in kv_mse for a matched comparison.
+kv-distill-snr-gamma: 1.0
+kv-distill-min-weight: 1.0
+
+kv-replace-mode: kv
+kv-memory-mode: replace
+# enc_dim is 4*2*2 = 16 here. Kept at linear/none to match the DINOv2 config;
+# the projection is rescaled once at init so K/V start at the native scale.
+kv-proj-type: linear
+kv-proj-kernel-size: 1
+kv-norm-type: none
+kv-zscore-alpha: 1.0
+
+# ============================================================================
+# REPA disabled
+# ============================================================================
+repa-loss: false
+proj-coeff: "0.0"
+projection-loss-type: cosine
+spnorm-method: zscore
+zscore-alpha: 0.6
+
+# ============================================================================
+# Dataset
+# ============================================================================
+data-dir: /dev/shm/data
+resolution: 256
+batch-size: 256
+
+# ============================================================================
+# Training
+# ============================================================================
+epochs: 1400
+max-train-steps: 100000
+checkpointing-steps: 100000
+sampling-steps: 100000
+gradient-accumulation-steps: 1
+learning-rate: 1e-4
+adam-beta1: 0.9
+adam-beta2: 0.999
+adam-weight-decay: 0.0
+adam-epsilon: 1e-8
+max-grad-norm: 1.0
+ema-decay: 0.9999
+ema-update-freq: 1
+
+# ============================================================================
+# Precision
+# ============================================================================
+allow-tf32: true
+mixed-precision: fp16
+compile: true
+
+# ============================================================================
+# Misc
+# ============================================================================
+seed: 0
+num-workers: 12
+cfg-prob: 0.1
+path-type: linear
+prediction: v
+n-samples: 256
