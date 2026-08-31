@@ -149,8 +149,9 @@ class HFLatentDataset(Dataset):
                     "recover labels safely: "
                     f"images={len(image_dataset)}, latents={len(self.latent_dataset)}"
                 )
-            self.labels = image_dataset["label"]
-
+            self.labels = np.asarray(image_dataset["label"], dtype=np.int64)
+        self.latent_dataset = self.latent_dataset.with_format("numpy", columns=["data"])
+        
         if len(self.labels) != len(self.latent_dataset):
             raise ValueError(
                 "Label and latent counts do not match: "

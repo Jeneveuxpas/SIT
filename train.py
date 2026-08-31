@@ -600,13 +600,20 @@ def main(args):
     print(train_dataset)
 
     local_batch_size = int(args.batch_size // accelerator.num_processes)
+    def _worker_init(_):
+        import gc
+        gc.freeze()
+
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=local_batch_size,
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        persistent_workers=True,
+        prefetch_factor=4,
+        worker_init_fn=_worker_init,
     )
     if accelerator.is_main_process:
         logger.info(f"Dataset contains {len(train_dataset):,} images ({args.data_dir})")
@@ -1072,7 +1079,8 @@ def main(args):
     # Cleanup
     if encoder_kv_extractor is not None:
         encoder_kv_extractor.remove_hooks()
-    
+    if vae_kv_extractor is not None:
+        vae_kv_extractor.remove_hooks()
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
     
