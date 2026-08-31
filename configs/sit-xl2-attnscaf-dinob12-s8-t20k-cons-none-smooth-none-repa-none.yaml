@@ -1,0 +1,103 @@
+# Bare AttnScaf at SiT block 8, without REPA, smooth withdrawal, or
+# post-withdrawal alignment.
+#
+# Protocol:
+#   0--20K:    native SiT queries attend to DINOv2 keys and values.
+#   20--100K:  remove DINO completely and use native SiT self-attention.
+#
+# This isolates the effect of Stage-1 K/V replacement alone.
+
+# ============================================================================
+# Model
+# ============================================================================
+model: SiT-XL/2-EncoderKV
+num-classes: 1000
+encoder-depth: 10
+fused-attn: true
+qk-norm: false
+projection-layer-type: mlp
+proj-kwargs-kernel-size: 3
+
+# ============================================================================
+# DINOv2 K/V scaffold at SiT block 8
+# ============================================================================
+use-kv: true
+scaffold-interface: kv
+scaffold-feature-source: attn_input
+enc-type: dinov2-b
+enc-layer-indices: "12"
+sit-layer-indices: "8"
+
+stage1-steps: 20000
+transition-steps: 0
+transition-schedule: cosine
+transition-blend-mode: output
+
+# Stop the encoder branch at withdrawal. No Stage-2 teacher or alignment loss
+# remains after step 20K.
+kv-stop-step: 20000
+kv-stop-fade-steps: 0
+align-mode: kv_mse
+distill-coeff: 0.0
+distill-warmup-steps: 0
+
+# Inactive because distill-coeff is zero; retained for explicit protocol parity.
+kv-distill-snr-gamma: 1.0
+kv-distill-min-weight: 1.0
+
+kv-replace-mode: kv
+kv-memory-mode: replace
+kv-proj-type: linear
+kv-proj-kernel-size: 1
+kv-norm-type: none
+kv-zscore-alpha: 1.0
+
+# ============================================================================
+# REPA disabled
+# ============================================================================
+repa-loss: false
+proj-coeff: "0.0"
+projection-loss-type: cosine
+spnorm-method: none
+zscore-alpha: 0.6
+
+# ============================================================================
+# Dataset
+# ============================================================================
+data-dir: /dev/shm/data
+resolution: 256
+batch-size: 256
+
+# ============================================================================
+# Training
+# ============================================================================
+epochs: 1400
+max-train-steps: 100000
+checkpointing-steps: 400000
+sampling-steps: 100000
+gradient-accumulation-steps: 1
+learning-rate: 1e-4
+adam-beta1: 0.9
+adam-beta2: 0.999
+adam-weight-decay: 0.0
+adam-epsilon: 1e-8
+max-grad-norm: 1.0
+ema-decay: 0.9999
+ema-update-freq: 1
+
+# ============================================================================
+# Precision
+# ============================================================================
+allow-tf32: true
+mixed-precision: fp16
+compile: true
+
+# ============================================================================
+# Misc
+# ============================================================================
+seed: 0
+num-workers: 12
+cfg-prob: 0.1
+path-type: linear
+prediction: v
+n-samples: 256
