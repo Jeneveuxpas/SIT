@@ -394,9 +394,12 @@ def main(args):
     in_channels = 4
     # Load encoders only when a raw-image branch is active.
     use_latent_kv = args.use_kv and args.scaffold_feature_source == "latent"
+    use_vae_kv = args.use_kv and args.scaffold_feature_source == "vae_attn"
     latent_patch_size = int(args.model.split("/")[-1].split("-")[0])
-    needs_raw_images = (args.use_kv and not use_latent_kv) or args.repa_loss
-    if needs_raw_images:
+    # vae_attn needs raw images (VAE encoder forward each step) but no pretrained encoder.
+    needs_enc_models = (args.use_kv and not (use_latent_kv or use_vae_kv)) or args.repa_loss
+    needs_raw_images = needs_enc_models or use_vae_kv
+    if needs_enc_models:
         encoders = load_encoders(
             args.enc_type, device, args.resolution, accelerator=accelerator
         )
@@ -410,6 +413,13 @@ def main(args):
     if use_latent_kv:
         enc_heads = 1
         enc_dim = in_channels * latent_patch_size * latent_patch_size   # 4*2*2 = 16
+    elif use_vae_kv:
+        # sd-vae f8 mid-block attention: 512 ch, single head, 32x32 grid,
+        # space-to-depth by p = (res/8) / sit_grid -> 512*p^2 dims/token.
+        enc_heads = 1
+        _vae_mid_grid = args.resolution // 8
+        _p = _vae_mid_grid // (latent_size // latent_patch_size)
+        enc_dim = 512 * _p * _p
     elif args.use_kv and len(encoders) > 0:
         encoder_kv_extractor = EncoderKVExtractor(encoders[0].model, enc_layer_indices)
         encoder_kv_extractor.eval()
@@ -485,7 +495,14 @@ def main(args):
     vae = VAE_F8D4().to(device).eval()
     vae_state_dict = torch.load("pretrained_models/sdvae-ft-mse-f8d4.pt", map_location=device, weights_only=False)
     vae.load_state_dict(vae_state_dict)
-
+    vae_kv_extractor = None
+    if use_vae_kv:
+        from models.encoder_adapter import VAEEncoderKVExtractor
+        vae_kv_extractor = VAEEncoderKVExtractor(
+            vae.encoder,
+            target_grid=latent_size // latent_patch_size,
+            num_layers=len(sit_layer_indices),
+        )
     latents_stats = torch.load("pretrained_models/sdvae-ft-mse-f8d4-latents-stats.pt", map_location=device, weights_only=False)
     latents_scale = latents_stats['latents_scale'].to(device).view(1, -1, 1, 1)
     latents_bias = latents_stats['latents_bias'].to(device).view(1, -1, 1, 1)
@@ -846,12 +863,17 @@ def main(args):
                                 enc_feat_list = encoder_kv_extractor.get_captured_feat_list()
                 else:
                     if kv_active and use_latent_kv:
-                        # x is the clean latent z_0 (post sample_posterior, scaled)
                         latent_memory = latent_to_kv_memory(x, patch_size=latent_patch_size)
                         enc_kv_list = [
                             (None, latent_memory, latent_memory)
                             for _ in enc_layer_indices
                         ]
+                    elif kv_active and use_vae_kv:
+                        if raw_image is None:
+                            raise ValueError("scaffold-feature-source vae_attn requires raw images.")
+                        vae_input = raw_image.to(device, dtype=torch.float32) / 127.5 - 1.0
+                        with accelerator.autocast():
+                            enc_kv_list = vae_kv_extractor(vae_input)
                     elif kv_active:
                         if raw_image is None:
                              raise ValueError("use_kv requires raw images, but the dataset returned latents only.")
@@ -1172,7 +1194,7 @@ def parse_args(input_args=None):
                              "(kv, default), the attention residual branch (residual), or a "
                              "literal replacement of the selected block hidden state (hidden)")
     parser.add_argument("--scaffold-feature-source", type=str, default="attn_input",
-                        choices=["attn_input", "attn_output", "repa", "final_feature", "latent"],
+                        choices=["attn_input", "attn_output", "repa", "final_feature", "latent","vae_attn"],
                         help="Encoder source used by the scaffold: selected attention "
                              "input/output, REPA's final x_norm_patchtokens for residual/hidden "
                              "controls, or final_feature projected into K/V memory")
@@ -1332,7 +1354,7 @@ def parse_args(input_args=None):
                 "--scaffold-interface kv and --kv-replace-mode kv"
             )
     if args.scaffold_interface == "kv" and args.scaffold_feature_source not in (
-        "attn_input", "final_feature", "latent"
+        "attn_input", "final_feature", "latent", "vae_attn"
     ):
         parser.error(
             "--scaffold-interface kv supports scaffold-feature-source "

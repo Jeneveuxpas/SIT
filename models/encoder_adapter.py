@@ -996,3 +996,58 @@ class LatentKVSource(nn.Module):
         t = t.permute(0, 2, 4, 1, 3, 5).reshape(B, (H // p) * (W // p), C * p * p)
         t = t.unsqueeze(1)                                     # (B, 1, N, 16)
         return [(t, t, t) for _ in range(self.num_layers)]
+
+
+
+
+class VAEEncoderKVExtractor:
+    """Capture Q/K/V from the VAE encoder's mid-block attention (AttnBlock).
+
+    space-to-depth (patchify) by default: lossless, same operator as
+    LatentKVSource, so the two ablations differ only in token content.
+    """
+
+    def __init__(self, vae_encoder, target_grid: int = 16, num_layers: int = 1,
+                 token_mode: str = "patchify"):
+        assert token_mode in ("patchify", "pool")
+        self.encoder = vae_encoder
+        self.attn = vae_encoder.mid.attn_1
+        self.target_grid = target_grid
+        self.num_layers = num_layers
+        self.token_mode = token_mode
+        self._buf = {}
+        self.hooks = [
+            self.attn.q.register_forward_hook(self._make_hook("q")),
+            self.attn.k.register_forward_hook(self._make_hook("k")),
+            self.attn.v.register_forward_hook(self._make_hook("v")),
+        ]
+
+    def _make_hook(self, name):
+        def hook(module, inputs, output):
+            self._buf[name] = output
+        return hook
+
+    def _to_tokens(self, t):
+        B, C, H, W = t.shape
+        if H == self.target_grid and W == self.target_grid:
+            return t.flatten(2).transpose(1, 2).unsqueeze(1).contiguous()
+        if self.token_mode == "pool":
+            t = torch.nn.functional.adaptive_avg_pool2d(t.float(), self.target_grid).to(t.dtype)
+            return t.flatten(2).transpose(1, 2).unsqueeze(1).contiguous()
+        p = H // self.target_grid
+        t = t.reshape(B, C, H // p, p, W // p, p).permute(0, 2, 4, 1, 3, 5)
+        t = t.reshape(B, (H // p) * (W // p), C * p * p)
+        return t.unsqueeze(1).contiguous()
+
+    @torch.no_grad()
+    def __call__(self, images):
+        self._buf.clear()
+        self.encoder(images)
+        q = self._to_tokens(self._buf["q"]).detach()
+        k = self._to_tokens(self._buf["k"]).detach()
+        v = self._to_tokens(self._buf["v"]).detach()
+        return [(q, k, v) for _ in range(self.num_layers)]
+
+    def remove_hooks(self):
+        for h in self.hooks:
+            h.remove()
