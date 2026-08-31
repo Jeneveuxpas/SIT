@@ -123,8 +123,7 @@ class HFLatentDataset(Dataset):
 
         label_path = os.path.join(data_dir, f"imagenet_{split}_labels.txt")
         if os.path.exists(label_path):
-            with open(label_path, "r") as f:
-                self.labels = [int(line.strip()) for line in f]
+            self.labels = np.loadtxt(label_path, dtype=np.int64)
         else:
             # The paired HuggingFace image dataset already stores labels in
             # exactly the order used to construct the latent dataset.  Reading
@@ -160,8 +159,7 @@ class HFLatentDataset(Dataset):
 
     def __getitem__(self, idx):
         latent = self.latent_dataset[idx]["data"]
-        label = self.labels[idx]
-        return torch.tensor(latent), torch.tensor(label)
+        return torch.from_numpy(np.array(latent)), int(self.labels[idx])
 
     def __len__(self):
         return len(self.latent_dataset)
