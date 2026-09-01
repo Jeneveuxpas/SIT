@@ -32,6 +32,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from models.encoder_adapter import EncoderKVExtractor
+from models.autoencoder import VAE_F8D4
 from models.sit_encoder import SiT_EncoderKV_models
 from samplers import euler_maruyama_sampler, euler_sampler
 from vision_encoder import load_encoders
@@ -147,6 +148,49 @@ def load_local_vae(device: torch.device, vae_name: str):
     return load_vae(device=device, vae_name=vae_name)
 
 
+def load_latent_oracle_vae(device: torch.device):
+    """Load the *training* MSE VAE encoder and latent statistics for x_0.
+
+    This intentionally does not use ``--vae``: that option chooses the decoder
+    used to score generated images, while latent-source training always uses
+    the local sd-vae-ft-mse encoder and its corresponding latent statistics.
+    """
+    checkpoint_path = REPO_ROOT / "pretrained_models" / "sdvae-ft-mse-f8d4.pt"
+    stats_path = REPO_ROOT / "pretrained_models" / "sdvae-ft-mse-f8d4-latents-stats.pt"
+    vae = VAE_F8D4().to(device).eval()
+    state_dict = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    vae.load_state_dict(state_dict)
+    vae.requires_grad_(False)
+    stats = torch.load(stats_path, map_location=device, weights_only=False)
+    scale = stats["latents_scale"].to(device).view(1, -1, 1, 1)
+    bias = stats["latents_bias"].to(device).view(1, -1, 1, 1)
+    return vae, scale, bias
+
+
+@torch.inference_mode()
+def raw_images_to_latent_kv(
+    raw_images: torch.Tensor,
+    vae: torch.nn.Module,
+    scale: torch.Tensor,
+    bias: torch.Tensor,
+    patch_size: int = 2,
+) -> torch.Tensor:
+    """Match train.py's sampled, normalized clean-latent K/V source."""
+    moments = vae.encode(raw_images.float() / 127.5 - 1.0).parameters
+    mean, std = torch.chunk(moments, 2, dim=1)
+    x0 = (mean + std * torch.randn_like(mean) - bias) * scale
+    batch, channels, height, width = x0.shape
+    if height % patch_size or width % patch_size:
+        raise ValueError(f"Latent grid {(height, width)} is not divisible by {patch_size}")
+    tokens = x0.reshape(
+        batch, channels, height // patch_size, patch_size, width // patch_size, patch_size
+    )
+    tokens = tokens.permute(0, 2, 4, 1, 3, 5).reshape(
+        batch, (height // patch_size) * (width // patch_size), channels * patch_size * patch_size
+    )
+    return tokens.unsqueeze(1).contiguous()
+
+
 def load_oracle_model(
     checkpoint_path: str,
     device: torch.device,
@@ -182,20 +226,23 @@ def load_oracle_model(
             "Residual oracle inference supports repa, attn_input, or attn_output "
             f"feature sources, got {feature_source!r}"
         )
-    if interface == "kv" and feature_source not in ("attn_input", "final_feature"):
+    if interface == "kv" and feature_source not in ("attn_input", "final_feature", "latent"):
         raise ValueError(
-            "K/V oracle inference supports attn_input or final_feature sources, "
+            "K/V oracle inference supports attn_input, final_feature, or latent sources, "
             f"got {feature_source!r}"
         )
 
     resolution = int(get_arg(saved_args, "resolution", 256))
     latent_size = resolution // 8
     enc_type = get_arg(saved_args, "enc_type", "dinov2-b")
-
-    print(f"Loading visual encoder: {enc_type}")
-    encoder = load_encoders(enc_type, device, resolution)[0]
-    encoder.eval()
-    encoder_dim = int(encoder.embed_dim)
+    uses_latent_source = interface == "kv" and feature_source == "latent"
+    encoder = None
+    encoder_dim = 0
+    if not uses_latent_source:
+        print(f"Loading visual encoder: {enc_type}")
+        encoder = load_encoders(enc_type, device, resolution)[0]
+        encoder.eval()
+        encoder_dim = int(encoder.embed_dim)
 
     enc_layer_indices = parse_1based_indices(
         get_arg(saved_args, "enc_layer_indices", "12")
@@ -207,7 +254,7 @@ def load_oracle_model(
         raise ValueError("Encoder and SiT layer-index lists have different lengths")
 
     extractor = None
-    needs_extractor = interface == "kv" or (
+    needs_extractor = (interface == "kv" and not uses_latent_source) or (
         interface == "residual" and feature_source in ("attn_input", "attn_output")
     )
     if needs_extractor:
@@ -220,6 +267,9 @@ def load_oracle_model(
         detected_heads = extractor.get_layer_heads(enc_layer_indices[0])
         encoder_kv_dim = detected_dim or encoder_dim
         encoder_heads = detected_heads or max(1, encoder_kv_dim // 64)
+    elif uses_latent_source:
+        encoder_kv_dim = 4 * 2 * 2
+        encoder_heads = 1
     else:
         encoder_kv_dim = encoder_dim
         encoder_heads = 12
@@ -273,6 +323,7 @@ def load_oracle_model(
         "enc_type": enc_type,
         "interface": interface,
         "feature_source": feature_source,
+        "uses_latent_source": uses_latent_source,
         "kv_memory_mode": get_arg(saved_args, "kv_memory_mode", "replace"),
         "enc_layers": [index + 1 for index in enc_layer_indices],
         "sit_layers": [index + 1 for index in sit_layer_indices],

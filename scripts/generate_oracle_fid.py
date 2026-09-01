@@ -26,8 +26,10 @@ from scripts.sample_hidden_replacement_oracle import (
     decode_latents,
     final_features_to_kv_memory,
     load_local_vae,
+    load_latent_oracle_vae,
     load_oracle_model,
     make_seeded_latents,
+    raw_images_to_latent_kv,
     select_oracle_feature,
 )
 
@@ -211,6 +213,9 @@ def main(args):
     barrier()
     expected_tokens = (metadata["latent_size"] // 2) ** 2
     vae, scale, bias = load_local_vae(device, args.vae)
+    source_vae = source_scale = source_bias = None
+    if metadata["uses_latent_source"]:
+        source_vae, source_scale, source_bias = load_latent_oracle_vae(device)
 
     rank_indices = list(range(rank, count, world_size))
     total_batches = math.ceil(len(rank_indices) / args.batch_size)
@@ -235,14 +240,29 @@ def main(args):
             device=device,
         )
 
-        encoded_input = encoder.preprocess(raw_images)
-        if extractor is not None:
-            extractor.reset_cache()
-            extractor._batch_size = encoded_input.shape[0]
-        encoder_outputs = encoder.forward_features(encoded_input)
-        clean_feature = encoder_outputs["x_norm_patchtokens"]
+        clean_feature = None
+        if metadata["uses_latent_source"]:
+            # Use a deterministic posterior draw per batch, then reset the SDE
+            # seed below as before.  This matches train.py's sampled x_0 source.
+            torch.manual_seed(args.global_seed + batch_indices[0])
+            memory = raw_images_to_latent_kv(
+                raw_images, source_vae, source_scale, source_bias
+            ).to(device=device, dtype=dtype)
+            if memory.shape[2] != expected_tokens:
+                raise ValueError(
+                    f"Latent K/V has {memory.shape[2]} tokens; expected {expected_tokens}"
+                )
+            encoder_kv = [(None, memory, memory) for _ in metadata["enc_layers"]]
+            oracle_model = FixedKVScaffold(model, encoder_kv).eval()
+        else:
+            encoded_input = encoder.preprocess(raw_images)
+            if extractor is not None:
+                extractor.reset_cache()
+                extractor._batch_size = encoded_input.shape[0]
+            encoder_outputs = encoder.forward_features(encoded_input)
+            clean_feature = encoder_outputs["x_norm_patchtokens"]
 
-        if metadata["interface"] in ("hidden", "residual"):
+        if not metadata["uses_latent_source"] and metadata["interface"] in ("hidden", "residual"):
             feature = select_oracle_feature(
                 clean_feature,
                 extractor,
@@ -253,7 +273,7 @@ def main(args):
                     f"Encoder returned {feature.shape[1]} tokens; expected {expected_tokens}"
                 )
             oracle_model = FixedHiddenScaffold(model, feature).eval()
-        else:
+        elif not metadata["uses_latent_source"]:
             if metadata["feature_source"] == "final_feature":
                 memory = final_features_to_kv_memory(
                     clean_feature,
