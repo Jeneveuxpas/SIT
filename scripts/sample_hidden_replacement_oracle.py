@@ -176,9 +176,15 @@ def raw_images_to_latent_kv(
     patch_size: int = 2,
 ) -> torch.Tensor:
     """Match train.py's sampled, normalized clean-latent K/V source."""
-    moments = vae.encode(raw_images.float() / 127.5 - 1.0).parameters
-    mean, std = torch.chunk(moments, 2, dim=1)
-    x0 = (mean + std * torch.randn_like(mean) - bias) * scale
+    posterior = vae.encode(raw_images.float() / 127.5 - 1.0)
+    # ``posterior.parameters`` is (mean, logvar).  The precomputed dataset
+    # consumed by train.py stores (mean, std), so using the raw second half
+    # here incorrectly treated logvar as a standard deviation.
+    x0 = (
+        posterior.mean
+        + posterior.std * torch.randn_like(posterior.mean)
+        - bias
+    ) * scale
     batch, channels, height, width = x0.shape
     if height % patch_size or width % patch_size:
         raise ValueError(f"Latent grid {(height, width)} is not divisible by {patch_size}")
