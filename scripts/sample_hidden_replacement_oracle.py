@@ -31,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from models.encoder_adapter import EncoderKVExtractor
+from models.encoder_adapter import EncoderKVExtractor, VAEEncoderKVExtractor
 from models.autoencoder import VAE_F8D4
 from models.sit_encoder import SiT_EncoderKV_models
 from samplers import euler_maruyama_sampler, euler_sampler
@@ -232,9 +232,12 @@ def load_oracle_model(
             "Residual oracle inference supports repa, attn_input, or attn_output "
             f"feature sources, got {feature_source!r}"
         )
-    if interface == "kv" and feature_source not in ("attn_input", "final_feature", "latent"):
+    if interface == "kv" and feature_source not in (
+        "attn_input", "final_feature", "latent", "vae_attn"
+    ):
         raise ValueError(
-            "K/V oracle inference supports attn_input, final_feature, or latent sources, "
+            "K/V oracle inference supports attn_input, final_feature, latent, or "
+            "vae_attn sources, "
             f"got {feature_source!r}"
         )
 
@@ -242,9 +245,10 @@ def load_oracle_model(
     latent_size = resolution // 8
     enc_type = get_arg(saved_args, "enc_type", "dinov2-b")
     uses_latent_source = interface == "kv" and feature_source == "latent"
+    uses_vae_attn_source = interface == "kv" and feature_source == "vae_attn"
     encoder = None
     encoder_dim = 0
-    if not uses_latent_source:
+    if not (uses_latent_source or uses_vae_attn_source):
         print(f"Loading visual encoder: {enc_type}")
         encoder = load_encoders(enc_type, device, resolution)[0]
         encoder.eval()
@@ -260,7 +264,9 @@ def load_oracle_model(
         raise ValueError("Encoder and SiT layer-index lists have different lengths")
 
     extractor = None
-    needs_extractor = (interface == "kv" and not uses_latent_source) or (
+    needs_extractor = (
+        interface == "kv" and not (uses_latent_source or uses_vae_attn_source)
+    ) or (
         interface == "residual" and feature_source in ("attn_input", "attn_output")
     )
     if needs_extractor:
@@ -275,6 +281,15 @@ def load_oracle_model(
         encoder_heads = detected_heads or max(1, encoder_kv_dim // 64)
     elif uses_latent_source:
         encoder_kv_dim = 4 * 2 * 2
+        encoder_heads = 1
+    elif uses_vae_attn_source:
+        vae_grid = resolution // 8
+        sit_grid = latent_size // 2
+        if vae_grid % sit_grid:
+            raise ValueError(
+                f"VAE grid {vae_grid} is not divisible by SiT grid {sit_grid}"
+            )
+        encoder_kv_dim = 512 * (vae_grid // sit_grid) ** 2
         encoder_heads = 1
     else:
         encoder_kv_dim = encoder_dim
@@ -330,6 +345,7 @@ def load_oracle_model(
         "interface": interface,
         "feature_source": feature_source,
         "uses_latent_source": uses_latent_source,
+        "uses_vae_attn_source": uses_vae_attn_source,
         "kv_memory_mode": get_arg(saved_args, "kv_memory_mode", "replace"),
         "enc_layers": [index + 1 for index in enc_layer_indices],
         "sit_layers": [index + 1 for index in sit_layer_indices],

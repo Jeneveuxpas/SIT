@@ -32,6 +32,7 @@ from scripts.sample_hidden_replacement_oracle import (
     raw_images_to_latent_kv,
     select_oracle_feature,
 )
+from models.encoder_adapter import VAEEncoderKVExtractor
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -216,6 +217,14 @@ def main(args):
     source_vae = source_scale = source_bias = None
     if metadata["uses_latent_source"]:
         source_vae, source_scale, source_bias = load_latent_oracle_vae(device)
+    vae_kv_extractor = None
+    if metadata["uses_vae_attn_source"]:
+        source_vae, _, _ = load_latent_oracle_vae(device)
+        vae_kv_extractor = VAEEncoderKVExtractor(
+            source_vae.encoder,
+            target_grid=metadata["latent_size"] // 2,
+            num_layers=len(metadata["enc_layers"]),
+        )
 
     rank_indices = list(range(rank, count, world_size))
     total_batches = math.ceil(len(rank_indices) / args.batch_size)
@@ -254,6 +263,20 @@ def main(args):
                 )
             encoder_kv = [(None, memory, memory) for _ in metadata["enc_layers"]]
             oracle_model = FixedKVScaffold(model, encoder_kv).eval()
+        elif metadata["uses_vae_attn_source"]:
+            vae_input = raw_images / 127.5 - 1.0
+            encoder_kv = vae_kv_extractor(vae_input)
+            encoder_kv = [
+                tuple(component.to(device=device, dtype=dtype) for component in layer_kv)
+                for layer_kv in encoder_kv
+            ]
+            for _, keys, values in encoder_kv:
+                if keys.shape[2] != expected_tokens or values.shape[2] != expected_tokens:
+                    raise ValueError(
+                        f"VAE K/V token count does not match SiT: "
+                        f"K={keys.shape[2]}, V={values.shape[2]}, expected={expected_tokens}"
+                    )
+            oracle_model = FixedKVScaffold(model, encoder_kv).eval()
         else:
             encoded_input = encoder.preprocess(raw_images)
             if extractor is not None:
@@ -262,7 +285,10 @@ def main(args):
             encoder_outputs = encoder.forward_features(encoded_input)
             clean_feature = encoder_outputs["x_norm_patchtokens"]
 
-        if not metadata["uses_latent_source"] and metadata["interface"] in ("hidden", "residual"):
+        uses_direct_vae_source = (
+            metadata["uses_latent_source"] or metadata["uses_vae_attn_source"]
+        )
+        if not uses_direct_vae_source and metadata["interface"] in ("hidden", "residual"):
             feature = select_oracle_feature(
                 clean_feature,
                 extractor,
@@ -273,7 +299,7 @@ def main(args):
                     f"Encoder returned {feature.shape[1]} tokens; expected {expected_tokens}"
                 )
             oracle_model = FixedHiddenScaffold(model, feature).eval()
-        elif not metadata["uses_latent_source"]:
+        elif not uses_direct_vae_source:
             if metadata["feature_source"] == "final_feature":
                 memory = final_features_to_kv_memory(
                     clean_feature,
@@ -325,6 +351,8 @@ def main(args):
 
     if extractor is not None:
         extractor.remove_hooks()
+    if vae_kv_extractor is not None:
+        vae_kv_extractor.remove_hooks()
     barrier()
     if rank == 0:
         create_npz(image_dir, Path(args.output_npz), count)
