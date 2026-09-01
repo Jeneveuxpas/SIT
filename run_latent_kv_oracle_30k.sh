@@ -5,7 +5,8 @@ set -euo pipefail
 
 EXP_NAME="sit-xl2-attnscaf-src-latent-s8-t30k-oracle"
 
-bash ./run_oracle_experiment.sh \
+# Force the train+evaluate path even if a shell/session exported EVAL_ONLY.
+EVAL_ONLY=false bash ./run_oracle_experiment.sh \
   --config "configs/${EXP_NAME}.yaml" \
   --exp-name "$EXP_NAME" \
   --step 0030000 \
