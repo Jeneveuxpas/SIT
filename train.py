@@ -395,10 +395,15 @@ def main(args):
     # Load encoders only when a raw-image branch is active.
     use_latent_kv = args.use_kv and args.scaffold_feature_source == "latent"
     use_vae_kv = args.use_kv and args.scaffold_feature_source == "vae_attn"
+    use_vae_mid_feature = (
+        args.use_kv and args.scaffold_feature_source == "vae_mid_block2"
+    )
     latent_patch_size = int(args.model.split("/")[-1].split("-")[0])
     # vae_attn needs raw images (VAE encoder forward each step) but no pretrained encoder.
-    needs_enc_models = (args.use_kv and not (use_latent_kv or use_vae_kv)) or args.repa_loss
-    needs_raw_images = needs_enc_models or use_vae_kv
+    needs_enc_models = (
+        args.use_kv and not (use_latent_kv or use_vae_kv or use_vae_mid_feature)
+    ) or args.repa_loss
+    needs_raw_images = needs_enc_models or use_vae_kv or use_vae_mid_feature
     if needs_enc_models:
         encoders = load_encoders(
             args.enc_type, device, args.resolution, accelerator=accelerator
@@ -420,6 +425,11 @@ def main(args):
         _vae_mid_grid = args.resolution // 8
         _p = _vae_mid_grid // (latent_size // latent_patch_size)
         enc_dim = 512 * _p * _p
+    elif use_vae_mid_feature:
+        # Contextual VAE mid.block_2 feature before posterior compression.
+        # The stride-2 convolutional K/V projector maps its 32x32 grid to 16x16.
+        enc_heads = 1
+        enc_dim = 512
     elif args.use_kv and len(encoders) > 0:
         encoder_kv_extractor = EncoderKVExtractor(encoders[0].model, enc_layer_indices)
         encoder_kv_extractor.eval()
@@ -472,6 +482,7 @@ def main(args):
         kv_proj_type=args.kv_proj_type,
         kv_proj_hidden_dim=args.kv_proj_hidden_dim,
         kv_proj_kernel_size=args.kv_proj_kernel_size,
+        kv_proj_stride=args.kv_proj_stride,
         kv_norm_type=args.kv_norm_type,
         kv_zscore_alpha=args.kv_zscore_alpha,
         kv_replace_mode=args.kv_replace_mode,
@@ -496,11 +507,18 @@ def main(args):
     vae_state_dict = torch.load("pretrained_models/sdvae-ft-mse-f8d4.pt", map_location=device, weights_only=False)
     vae.load_state_dict(vae_state_dict)
     vae_kv_extractor = None
+    vae_mid_feature_extractor = None
     if use_vae_kv:
         from models.encoder_adapter import VAEEncoderKVExtractor
         vae_kv_extractor = VAEEncoderKVExtractor(
             vae.encoder,
             target_grid=latent_size // latent_patch_size,
+            num_layers=len(sit_layer_indices),
+        )
+    if use_vae_mid_feature:
+        from models.encoder_adapter import VAEEncoderMidBlock2Extractor
+        vae_mid_feature_extractor = VAEEncoderMidBlock2Extractor(
+            vae.encoder,
             num_layers=len(sit_layer_indices),
         )
     latents_stats = torch.load("pretrained_models/sdvae-ft-mse-f8d4-latents-stats.pt", map_location=device, weights_only=False)
@@ -881,6 +899,14 @@ def main(args):
                         vae_input = raw_image.to(device, dtype=torch.float32) / 127.5 - 1.0
                         with accelerator.autocast():
                             enc_kv_list = vae_kv_extractor(vae_input)
+                    elif kv_active and use_vae_mid_feature:
+                        if raw_image is None:
+                            raise ValueError(
+                                "scaffold-feature-source vae_mid_block2 requires raw images."
+                            )
+                        vae_input = raw_image.to(device, dtype=torch.float32) / 127.5 - 1.0
+                        with accelerator.autocast():
+                            enc_kv_list = vae_mid_feature_extractor(vae_input)
                     elif kv_active:
                         if raw_image is None:
                              raise ValueError("use_kv requires raw images, but the dataset returned latents only.")
@@ -1081,6 +1107,8 @@ def main(args):
         encoder_kv_extractor.remove_hooks()
     if vae_kv_extractor is not None:
         vae_kv_extractor.remove_hooks()
+    if vae_mid_feature_extractor is not None:
+        vae_mid_feature_extractor.remove_hooks()
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
     
@@ -1178,6 +1206,8 @@ def parse_args(input_args=None):
                         help="Hidden dimension for MLP projection (default: max(enc_dim, sit_dim))")
     parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
                         help="Kernel size for conv projection (default: 1)")
+    parser.add_argument("--kv-proj-stride", type=int, default=1,
+                        help="Stride for conv K/V projection (default: 1)")
     parser.add_argument("--kv-norm-type", type=str, default="none",
                         choices=["none", "layernorm", "rmsnorm", "zscore", "zscore_token", "batchnorm", "k_rms_v_layer"],
                         help="Normalization type for K/V: zscore=per-spatial, zscore_token=per-token, k_rms_v_layer=K RMSNorm + V LayerNorm")
@@ -1202,7 +1232,7 @@ def parse_args(input_args=None):
                              "(kv, default), the attention residual branch (residual), or a "
                              "literal replacement of the selected block hidden state (hidden)")
     parser.add_argument("--scaffold-feature-source", type=str, default="attn_input",
-                        choices=["attn_input", "attn_output", "repa", "final_feature", "latent","vae_attn"],
+                        choices=["attn_input", "attn_output", "repa", "final_feature", "latent", "vae_attn", "vae_mid_block2"],
                         help="Encoder source used by the scaffold: selected attention "
                              "input/output, REPA's final x_norm_patchtokens for residual/hidden "
                              "controls, or final_feature projected into K/V memory")
@@ -1329,6 +1359,10 @@ def parse_args(input_args=None):
         parser.error("--kv-distill-min-weight must be in [0, 1]")
     if args.kv_stop_fade_steps < 0:
         parser.error("--kv-stop-fade-steps must be >= 0")
+    if args.kv_proj_stride < 1:
+        parser.error("--kv-proj-stride must be >= 1")
+    if args.kv_proj_stride != 1 and args.kv_proj_type != "conv":
+        parser.error("--kv-proj-stride other than 1 requires --kv-proj-type conv")
     if args.repa_stop_fade_steps < 0:
         parser.error("--repa-stop-fade-steps must be >= 0")
     if args.transition_steps < 0:
@@ -1362,7 +1396,7 @@ def parse_args(input_args=None):
                 "--scaffold-interface kv and --kv-replace-mode kv"
             )
     if args.scaffold_interface == "kv" and args.scaffold_feature_source not in (
-        "attn_input", "final_feature", "latent", "vae_attn"
+        "attn_input", "final_feature", "latent", "vae_attn", "vae_mid_block2"
     ):
         parser.error(
             "--scaffold-interface kv supports scaffold-feature-source "
@@ -1374,6 +1408,17 @@ def parse_args(input_args=None):
             parser.error("--scaffold-feature-source latent requires --scaffold-interface kv")
         if args.kv_replace_mode != "kv":
             parser.error("--scaffold-feature-source latent currently requires --kv-replace-mode kv")
+    if args.scaffold_feature_source == "vae_mid_block2":
+        if args.scaffold_interface != "kv" or args.kv_replace_mode != "kv":
+            parser.error(
+                "--scaffold-feature-source vae_mid_block2 requires "
+                "--scaffold-interface kv and --kv-replace-mode kv"
+            )
+        if args.kv_proj_type != "conv" or args.kv_proj_stride != 2:
+            parser.error(
+                "--scaffold-feature-source vae_mid_block2 requires "
+                "--kv-proj-type conv and --kv-proj-stride 2"
+            )
     if (
         args.scaffold_interface in ("residual", "hidden")
         and args.distill_coeff > 0

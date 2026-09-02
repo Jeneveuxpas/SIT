@@ -233,11 +233,11 @@ def load_oracle_model(
             f"feature sources, got {feature_source!r}"
         )
     if interface == "kv" and feature_source not in (
-        "attn_input", "final_feature", "latent", "vae_attn"
+        "attn_input", "final_feature", "latent", "vae_attn", "vae_mid_block2"
     ):
         raise ValueError(
             "K/V oracle inference supports attn_input, final_feature, latent, or "
-            "vae_attn sources, "
+            "vae_attn, or vae_mid_block2 sources, "
             f"got {feature_source!r}"
         )
 
@@ -246,9 +246,12 @@ def load_oracle_model(
     enc_type = get_arg(saved_args, "enc_type", "dinov2-b")
     uses_latent_source = interface == "kv" and feature_source == "latent"
     uses_vae_attn_source = interface == "kv" and feature_source == "vae_attn"
+    uses_vae_mid_feature_source = (
+        interface == "kv" and feature_source == "vae_mid_block2"
+    )
     encoder = None
     encoder_dim = 0
-    if not (uses_latent_source or uses_vae_attn_source):
+    if not (uses_latent_source or uses_vae_attn_source or uses_vae_mid_feature_source):
         print(f"Loading visual encoder: {enc_type}")
         encoder = load_encoders(enc_type, device, resolution)[0]
         encoder.eval()
@@ -265,7 +268,9 @@ def load_oracle_model(
 
     extractor = None
     needs_extractor = (
-        interface == "kv" and not (uses_latent_source or uses_vae_attn_source)
+        interface == "kv" and not (
+            uses_latent_source or uses_vae_attn_source or uses_vae_mid_feature_source
+        )
     ) or (
         interface == "residual" and feature_source in ("attn_input", "attn_output")
     )
@@ -291,6 +296,9 @@ def load_oracle_model(
             )
         encoder_kv_dim = 512 * (vae_grid // sit_grid) ** 2
         encoder_heads = 1
+    elif uses_vae_mid_feature_source:
+        encoder_kv_dim = 512
+        encoder_heads = 1
     else:
         encoder_kv_dim = encoder_dim
         encoder_heads = 12
@@ -315,6 +323,7 @@ def load_oracle_model(
         kv_proj_type=get_arg(saved_args, "kv_proj_type", "linear"),
         kv_proj_hidden_dim=get_arg(saved_args, "kv_proj_hidden_dim", None),
         kv_proj_kernel_size=int(get_arg(saved_args, "kv_proj_kernel_size", 1)),
+        kv_proj_stride=int(get_arg(saved_args, "kv_proj_stride", 1)),
         kv_norm_type=get_arg(saved_args, "kv_norm_type", "none"),
         kv_zscore_alpha=float(get_arg(saved_args, "kv_zscore_alpha", 1.0)),
         kv_replace_mode=get_arg(saved_args, "kv_replace_mode", "kv"),
@@ -346,6 +355,7 @@ def load_oracle_model(
         "feature_source": feature_source,
         "uses_latent_source": uses_latent_source,
         "uses_vae_attn_source": uses_vae_attn_source,
+        "uses_vae_mid_feature_source": uses_vae_mid_feature_source,
         "kv_memory_mode": get_arg(saved_args, "kv_memory_mode", "replace"),
         "enc_layers": [index + 1 for index in enc_layer_indices],
         "sit_layers": [index + 1 for index in sit_layer_indices],

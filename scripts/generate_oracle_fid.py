@@ -32,7 +32,7 @@ from scripts.sample_hidden_replacement_oracle import (
     raw_images_to_latent_kv,
     select_oracle_feature,
 )
-from models.encoder_adapter import VAEEncoderKVExtractor
+from models.encoder_adapter import VAEEncoderKVExtractor, VAEEncoderMidBlock2Extractor
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -225,6 +225,13 @@ def main(args):
             target_grid=metadata["latent_size"] // 2,
             num_layers=len(metadata["enc_layers"]),
         )
+    vae_mid_feature_extractor = None
+    if metadata["uses_vae_mid_feature_source"]:
+        source_vae, _, _ = load_latent_oracle_vae(device)
+        vae_mid_feature_extractor = VAEEncoderMidBlock2Extractor(
+            source_vae.encoder,
+            num_layers=len(metadata["enc_layers"]),
+        )
 
     rank_indices = list(range(rank, count, world_size))
     total_batches = math.ceil(len(rank_indices) / args.batch_size)
@@ -277,6 +284,17 @@ def main(args):
                         f"K={keys.shape[2]}, V={values.shape[2]}, expected={expected_tokens}"
                     )
             oracle_model = FixedKVScaffold(model, encoder_kv).eval()
+        elif metadata["uses_vae_mid_feature_source"]:
+            vae_input = raw_images / 127.5 - 1.0
+            encoder_kv = vae_mid_feature_extractor(vae_input)
+            encoder_kv = [
+                tuple(
+                    None if component is None else component.to(device=device, dtype=dtype)
+                    for component in layer_kv
+                )
+                for layer_kv in encoder_kv
+            ]
+            oracle_model = FixedKVScaffold(model, encoder_kv).eval()
         else:
             encoded_input = encoder.preprocess(raw_images)
             if extractor is not None:
@@ -286,7 +304,9 @@ def main(args):
             clean_feature = encoder_outputs["x_norm_patchtokens"]
 
         uses_direct_vae_source = (
-            metadata["uses_latent_source"] or metadata["uses_vae_attn_source"]
+            metadata["uses_latent_source"]
+            or metadata["uses_vae_attn_source"]
+            or metadata["uses_vae_mid_feature_source"]
         )
         if not uses_direct_vae_source and metadata["interface"] in ("hidden", "residual"):
             feature = select_oracle_feature(
@@ -353,6 +373,8 @@ def main(args):
         extractor.remove_hooks()
     if vae_kv_extractor is not None:
         vae_kv_extractor.remove_hooks()
+    if vae_mid_feature_extractor is not None:
+        vae_mid_feature_extractor.remove_hooks()
     barrier()
     if rank == 0:
         create_npz(image_dir, Path(args.output_npz), count)

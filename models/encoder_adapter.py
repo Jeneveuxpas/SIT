@@ -753,6 +753,7 @@ class EncoderKVProjection(nn.Module):
         kv_proj_type: str = "linear",
         kv_proj_hidden_dim: int = None,
         kv_proj_kernel_size: int = 3,
+        kv_proj_stride: int = 1,
         kv_norm_type: str = "layernorm",
         kv_zscore_alpha: float = 1.0,
         kv_replace_mode: str = "kv",
@@ -770,6 +771,7 @@ class EncoderKVProjection(nn.Module):
         self.enc_head_dim = enc_dim // enc_heads
         self.sit_head_dim = sit_dim // sit_heads
         self.kv_proj_type = kv_proj_type
+        self.kv_proj_stride = kv_proj_stride
         self.kv_norm_type = kv_norm_type
         self.kv_replace_mode = kv_replace_mode
         self.kv_use_adaln = kv_use_adaln
@@ -816,13 +818,13 @@ class EncoderKVProjection(nn.Module):
             padding = kv_proj_kernel_size // 2
             if self.need_q:
                 self.proj_q = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size,
-                                        stride=1, padding=padding, bias=False)
+                                        stride=kv_proj_stride, padding=padding, bias=False)
             if self.need_k:
                 self.proj_k = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size,
-                                        stride=1, padding=padding, bias=False)
+                                        stride=kv_proj_stride, padding=padding, bias=False)
             if self.need_v:
                 self.proj_v = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size,
-                                        stride=1, padding=padding, bias=False)
+                                        stride=kv_proj_stride, padding=padding, bias=False)
 
         elif kv_proj_type == "head_gate":
             # Linear projection + t-conditioned per-head gating applied before projection.
@@ -866,14 +868,17 @@ class EncoderKVProjection(nn.Module):
         return out.reshape(B, N, -1)
     
     def _project_conv(self, feat: torch.Tensor, proj: nn.Module) -> torch.Tensor:
-        """Project using conv: (B, N, D_in) -> (B, N, D_out), with spatial reshape"""
+        """Project a square token grid with conv, optionally changing its resolution."""
         B, N, D = feat.shape
         H = W = int(N ** 0.5)
+        if H * W != N:
+            raise ValueError(f"Conv KV projection requires square token count, got N={N}")
         # (B, N, D) -> (B, D, H, W)
         feat_2d = feat.reshape(B, H, W, D).permute(0, 3, 1, 2).contiguous()
-        out_2d = proj(feat_2d)  # (B, D_out, H, W)
-        # (B, D_out, H, W) -> (B, N, D_out)
-        return out_2d.permute(0, 2, 3, 1).reshape(B, N, -1)
+        out_2d = proj(feat_2d)
+        # Strided projectors may change the token grid (e.g. VAE 32x32 -> SiT 16x16).
+        out_h, out_w = out_2d.shape[-2:]
+        return out_2d.permute(0, 2, 3, 1).reshape(B, out_h * out_w, -1)
     
     def _modulate(self, proj_out: torch.Tensor, adaLN: nn.Module, c: torch.Tensor) -> torch.Tensor:
         """FiLM modulation conditioned on t: zero-init -> identity at start.
@@ -896,7 +901,10 @@ class EncoderKVProjection(nn.Module):
         enc_gated = enc_tensor * gate[:, :, None, None]  # (B, enc_heads, N, enc_head_dim)
         flat = enc_gated.transpose(1, 2).reshape(B, N, self.enc_dim)  # (B, N, enc_dim)
         projected = self._project_linear_or_mlp(norm(flat), proj)     # (B, N, sit_dim)
-        return projected.reshape(B, N, self.sit_heads, self.sit_head_dim).transpose(1, 2)
+        projected_tokens = projected.shape[1]
+        return projected.reshape(
+            B, projected_tokens, self.sit_heads, self.sit_head_dim
+        ).transpose(1, 2)
 
     def _project_component(self, enc_tensor: torch.Tensor, norm: nn.Module, proj: nn.Module) -> torch.Tensor:
         """Project a single Q/K/V component: (B, enc_heads, N, enc_head_dim) -> (B, sit_heads, N, sit_head_dim)"""
@@ -908,7 +916,10 @@ class EncoderKVProjection(nn.Module):
         elif self.kv_proj_type == "conv":
             projected = self._project_conv(norm(flat), proj)
         
-        return projected.reshape(B, N, self.sit_heads, self.sit_head_dim).transpose(1, 2)
+        projected_tokens = projected.shape[1]
+        return projected.reshape(
+            B, projected_tokens, self.sit_heads, self.sit_head_dim
+        ).transpose(1, 2)
     
     def forward(
         self,
@@ -1051,3 +1062,29 @@ class VAEEncoderKVExtractor:
     def remove_hooks(self):
         for h in self.hooks:
             h.remove()
+
+
+class VAEEncoderMidBlock2Extractor:
+    """Expose the globally contextualized VAE ``mid.block_2`` output as memory."""
+
+    def __init__(self, vae_encoder, num_layers: int = 1):
+        self.encoder = vae_encoder
+        self.num_layers = num_layers
+        self._feature = None
+        self.hook = vae_encoder.mid.block_2.register_forward_hook(self._capture)
+
+    def _capture(self, module, inputs, output):
+        self._feature = output
+
+    @torch.no_grad()
+    def __call__(self, images):
+        self._feature = None
+        self.encoder(images)
+        if self._feature is None:
+            raise RuntimeError("VAE mid.block_2 output was not captured")
+        feature = self._feature.flatten(2).transpose(1, 2).unsqueeze(1).contiguous()
+        feature = feature.detach()  # (B, 1, 1024, 512)
+        return [(None, feature, feature) for _ in range(self.num_layers)]
+
+    def remove_hooks(self):
+        self.hook.remove()
