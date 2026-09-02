@@ -731,7 +731,9 @@ class ConvResidualMLP5(nn.Module):
 
     def __init__(self, in_dim: int, out_dim: int, kernel_size: int, stride: int):
         super().__init__()
-        padding = kernel_size // 2
+        # Patch embedding uses non-overlapping k=stride windows.  Odd kernels
+        # retain same-style padding for the existing overlapping projector.
+        padding = 0 if kernel_size == stride else kernel_size // 2
         self.downsample = nn.Conv2d(
             in_dim, out_dim, kernel_size=kernel_size,
             stride=stride, padding=padding, bias=False,
@@ -771,7 +773,7 @@ class ConvResidualMLP3(nn.Module):
 
     def __init__(self, in_dim: int, out_dim: int, kernel_size: int, stride: int):
         super().__init__()
-        padding = kernel_size // 2
+        padding = 0 if kernel_size == stride else kernel_size // 2
         self.downsample = nn.Conv2d(
             in_dim, out_dim, kernel_size=kernel_size,
             stride=stride, padding=padding, bias=False,
@@ -892,7 +894,10 @@ class EncoderKVProjection(nn.Module):
 
         elif kv_proj_type == "conv":
             self.kv_proj_kernel_size = kv_proj_kernel_size
-            padding = kv_proj_kernel_size // 2
+            padding = (
+                0 if kv_proj_kernel_size == kv_proj_stride
+                else kv_proj_kernel_size // 2
+            )
             if self.need_q:
                 self.proj_q = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size,
                                         stride=kv_proj_stride, padding=padding, bias=False)
