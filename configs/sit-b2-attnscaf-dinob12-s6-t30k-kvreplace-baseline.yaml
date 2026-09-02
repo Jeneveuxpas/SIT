@@ -1,6 +1,6 @@
-# Normal-generation baseline for the VAE mid.block_2 oracle comparison.
-# 0--30K: SiT-B/2 block 6 uses projected DINOv2-B layer-12 K/V.
-# Sampling uses native SiT K/V, with no paired clean-image reference.
+# Paired-reference DINO oracle for the VAE mid.block_2 oracle comparison.
+# During both training and sampling, SiT-B/2 block 6 uses projected
+# DINOv2-B layer-12 K/V from the matched clean reference image.
 model: SiT-B/2-EncoderKV
 num-classes: 1000
 encoder-depth: 10
