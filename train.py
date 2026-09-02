@@ -394,7 +394,8 @@ def main(args):
     in_channels = 4
     # Load encoders only when a raw-image branch is active.
     use_latent_kv = args.use_kv and args.scaffold_feature_source == "latent"
-    use_vae_kv = args.use_kv and args.scaffold_feature_source == "vae_attn"
+    use_vae_kv = args.use_kv and args.scaffold_feature_source in ("vae_attn", "vae_attn_spatial")
+    use_vae_attn_spatial = args.use_kv and args.scaffold_feature_source == "vae_attn_spatial"
     use_vae_mid_feature = (
         args.use_kv and args.scaffold_feature_source == "vae_mid_block2"
     )
@@ -422,9 +423,12 @@ def main(args):
         # sd-vae f8 mid-block attention: 512 ch, single head, 32x32 grid,
         # space-to-depth by p = (res/8) / sit_grid -> 512*p^2 dims/token.
         enc_heads = 1
-        _vae_mid_grid = args.resolution // 8
-        _p = _vae_mid_grid // (latent_size // latent_patch_size)
-        enc_dim = 512 * _p * _p
+        if use_vae_attn_spatial:
+            enc_dim = 512
+        else:
+            _vae_mid_grid = args.resolution // 8
+            _p = _vae_mid_grid // (latent_size // latent_patch_size)
+            enc_dim = 512 * _p * _p
     elif use_vae_mid_feature:
         # Contextual VAE mid.block_2 feature before posterior compression.
         # The stride-2 convolutional K/V projector maps its 32x32 grid to 16x16.
@@ -515,6 +519,7 @@ def main(args):
             vae.encoder,
             target_grid=latent_size // latent_patch_size,
             num_layers=len(sit_layer_indices),
+            token_mode="spatial" if use_vae_attn_spatial else "patchify",
         )
     if use_vae_mid_feature:
         from models.encoder_adapter import VAEEncoderMidBlock2Extractor
@@ -897,7 +902,7 @@ def main(args):
                         ]
                     elif kv_active and use_vae_kv:
                         if raw_image is None:
-                            raise ValueError("scaffold-feature-source vae_attn requires raw images.")
+                            raise ValueError("VAE attention scaffold source requires raw images.")
                         vae_input = raw_image.to(device, dtype=torch.float32) / 127.5 - 1.0
                         with accelerator.autocast():
                             enc_kv_list = vae_kv_extractor(vae_input)
@@ -1237,7 +1242,7 @@ def parse_args(input_args=None):
                              "(kv, default), the attention residual branch (residual), or a "
                              "literal replacement of the selected block hidden state (hidden)")
     parser.add_argument("--scaffold-feature-source", type=str, default="attn_input",
-                        choices=["attn_input", "attn_output", "repa", "final_feature", "latent", "vae_attn", "vae_mid_block2"],
+                        choices=["attn_input", "attn_output", "repa", "final_feature", "latent", "vae_attn", "vae_attn_spatial", "vae_mid_block2"],
                         help="Encoder source used by the scaffold: selected attention "
                              "input/output, REPA's final x_norm_patchtokens for residual/hidden "
                              "controls, or final_feature projected into K/V memory")
@@ -1405,7 +1410,7 @@ def parse_args(input_args=None):
                 "--scaffold-interface kv and --kv-replace-mode kv"
             )
     if args.scaffold_interface == "kv" and args.scaffold_feature_source not in (
-        "attn_input", "final_feature", "latent", "vae_attn", "vae_mid_block2"
+        "attn_input", "final_feature", "latent", "vae_attn", "vae_attn_spatial", "vae_mid_block2"
     ):
         parser.error(
             "--scaffold-interface kv supports scaffold-feature-source "

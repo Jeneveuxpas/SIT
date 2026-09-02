@@ -1149,7 +1149,7 @@ class VAEEncoderKVExtractor:
 
     def __init__(self, vae_encoder, target_grid: int = 16, num_layers: int = 1,
                  token_mode: str = "patchify"):
-        assert token_mode in ("patchify", "pool")
+        assert token_mode in ("patchify", "pool", "spatial")
         self.encoder = vae_encoder
         self.attn = vae_encoder.mid.attn_1
         self.target_grid = target_grid
@@ -1169,6 +1169,8 @@ class VAEEncoderKVExtractor:
 
     def _to_tokens(self, t):
         B, C, H, W = t.shape
+        if self.token_mode == "spatial":
+            return t.flatten(2).transpose(1, 2).unsqueeze(1).contiguous()
         if H == self.target_grid and W == self.target_grid:
             return t.flatten(2).transpose(1, 2).unsqueeze(1).contiguous()
         if self.token_mode == "pool":
