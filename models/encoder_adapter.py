@@ -671,7 +671,7 @@ class EncoderKVExtractor(nn.Module):
         return kv_list, cls_token
 
 
-KV_PROJ_TYPES = ["linear", "mlp", "conv", "head_gate"]
+KV_PROJ_TYPES = ["linear", "mlp", "conv", "conv_mlp5", "head_gate"]
 KV_NORM_TYPES = ["none", "layernorm", "rmsnorm", "zscore", "zscore_token", "batchnorm", "k_rms_v_layer"]
 
 
@@ -721,6 +721,51 @@ def build_kv_mlp(in_dim: int, out_dim: int, hidden_dim: int = None):
     )
 
 
+class ConvResidualMLP5(nn.Module):
+    """Spatial downsampling followed by a five-linear residual token MLP.
+
+    The convolution performs the required 32x32 -> 16x16 grid conversion.  The
+    five linear layers then learn the nonlinear VAE-feature -> attention-memory
+    mapping independently for each projected component (K and V).
+    """
+
+    def __init__(self, in_dim: int, out_dim: int, kernel_size: int, stride: int):
+        super().__init__()
+        padding = kernel_size // 2
+        self.downsample = nn.Conv2d(
+            in_dim, out_dim, kernel_size=kernel_size,
+            stride=stride, padding=padding, bias=False,
+        )
+        self.post_norm = nn.LayerNorm(out_dim)
+        self.input_proj = nn.Linear(out_dim, out_dim)  # linear 1
+        self.block1_norm = nn.LayerNorm(out_dim)
+        self.block1_fc1 = nn.Linear(out_dim, out_dim)  # linear 2
+        self.block1_fc2 = nn.Linear(out_dim, out_dim)  # linear 3
+        self.block2_norm = nn.LayerNorm(out_dim)
+        self.block2_fc1 = nn.Linear(out_dim, out_dim)  # linear 4
+        self.block2_fc2 = nn.Linear(out_dim, out_dim)  # linear 5
+
+        # Start each residual branch as identity while retaining a trainable
+        # nonlinear input projection from the first update.
+        nn.init.zeros_(self.block1_fc2.weight)
+        nn.init.zeros_(self.block1_fc2.bias)
+        nn.init.zeros_(self.block2_fc2.weight)
+        nn.init.zeros_(self.block2_fc2.bias)
+
+    def forward(self, feat_2d: torch.Tensor) -> torch.Tensor:
+        x = self.downsample(feat_2d)
+        batch, channels, height, width = x.shape
+        x = x.permute(0, 2, 3, 1).reshape(batch, height * width, channels)
+        x = F.gelu(self.input_proj(self.post_norm(x)))
+        residual = x
+        x = self.block1_fc2(F.gelu(self.block1_fc1(self.block1_norm(x))))
+        x = residual + x
+        residual = x
+        x = self.block2_fc2(F.gelu(self.block2_fc1(self.block2_norm(x))))
+        x = residual + x
+        return x.reshape(batch, height, width, channels).permute(0, 3, 1, 2).contiguous()
+
+
 KV_REPLACE_MODES = ["kv", "k", "v", "qkv", "qk", "q"]
 
 
@@ -732,6 +777,7 @@ class EncoderKVProjection(nn.Module):
     - "linear": Simple linear projection (default)
     - "mlp": Multi-layer perceptron
     - "conv": 2D convolution
+    - "conv_mlp5": Strided convolution plus five-linear residual token MLP
     
     Supports multiple normalization types before projection.
     
@@ -826,6 +872,20 @@ class EncoderKVProjection(nn.Module):
                 self.proj_v = nn.Conv2d(enc_dim, sit_dim, kernel_size=kv_proj_kernel_size,
                                         stride=kv_proj_stride, padding=padding, bias=False)
 
+        elif kv_proj_type == "conv_mlp5":
+            if self.need_q:
+                self.proj_q = ConvResidualMLP5(
+                    enc_dim, sit_dim, kv_proj_kernel_size, kv_proj_stride
+                )
+            if self.need_k:
+                self.proj_k = ConvResidualMLP5(
+                    enc_dim, sit_dim, kv_proj_kernel_size, kv_proj_stride
+                )
+            if self.need_v:
+                self.proj_v = ConvResidualMLP5(
+                    enc_dim, sit_dim, kv_proj_kernel_size, kv_proj_stride
+                )
+
         elif kv_proj_type == "head_gate":
             # Linear projection + t-conditioned per-head gating applied before projection.
             # gate = 1 + linear(silu(c)), zero-init -> all ones at start (identity).
@@ -913,7 +973,7 @@ class EncoderKVProjection(nn.Module):
         
         if self.kv_proj_type in ("linear", "mlp"):
             projected = self._project_linear_or_mlp(norm(flat), proj)
-        elif self.kv_proj_type == "conv":
+        elif self.kv_proj_type in ("conv", "conv_mlp5"):
             projected = self._project_conv(norm(flat), proj)
         
         projected_tokens = projected.shape[1]

@@ -1200,8 +1200,8 @@ def parse_args(input_args=None):
     parser.add_argument("--kv-final-scale", type=float, default=None,
                         help="Multiplier used after kv-decay-end-step (defaults to kv-decay-end-scale)")
     parser.add_argument("--kv-proj-type", type=str, default="linear",
-                        choices=["linear", "mlp", "conv", "head_gate"],
-                        help="Projection type for Encoder K/V: linear, mlp, conv, or head_gate")
+                        choices=["linear", "mlp", "conv", "conv_mlp5", "head_gate"],
+                        help="Projection type for Encoder K/V: linear, mlp, conv, conv_mlp5, or head_gate")
     parser.add_argument("--kv-proj-hidden-dim", type=int, default=None,
                         help="Hidden dimension for MLP projection (default: max(enc_dim, sit_dim))")
     parser.add_argument("--kv-proj-kernel-size", type=int, default=1,
@@ -1361,8 +1361,10 @@ def parse_args(input_args=None):
         parser.error("--kv-stop-fade-steps must be >= 0")
     if args.kv_proj_stride < 1:
         parser.error("--kv-proj-stride must be >= 1")
-    if args.kv_proj_stride != 1 and args.kv_proj_type != "conv":
-        parser.error("--kv-proj-stride other than 1 requires --kv-proj-type conv")
+    if args.kv_proj_stride != 1 and args.kv_proj_type not in ("conv", "conv_mlp5"):
+        parser.error(
+            "--kv-proj-stride other than 1 requires --kv-proj-type conv or conv_mlp5"
+        )
     if args.repa_stop_fade_steps < 0:
         parser.error("--repa-stop-fade-steps must be >= 0")
     if args.transition_steps < 0:
@@ -1414,10 +1416,10 @@ def parse_args(input_args=None):
                 "--scaffold-feature-source vae_mid_block2 requires "
                 "--scaffold-interface kv and --kv-replace-mode kv"
             )
-        if args.kv_proj_type != "conv" or args.kv_proj_stride != 2:
+        if args.kv_proj_type not in ("conv", "conv_mlp5") or args.kv_proj_stride != 2:
             parser.error(
                 "--scaffold-feature-source vae_mid_block2 requires "
-                "--kv-proj-type conv and --kv-proj-stride 2"
+                "--kv-proj-type conv/conv_mlp5 and --kv-proj-stride 2"
             )
     if (
         args.scaffold_interface in ("residual", "hidden")
