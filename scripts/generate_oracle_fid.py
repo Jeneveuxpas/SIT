@@ -231,6 +231,7 @@ def main(args):
         vae_mid_feature_extractor = VAEEncoderMidBlock2Extractor(
             source_vae.encoder,
             num_layers=len(metadata["enc_layers"]),
+            norm_out_silu=metadata["vae_mid_norm_out_silu"],
         )
 
     rank_indices = list(range(rank, count, world_size))

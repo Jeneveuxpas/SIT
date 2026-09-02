@@ -484,6 +484,7 @@ def main(args):
         kv_proj_kernel_size=args.kv_proj_kernel_size,
         kv_proj_stride=args.kv_proj_stride,
         kv_norm_type=args.kv_norm_type,
+        kv_post_norm_type=args.kv_post_norm_type,
         kv_zscore_alpha=args.kv_zscore_alpha,
         kv_replace_mode=args.kv_replace_mode,
         kv_memory_mode=args.kv_memory_mode,
@@ -520,6 +521,7 @@ def main(args):
         vae_mid_feature_extractor = VAEEncoderMidBlock2Extractor(
             vae.encoder,
             num_layers=len(sit_layer_indices),
+            norm_out_silu=args.vae_mid_norm_out_silu,
         )
     latents_stats = torch.load("pretrained_models/sdvae-ft-mse-f8d4-latents-stats.pt", map_location=device, weights_only=False)
     latents_scale = latents_stats['latents_scale'].to(device).view(1, -1, 1, 1)
@@ -1211,6 +1213,9 @@ def parse_args(input_args=None):
     parser.add_argument("--kv-norm-type", type=str, default="none",
                         choices=["none", "layernorm", "rmsnorm", "zscore", "zscore_token", "batchnorm", "k_rms_v_layer"],
                         help="Normalization type for K/V: zscore=per-spatial, zscore_token=per-token, k_rms_v_layer=K RMSNorm + V LayerNorm")
+    parser.add_argument("--kv-post-norm-type", type=str, default="none",
+                        choices=["none", "layernorm", "rmsnorm", "zscore", "zscore_token", "batchnorm", "k_rms_v_layer"],
+                        help="Final normalization after K/V projection; k_rms_v_layer applies K RMSNorm and V LayerNorm")
     parser.add_argument("--kv-zscore-alpha", type=float, default=1.0, 
                         help="Alpha for z-score normalization: (x - alpha * mean) / std")
     parser.add_argument("--kv-replace-mode", type=str, default="kv",
@@ -1236,6 +1241,8 @@ def parse_args(input_args=None):
                         help="Encoder source used by the scaffold: selected attention "
                              "input/output, REPA's final x_norm_patchtokens for residual/hidden "
                              "controls, or final_feature projected into K/V memory")
+    parser.add_argument("--vae-mid-norm-out-silu", action=argparse.BooleanOptionalAction, default=False,
+                        help="Apply the VAE encoder norm_out and SiLU to captured mid.block_2 features")
     parser.add_argument("--encoder-patch-shuffle", action=argparse.BooleanOptionalAction, default=False,
                         help="Shuffle patches of the preprocessed encoder input before extracting scaffold K/V")
     parser.add_argument("--encoder-patch-shuffle-grid", type=int, default=0,

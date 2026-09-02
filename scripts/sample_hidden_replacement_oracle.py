@@ -325,6 +325,7 @@ def load_oracle_model(
         kv_proj_kernel_size=int(get_arg(saved_args, "kv_proj_kernel_size", 1)),
         kv_proj_stride=int(get_arg(saved_args, "kv_proj_stride", 1)),
         kv_norm_type=get_arg(saved_args, "kv_norm_type", "none"),
+        kv_post_norm_type=get_arg(saved_args, "kv_post_norm_type", "none"),
         kv_zscore_alpha=float(get_arg(saved_args, "kv_zscore_alpha", 1.0)),
         kv_replace_mode=get_arg(saved_args, "kv_replace_mode", "kv"),
         kv_memory_mode=get_arg(saved_args, "kv_memory_mode", "replace"),
@@ -356,6 +357,9 @@ def load_oracle_model(
         "uses_latent_source": uses_latent_source,
         "uses_vae_attn_source": uses_vae_attn_source,
         "uses_vae_mid_feature_source": uses_vae_mid_feature_source,
+        "vae_mid_norm_out_silu": bool(
+            get_arg(saved_args, "vae_mid_norm_out_silu", False)
+        ),
         "kv_memory_mode": get_arg(saved_args, "kv_memory_mode", "replace"),
         "enc_layers": [index + 1 for index in enc_layer_indices],
         "sit_layers": [index + 1 for index in sit_layer_indices],

@@ -834,6 +834,7 @@ class EncoderKVProjection(nn.Module):
         kv_proj_kernel_size: int = 3,
         kv_proj_stride: int = 1,
         kv_norm_type: str = "layernorm",
+        kv_post_norm_type: str = "none",
         kv_zscore_alpha: float = 1.0,
         kv_replace_mode: str = "kv",
         kv_use_adaln: bool = False,
@@ -841,6 +842,7 @@ class EncoderKVProjection(nn.Module):
         super().__init__()
         assert kv_proj_type in KV_PROJ_TYPES, f"kv_proj_type must be one of {KV_PROJ_TYPES}, got {kv_proj_type}"
         assert kv_norm_type in KV_NORM_TYPES, f"kv_norm_type must be one of {KV_NORM_TYPES}, got {kv_norm_type}"
+        assert kv_post_norm_type in KV_NORM_TYPES, f"kv_post_norm_type must be one of {KV_NORM_TYPES}, got {kv_post_norm_type}"
         assert kv_replace_mode in KV_REPLACE_MODES, f"kv_replace_mode must be one of {KV_REPLACE_MODES}, got {kv_replace_mode}"
         
         self.enc_dim = enc_dim
@@ -852,6 +854,7 @@ class EncoderKVProjection(nn.Module):
         self.kv_proj_type = kv_proj_type
         self.kv_proj_stride = kv_proj_stride
         self.kv_norm_type = kv_norm_type
+        self.kv_post_norm_type = kv_post_norm_type
         self.kv_replace_mode = kv_replace_mode
         self.kv_use_adaln = kv_use_adaln
         
@@ -873,6 +876,19 @@ class EncoderKVProjection(nn.Module):
             self.k_norm = component_norm("k")
         if self.need_v:
             self.v_norm = component_norm("v")
+
+        def post_component_norm(component: str) -> nn.Module:
+            norm_type = kv_post_norm_type
+            if kv_post_norm_type == "k_rms_v_layer":
+                norm_type = "rmsnorm" if component == "k" else "layernorm"
+            return build_kv_norm(norm_type, sit_dim, alpha=kv_zscore_alpha)
+
+        if self.need_q:
+            self.q_post_norm = post_component_norm("q")
+        if self.need_k:
+            self.k_post_norm = post_component_norm("k")
+        if self.need_v:
+            self.v_post_norm = post_component_norm("v")
 
         # Build projection layers based on type
         if kv_proj_type == "linear":
@@ -986,6 +1002,13 @@ class EncoderKVProjection(nn.Module):
         flat = flat * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
         return flat.reshape(B, N, H, D).transpose(1, 2)
 
+    def _post_normalize(self, proj_out: torch.Tensor, norm: nn.Module) -> torch.Tensor:
+        """Normalize final projected memory over the complete SiT channel axis."""
+        B, H, N, D = proj_out.shape
+        flat = proj_out.transpose(1, 2).reshape(B, N, H * D)
+        flat = norm(flat)
+        return flat.reshape(B, N, H, D).transpose(1, 2)
+
     def _project_component_head_gate(
         self, enc_tensor: torch.Tensor, norm: nn.Module, proj: nn.Module,
         head_gate: nn.Module, c: torch.Tensor,
@@ -1068,6 +1091,15 @@ class EncoderKVProjection(nn.Module):
                 k_proj = self._modulate(k_proj, self.adaLN_k, c)
             if v_proj is not None:
                 v_proj = self._modulate(v_proj, self.adaLN_v, c)
+
+        # Final output normalization is intentionally after the projector and
+        # optional AdaLN so the tensors entering attention have controlled scale.
+        if q_proj is not None:
+            q_proj = self._post_normalize(q_proj, self.q_post_norm)
+        if k_proj is not None:
+            k_proj = self._post_normalize(k_proj, self.k_post_norm)
+        if v_proj is not None:
+            v_proj = self._post_normalize(v_proj, self.v_post_norm)
 
         # Stage 2: Detach projection (no gradient through projection layer)
         if stage == 2:
@@ -1164,9 +1196,10 @@ class VAEEncoderKVExtractor:
 class VAEEncoderMidBlock2Extractor:
     """Expose the globally contextualized VAE ``mid.block_2`` output as memory."""
 
-    def __init__(self, vae_encoder, num_layers: int = 1):
+    def __init__(self, vae_encoder, num_layers: int = 1, norm_out_silu: bool = False):
         self.encoder = vae_encoder
         self.num_layers = num_layers
+        self.norm_out_silu = norm_out_silu
         self._feature = None
         self.hook = vae_encoder.mid.block_2.register_forward_hook(self._capture)
 
@@ -1179,7 +1212,11 @@ class VAEEncoderMidBlock2Extractor:
         self.encoder(images)
         if self._feature is None:
             raise RuntimeError("VAE mid.block_2 output was not captured")
-        feature = self._feature.flatten(2).transpose(1, 2).unsqueeze(1).contiguous()
+        feature_2d = self._feature
+        if self.norm_out_silu:
+            # This matches the VAE encoder path immediately before conv_out.
+            feature_2d = F.silu(self.encoder.norm_out(feature_2d))
+        feature = feature_2d.flatten(2).transpose(1, 2).unsqueeze(1).contiguous()
         feature = feature.detach()  # (B, 1, 1024, 512)
         return [(None, feature, feature) for _ in range(self.num_layers)]
 
