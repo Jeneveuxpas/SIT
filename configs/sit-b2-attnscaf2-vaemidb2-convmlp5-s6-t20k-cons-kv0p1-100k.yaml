@@ -1,6 +1,6 @@
 # Normal two-stage training with the best VAE mid.block_2 oracle projector.
-# 0--30K: clean VAE memory replaces block-6 K/V.
-# 30--100K: native K/V are used and aligned to detached VAE memory (lambda=2).
+# 0--20K: clean VAE memory replaces block-6 K/V.
+# 20--100K: native K/V are used and aligned to detached VAE memory (lambda=0.1).
 model: SiT-B/2-EncoderKV
 num-classes: 1000
 encoder-depth: 10
@@ -17,13 +17,13 @@ enc-type: dinov2-b
 enc-layer-indices: "12"
 sit-layer-indices: "6"
 
-stage1-steps: 30000
+stage1-steps: 20000
 transition-steps: 0
 transition-schedule: cosine
 transition-blend-mode: output
 kv-stop-step: -1
 align-mode: kv_mse
-distill-coeff: 2.0
+distill-coeff: 0.1
 distill-warmup-steps: 0
 kv-distill-snr-gamma: 1.0
 kv-distill-min-weight: 1.0
