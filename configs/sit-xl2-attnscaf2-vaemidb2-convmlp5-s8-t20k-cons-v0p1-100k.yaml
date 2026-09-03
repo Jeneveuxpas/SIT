@@ -23,7 +23,7 @@ transition-schedule: cosine
 transition-blend-mode: output
 kv-stop-step: -1
 align-mode: kv_mse
-distill-coeff: 0.1
+distill-coeff: 1.0
 distill-warmup-steps: 0
 kv-distill-snr-gamma: 1.0
 kv-distill-min-weight: 1.0
