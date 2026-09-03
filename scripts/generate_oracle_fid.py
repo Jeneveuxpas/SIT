@@ -224,6 +224,7 @@ def main(args):
             source_vae.encoder,
             target_grid=metadata["latent_size"] // 2,
             num_layers=len(metadata["enc_layers"]),
+            token_mode="spatial" if metadata.get("uses_vae_attn_spatial_source", False) else "patchify",
         )
     vae_mid_feature_extractor = None
     if metadata["uses_vae_mid_feature_source"]:
@@ -279,7 +280,12 @@ def main(args):
                 for layer_kv in encoder_kv
             ]
             for _, keys, values in encoder_kv:
-                if keys.shape[2] != expected_tokens or values.shape[2] != expected_tokens:
+                # Spatial VAE-attention memory is intentionally still 32x32;
+                # conv_mlp{3,5} reduces it to the SiT 16x16 grid inside the model.
+                if (
+                    not metadata.get("uses_vae_attn_spatial_source", False)
+                    and (keys.shape[2] != expected_tokens or values.shape[2] != expected_tokens)
+                ):
                     raise ValueError(
                         f"VAE K/V token count does not match SiT: "
                         f"K={keys.shape[2]}, V={values.shape[2]}, expected={expected_tokens}"

@@ -233,11 +233,11 @@ def load_oracle_model(
             f"feature sources, got {feature_source!r}"
         )
     if interface == "kv" and feature_source not in (
-        "attn_input", "final_feature", "latent", "vae_attn", "vae_mid_block2"
+        "attn_input", "final_feature", "latent", "vae_attn", "vae_attn_spatial", "vae_mid_block2"
     ):
         raise ValueError(
             "K/V oracle inference supports attn_input, final_feature, latent, or "
-            "vae_attn, or vae_mid_block2 sources, "
+            "vae_attn, vae_attn_spatial, or vae_mid_block2 sources, "
             f"got {feature_source!r}"
         )
 
@@ -245,7 +245,8 @@ def load_oracle_model(
     latent_size = resolution // 8
     enc_type = get_arg(saved_args, "enc_type", "dinov2-b")
     uses_latent_source = interface == "kv" and feature_source == "latent"
-    uses_vae_attn_source = interface == "kv" and feature_source == "vae_attn"
+    uses_vae_attn_source = interface == "kv" and feature_source in ("vae_attn", "vae_attn_spatial")
+    uses_vae_attn_spatial_source = interface == "kv" and feature_source == "vae_attn_spatial"
     uses_vae_mid_feature_source = (
         interface == "kv" and feature_source == "vae_mid_block2"
     )
@@ -294,7 +295,7 @@ def load_oracle_model(
             raise ValueError(
                 f"VAE grid {vae_grid} is not divisible by SiT grid {sit_grid}"
             )
-        encoder_kv_dim = 512 * (vae_grid // sit_grid) ** 2
+        encoder_kv_dim = 512 if uses_vae_attn_spatial_source else 512 * (vae_grid // sit_grid) ** 2
         encoder_heads = 1
     elif uses_vae_mid_feature_source:
         encoder_kv_dim = 512
@@ -356,6 +357,7 @@ def load_oracle_model(
         "feature_source": feature_source,
         "uses_latent_source": uses_latent_source,
         "uses_vae_attn_source": uses_vae_attn_source,
+        "uses_vae_attn_spatial_source": uses_vae_attn_spatial_source,
         "uses_vae_mid_feature_source": uses_vae_mid_feature_source,
         "vae_mid_norm_out_silu": bool(
             get_arg(saved_args, "vae_mid_norm_out_silu", False)
