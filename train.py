@@ -1423,10 +1423,10 @@ def parse_args(input_args=None):
         if args.kv_replace_mode != "kv":
             parser.error("--scaffold-feature-source latent currently requires --kv-replace-mode kv")
     if args.scaffold_feature_source == "vae_mid_block2":
-        if args.scaffold_interface != "kv" or args.kv_replace_mode != "kv":
+        if args.scaffold_interface != "kv" or args.kv_replace_mode not in ("kv", "k", "v"):
             parser.error(
                 "--scaffold-feature-source vae_mid_block2 requires "
-                "--scaffold-interface kv and --kv-replace-mode kv"
+                "--scaffold-interface kv and --kv-replace-mode kv/k/v"
             )
         if args.kv_proj_type not in ("conv", "conv_mlp3", "conv_mlp5") or args.kv_proj_stride != 2:
             parser.error(
