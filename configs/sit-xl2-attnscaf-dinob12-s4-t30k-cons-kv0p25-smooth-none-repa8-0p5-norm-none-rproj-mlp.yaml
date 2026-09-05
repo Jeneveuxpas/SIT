@@ -35,7 +35,8 @@ sit-layer-indices: "4"
 stage1-steps: 30000
 transition-steps: 0
 
-kv-stop-step: -1
+kv-stop-step: 300000
+kv-stop-fade-steps: 30000
 align-mode: kv_mse
 distill-coeff: 0.25
 distill-warmup-steps: 0
@@ -73,8 +74,8 @@ batch-size: 256
 # Training
 # ============================================================================
 epochs: 1400
-max-train-steps: 400000
-checkpointing-steps: 50000
+max-train-steps: 2000000
+checkpointing-steps: 500000
 sampling-steps: 100000
 gradient-accumulation-steps: 1
 learning-rate: 1e-4
