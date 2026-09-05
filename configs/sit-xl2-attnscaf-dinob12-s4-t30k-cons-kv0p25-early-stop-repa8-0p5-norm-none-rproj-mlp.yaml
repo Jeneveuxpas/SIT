@@ -41,8 +41,8 @@ proj-coeff: "0.5"
 projection-loss-type: cosine_repa
 spnorm-method: none
 zscore-alpha: 0.6
-repa-stop-step: -1
-repa-stop-fade-steps: 0
+repa-stop-step: 300000
+repa-stop-fade-steps: 30000
 
 data-dir: /dev/shm/data
 resolution: 256
