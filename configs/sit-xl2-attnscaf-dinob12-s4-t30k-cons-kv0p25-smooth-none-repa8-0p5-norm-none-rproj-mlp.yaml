@@ -35,8 +35,7 @@ sit-layer-indices: "4"
 stage1-steps: 30000
 transition-steps: 0
 
-kv-stop-step: 300000
-kv-stop-fade-steps: 30000
+kv-stop-step: -1
 align-mode: kv_mse
 distill-coeff: 0.25
 distill-warmup-steps: 0
