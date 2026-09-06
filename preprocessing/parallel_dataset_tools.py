@@ -37,17 +37,29 @@ def _discover_folder(source: str, max_images: Optional[int]) -> list[tuple[str, 
     PIL.Image.init()
     source = os.path.abspath(source)
     input_images: list[str] = []
+    discovered = 0
+    scan_progress = tqdm(desc="scan", unit="images", mininterval=1.0)
 
     def recurse(root: str) -> None:
+        nonlocal discovered
         with os.scandir(root) as entries:
             for entry in entries:
                 path = os.path.join(root, entry.name)
                 if entry.is_file() and is_image_ext(path):
                     input_images.append(path)
+                    discovered += 1
+                    if discovered % 1024 == 0:
+                        scan_progress.update(1024)
                 elif entry.is_dir():
                     recurse(path)
 
-    recurse(source)
+    try:
+        recurse(source)
+    finally:
+        scan_progress.update(discovered - scan_progress.n)
+        scan_progress.close()
+
+    click.echo(f"Sorting and indexing {len(input_images)} discovered images...")
     input_images.sort()
     if max_images is not None:
         input_images = input_images[:max_images]
@@ -74,7 +86,9 @@ def _discover_folder(source: str, max_images: Optional[int]) -> list[tuple[str, 
             class_to_idx = {name: idx for idx, name in enumerate(class_names)}
             labels = {rel: class_to_idx[top] for rel, top in top_levels.items()}
 
-    return [(path, labels.get(relative[path])) for path in input_images]
+    result = [(path, labels.get(relative[path])) for path in input_images]
+    click.echo(f"Indexed {len(result)} images; starting parallel workers.")
+    return result
 
 
 def _output_name(idx: int, latent: bool) -> str:
@@ -224,22 +238,33 @@ def convert(source: str, dest: str, max_images: Optional[int], transform: Option
         raise click.ClickException("Parallel convert currently requires a source directory")
     dest = _prepare_dest(dest, resume)
     entries = _discover_folder(source, max_images)
-    tasks = ((idx, path, label) for idx, (path, label) in enumerate(entries))
     rows: list[tuple[str, Optional[int]]] = []
     expected_size = resolution
+    # Executor.map() eagerly submits the entire iterable on Python <= 3.13.
+    # Submitting 1.28M individual futures can consume hours and excessive RAM,
+    # so feed the pool using small bounded windows instead.
+    window_size = max(256, workers * 8)
 
     with ProcessPoolExecutor(
         max_workers=workers,
         initializer=_init_convert_worker,
         initargs=(dest, transform, resolution, resume),
     ) as pool:
-        results = pool.map(_convert_one, tasks, chunksize=1)
-        for archive_name, label, size in tqdm(results, total=len(entries), desc="convert"):
-            if expected_size is None:
-                expected_size = size
-            elif size != expected_size:
-                raise click.ClickException(f"Mismatched image size: expected {expected_size}, got {size}")
-            rows.append((archive_name, label))
+        progress = tqdm(total=len(entries), desc="convert", unit="images")
+        for start in range(0, len(entries), window_size):
+            stop = min(start + window_size, len(entries))
+            window = [
+                (idx, entries[idx][0], entries[idx][1])
+                for idx in range(start, stop)
+            ]
+            for archive_name, label, size in pool.map(_convert_one, window, chunksize=1):
+                if expected_size is None:
+                    expected_size = size
+                elif size != expected_size:
+                    raise click.ClickException(f"Mismatched image size: expected {expected_size}, got {size}")
+                rows.append((archive_name, label))
+                progress.update(1)
+        progress.close()
 
     _write_metadata(dest, rows)
     click.echo(f"Wrote {len(rows)} images to {dest}")
@@ -278,9 +303,22 @@ def encode(source: str, dest: str, model_url: str, gpus: str, batch_size: int, m
         initializer=_init_encode_worker,
         initargs=(model_url, dest, resume, device_queue),
     ) as pool:
-        results = pool.map(_encode_batch, _batches(entries, batch_size), chunksize=1)
-        for batch_rows in tqdm(results, total=total_batches, desc="encode"):
-            rows.extend(batch_rows)
+        progress = tqdm(total=total_batches, desc="encode", unit="batches")
+        batches_per_window = max(8, len(gpu_ids) * 4)
+        all_batches = _batches(entries, batch_size)
+        while True:
+            window = []
+            for _ in range(batches_per_window):
+                try:
+                    window.append(next(all_batches))
+                except StopIteration:
+                    break
+            if not window:
+                break
+            for batch_rows in pool.map(_encode_batch, window, chunksize=1):
+                rows.extend(batch_rows)
+                progress.update(1)
+        progress.close()
 
     _write_metadata(dest, rows)
     click.echo(f"Wrote {len(rows)} latent moments to {dest}")
