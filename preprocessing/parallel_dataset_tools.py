@@ -32,6 +32,9 @@ from encoders import StabilityVAEEncoder
 
 def _discover_folder(source: str, max_images: Optional[int]) -> list[tuple[str, Optional[int]]]:
     """Return image paths and labels in the same sorted order as dataset_tools.py."""
+    # PIL populates Image.EXTENSION lazily.  Without this call, is_image_ext()
+    # can reject every file (notably ImageNet's uppercase .JPEG files).
+    PIL.Image.init()
     source = os.path.abspath(source)
     input_images: list[str] = []
 
