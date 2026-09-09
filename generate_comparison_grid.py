@@ -1,5 +1,5 @@
 """
-generate_comparison_grid_v2.py
+generate_comparison_grid.py
 -------------------------------
 Generate a publication-quality comparison grid figure.
 
@@ -10,14 +10,15 @@ Layout (same as Figure 8 style):
 
 You provide:
   - 6 checkpoints: 3 for method A + 3 for method B
-  - 6 class labels and 6 seeds (paired 1:1)
+  - class labels and seeds, paired 1:1 by default; optionally their full
+    Cartesian product for checkpoint cherry-picking
 
 Usage example:
 
-    CUDA_VISIBLE_DEVICES=0 python generate_comparison_grid_v3.py \
-    --method-a-label "iREPA" \
-    --method-b-label "AttnScaf" \
-    --method-a-ckpts /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0100000.pt /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0200000.pt /workspace/SIT/iREPA-collections/0400000.pt \
+    CUDA_VISIBLE_DEVICES=0 python generate_comparison_grid.py \
+    --method-a-label "REPA" \
+    --method-b-label "REPI" \
+    --method-a-ckpts /workspace/code/SIT/exps/irepa_conv_1.0/checkpoints/0100000.pt /workspace/iREPA/ldm/exps/irepa_conv_1.0/checkpoints/0200000.pt /workspace/SIT/iREPA-collections/0400000.pt \
     --method-b-ckpts /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0100000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0200000.pt /workspace/SIT/exps/conv_3_kv_2.0/checkpoints/0400000.pt \
     --ckpt-labels 100K 200K 400K \
     --class-labels 335 31 511 200 417 127 \
@@ -47,9 +48,9 @@ from models.sit import SiT_models
 from models.autoencoder import VAE_F8D4
 from samplers import euler_sampler, euler_maruyama_sampler
 
-══════════════════════════════════════════════════════════════
- Model helpers
-══════════════════════════════════════════════════════════════
+# ============================================================================
+# Model helpers
+# ============================================================================
 
 def load_vae(device):
     """Load SD-VAE and latent normalisation stats."""
@@ -102,9 +103,9 @@ def load_model(ckpt_path, model_name, device, resolution=256):
     model.eval()
     return model
 
-══════════════════════════════════════════════════════════════
- Sampling
-══════════════════════════════════════════════════════════════
+# ============================================================================
+# Sampling
+# ============================================================================
 
 @torch.no_grad()
 def generate_image(model, vae, latents_scale, latents_bias,
@@ -150,9 +151,9 @@ def generate_image(model, vae, latents_scale, latents_bias,
 
     return Image.fromarray(samples[0])
 
-══════════════════════════════════════════════════════════════
- Grid layout & plotting (ECCV publication style)
-══════════════════════════════════════════════════════════════
+# ============================================================================
+# Grid layout & plotting (ECCV publication style)
+# ============================================================================
 
 def make_grid_figure(
     images,          # images[method_idx][ckpt_idx][group_idx] = PIL.Image
@@ -290,11 +291,10 @@ def make_grid_figure(
                             pad=2,
                         )
 
-            # Group title above first method row (skip group 0 — arrow goes there)
+            # Group title above first method row.  Include the first group too:
+            # it is essential when using the grid to cherry-pick cls/seed pairs.
             if m_idx == 0:
                 for local_grp, grp_idx in enumerate(range(grp_start, grp_end)):
-                    if super_row == 0 and local_grp == 0:
-                        continue  # arrow replaces title for first group
                     col_start = gs_col(local_grp, 0)
                     col_end   = gs_col(local_grp, n_ckpts - 1)
                     ax_span = fig.add_subplot(
@@ -335,7 +335,7 @@ def make_grid_figure(
     bbox_l = _arrow_ax_left.get_position()
     bbox_r = _arrow_ax_right.get_position()
 
-    arrow_y = bbox_l.y1 + 0.06  # just above the ckpt labels
+    arrow_y = bbox_l.y1 + 0.18  # above checkpoint and cls/seed labels
     arrow_x0 = bbox_l.x0
     arrow_x1 = bbox_r.x1
 
@@ -361,9 +361,9 @@ def make_grid_figure(
     plt.close(fig)
     print(f"  Saved → {save_path}")
 
-══════════════════════════════════════════════════════════════
- Helpers
-══════════════════════════════════════════════════════════════
+# ============================================================================
+# Helpers
+# ============================================================================
 
 IMAGENET_NAMES = {
     0: "tench", 1: "goldfish", 2: "great white shark", 7: "hen",
@@ -390,9 +390,9 @@ IMAGENET_NAMES = {
 def imagenet_classname(class_id: int) -> str:
     return IMAGENET_NAMES.get(class_id, f"cls{class_id}")
 
-══════════════════════════════════════════════════════════════
- Main
-══════════════════════════════════════════════════════════════
+# ============================================================================
+# Main
+# ============================================================================
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -416,13 +416,16 @@ def parse_args():
                         metavar="LABEL",
                         help="Display labels for each checkpoint column")
 
-    # ── Class labels and seeds (paired 1:1) ───────────────────
+    # ── Class labels and seeds ────────────────────────────────
     parser.add_argument("--class-labels", type=int, nargs="+", required=True,
                         metavar="CLS",
                         help="ImageNet class IDs, e.g. 207 88 2 400 849 325")
     parser.add_argument("--seeds", type=int, nargs="+", required=True,
                         metavar="S",
                         help="Seeds paired 1:1 with class-labels, e.g. 0 1 2 42 72 142")
+    parser.add_argument("--all-combinations", action="store_true",
+                        help="Generate every class-label × seed pair instead of "
+                             "pairing the two lists 1:1; ideal for cherry-picking.")
 
     # ── Grid layout ──────────────────────────────────────────
     parser.add_argument("--groups-per-row", type=int, default=3,
@@ -459,14 +462,19 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Validate: class-labels and seeds must have the same length
-    if len(args.class_labels) != len(args.seeds):
+    # By default labels and seeds are paired.  Cherry-picking needs every
+    # label/seed combination, which is enabled explicitly to retain legacy use.
+    if not args.all_combinations and len(args.class_labels) != len(args.seeds):
         raise ValueError(
             f"Number of class-labels ({len(args.class_labels)}) must equal "
             f"number of seeds ({len(args.seeds)}). They are paired 1:1."
         )
 
-    combos = list(zip(args.class_labels, args.seeds))
+    if args.all_combinations:
+        import itertools
+        combos = list(itertools.product(args.class_labels, args.seeds))
+    else:
+        combos = list(zip(args.class_labels, args.seeds))
     n_groups = len(combos)
     n_ckpts  = 3
 
