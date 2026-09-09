@@ -37,7 +37,7 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
+import matplotlib.gridspec as gridspec  
 from PIL import Image
 
 # ──────────────────────────────────────────────────────────────
@@ -163,9 +163,9 @@ def make_grid_figure(
     save_path,
     groups_per_row=3,
     dpi=300,
-    fig_width=13.5,    # Large figure; shrink in LaTeX with \includegraphics[width=\textwidth]
+    fig_width=5.5,     # Render near the final paper width to preserve font sizes.
     font_family="STIXGeneral",
-    fontsize=13,
+    fontsize=9,
 ):
     """
     Draw the comparison grid matching Figure 8 style.
@@ -194,6 +194,8 @@ def make_grid_figure(
     # --- Font configuration (ECCV style) ---
     plt.rcParams.update({
         "font.family": font_family,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
     })
 
     n_ckpts   = len(ckpt_labels)
@@ -206,7 +208,7 @@ def make_grid_figure(
     n_cols_total = groups_per_row * n_ckpts
 
     # Derive cell_w from fig_width
-    row_label_margin = 0.6
+    row_label_margin = 0.3
     cell_w = (fig_width - row_label_margin) / n_cols_total
     cell_h = cell_w  # keep cells square
 
@@ -287,7 +289,7 @@ def make_grid_figure(
                     if m_idx == 0 and super_row == 0:
                         ax.set_title(
                             ckpt_labels[ckpt_idx],
-                            fontsize=fontsize + 2, fontweight="normal",
+                            fontsize=fontsize, fontweight="normal",
                             pad=2,
                         )
 
@@ -335,7 +337,8 @@ def make_grid_figure(
     bbox_l = _arrow_ax_left.get_position()
     bbox_r = _arrow_ax_right.get_position()
 
-    arrow_y = bbox_l.y1 + 0.18  # above checkpoint and cls/seed labels
+    # Physical point offsets remain consistent at different figure sizes.
+    arrow_y = bbox_l.y1 + (fontsize + 9) / (72 * fig_h)
     arrow_x0 = bbox_l.x0
     arrow_x1 = bbox_r.x1
 
@@ -351,10 +354,10 @@ def make_grid_figure(
 
     # "Training Iteration" text centered on the arrow
     fig.text(
-        (arrow_x0 + arrow_x1) / 2, arrow_y + 0.01,
+        (arrow_x0 + arrow_x1) / 2, arrow_y + 3 / (72 * fig_h),
         "Training Iteration",
         ha="center", va="bottom",
-        fontsize=fontsize + 1, fontweight="normal",
+        fontsize=fontsize, fontweight="normal",
     )
 
     plt.savefig(save_path, dpi=dpi, bbox_inches="tight", pad_inches=0.04)
@@ -449,13 +452,13 @@ def parse_args():
     parser.add_argument("--out", type=str, default="comparison_grid_v2.pdf",
                         help="Output file path (.pdf or .png)")
     parser.add_argument("--dpi", type=int, default=300)
-    parser.add_argument("--fig-width", type=float, default=13.5,
-                        help="Total figure width in inches. Default 13.5 (large, "
-                             "rescale in LaTeX). ECCV textwidth=6.7.")
+    parser.add_argument("--fig-width", type=float, default=5.5,
+                        help="Figure width in inches (default 5.5). Match the "
+                             "final LaTeX figure width to preserve font sizes.")
     parser.add_argument("--font", default="STIXGeneral",
                         help="Font name, e.g. 'STIXGeneral', 'DejaVu Sans', 'Arial'")
     parser.add_argument("--fontsize", type=float, default=9,
-                        help="Base font size in pt (default 9). ECCV: try 8-9.")
+                        help="Font size in pt at the requested figure width (default 9).")
 
     return parser.parse_args()
 
