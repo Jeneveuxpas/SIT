@@ -278,7 +278,10 @@ def make_grid_figure(
                             _arrow_ax_right = ax
 
                     img = images[m_idx][ckpt_idx][grp_idx]
-                    ax.imshow(np.array(img))
+                    # Keep the generated pixels unchanged in PDF output.  The
+                    # default antialiased interpolation can look soft after a
+                    # PDF viewer performs another round of downsampling.
+                    ax.imshow(np.array(img), interpolation="none", resample=False)
                     ax.set_xticks([])
                     ax.set_yticks([])
 
