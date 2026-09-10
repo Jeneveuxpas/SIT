@@ -214,7 +214,7 @@ def make_grid_figure(
 
     # Build height_ratios: insert gap rows between super-rows
     # e.g. for 2 super-rows × 2 methods:  [1, 1, gap, 1, 1]
-    super_row_gap = 0.03  # relative to one cell row
+    super_row_gap = 0.01  # relative to one cell row
     height_ratios = []
     for sr in range(n_super_rows):
         if sr > 0:
@@ -232,7 +232,7 @@ def make_grid_figure(
     fig = plt.figure(figsize=(fig_w, fig_h))
 
     # Build width_ratios with small gaps between groups
-    gap_ratio = 0.08  # small gap between column groups
+    gap_ratio = 0.01  # gap between class/seed groups
     width_ratios = []
     for grp_i in range(groups_per_row):
         if grp_i > 0:
@@ -245,7 +245,7 @@ def make_grid_figure(
         width_ratios=width_ratios,
         height_ratios=height_ratios,
         left=0.06, right=0.99, top=gs_top, bottom=gs_bottom,
-        wspace=0.02, hspace=0.01,
+        wspace=0.01, hspace=0.01,
     )
 
     def gs_col(local_grp, ckpt_idx):
@@ -341,7 +341,7 @@ def make_grid_figure(
     bbox_r = _arrow_ax_right.get_position()
 
     # Physical point offsets remain consistent at different figure sizes.
-    arrow_y = bbox_l.y1 + (fontsize + 9) / (72 * fig_h)
+    arrow_y = bbox_l.y1 + (fontsize + 6) / (72 * fig_h)
     arrow_x0 = bbox_l.x0
     arrow_x1 = bbox_r.x1
 
